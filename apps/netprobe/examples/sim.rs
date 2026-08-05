@@ -5,7 +5,7 @@
 //! moment a question is about speed it has to go back to the phone.
 
 fn main() {
-    if let Err(e) = symbian_sim::run(netprobe::Netprobe::new()) {
+    if let Err(e) = symbian_sim::run(netprobe::NetProbe::new()) {
         eprintln!("{e}");
         std::process::exit(1);
     }

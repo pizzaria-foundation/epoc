@@ -514,6 +514,7 @@ CShimAppUi::~CShimAppUi()
     /* Compiled in only when the app opted into networking, because shim_net.cpp is
      * only compiled then — see the source selection in tools/symbuild. */
     ShimNetCleanup();
+    ShimWorkCleanup();
 #endif
     if (iControl)
         {

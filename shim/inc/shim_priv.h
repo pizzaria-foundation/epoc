@@ -100,6 +100,10 @@ void ShimFilesCleanup();
  * the build; the call site in shim_app.cpp is guarded by the same SHIM_USE_NET. */
 #ifdef SHIM_USE_NET
 void ShimNetCleanup();
+
+/* Wait for any running job and close the worker thread. Waiting is the point: the job
+ * holds pointers into buffers the caller is about to free. */
+void ShimWorkCleanup();
 #endif
 
 #endif /* SHIM_PRIV_H */

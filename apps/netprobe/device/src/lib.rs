@@ -1,12 +1,12 @@
-//! The device build.
+//! The device build of the network probe.
 //!
-//! `entry!` supplies the allocator, the panic handler, the three `extern "C"` functions
-//! the shim calls, the event translation and the theme. See crates/symbian-app for why
-//! the lang items have to be expanded here rather than provided by a library.
+//! `work = modpow_job` is what puts the worker thread into the link. Without a caller
+//! reaching `shim_work_submit`, `--gc-sections` sweeps the whole thread facility and the
+//! build succeeds while proving nothing — which it did, once.
 
 #![no_std]
 #![no_main]
 
 extern crate alloc;
 
-symbian_app::entry!(netprobe::Netprobe::new());
+symbian_app::entry!(netprobe::NetProbe::new(), work = netprobe::modpow_job);

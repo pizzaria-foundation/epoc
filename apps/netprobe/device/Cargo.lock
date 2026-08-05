@@ -6,7 +6,9 @@ version = 4
 name = "netprobe"
 version = "0.1.0"
 dependencies = [
+ "symbian-crypto",
  "symbian-gfx",
+ "symbian-sys",
  "symbian-ui",
 ]
 
@@ -26,6 +28,10 @@ dependencies = [
  "symbian-sys",
  "symbian-ui",
 ]
+
+[[package]]
+name = "symbian-crypto"
+version = "0.1.0"
 
 [[package]]
 name = "symbian-gfx"

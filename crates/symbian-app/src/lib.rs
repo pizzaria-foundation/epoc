@@ -183,6 +183,15 @@ pub fn to_key_event(e: &sys::ShimEvent) -> Option<KeyEvent> {
     Some(KeyEvent { key, mods, repeat: e.c > 0 })
 }
 
+/// The default `work` handler: there is no worker.
+///
+/// A real function rather than an absent symbol, because the shim's C++ references
+/// `rust_work` unconditionally and `--no-undefined` would refuse a link that left it
+/// dangling.
+pub fn no_work(_opcode: i32, _input: &[u8], _out: &mut [u8]) -> i32 {
+    sys::SHIM_ERR_NOT_SUPPORTED
+}
+
 /// Copy a shim event into the toolkit's platform-independent view of one.
 pub fn to_raw_event(e: &sys::ShimEvent) -> symbian_ui::RawEvent {
     symbian_ui::RawEvent {
@@ -230,16 +239,71 @@ pub fn present(f: impl FnOnce(&mut Canvas<'_>)) -> bool {
 /// ```ignore
 /// symbian_app::entry!(MyApp::new());
 /// symbian_app::entry!(MyApp::new(), palette = symbian_ui::Palette::S60);
+/// symbian_app::entry!(MyApp::new(), work = my_worker_fn);
 /// ```
 ///
 /// Expands to the allocator, the panic handler and `rust_app_start` / `rust_step` /
 /// `rust_app_stop`. The app must implement [`symbian_ui::App`].
+///
+/// # `work`
+///
+/// The function the worker thread calls, for computation too slow to run in `rust_step`
+/// — see `shim_work_submit`. It must have the signature
+///
+/// ```ignore
+/// fn(opcode: i32, input: &[u8], out: &mut [u8]) -> i32
+/// ```
+///
+/// and it runs on **another thread with its own heap**. Nothing it allocates may
+/// outlive it: a temporary is fine, but a value that escapes to the GUI thread would be
+/// freed on the wrong heap, which is silent corruption rather than a clean failure.
+/// That is why it takes an output slice rather than returning one.
+///
+/// It is a free function, not a method, precisely so it cannot reach app state.
+///
+/// Omitted, it becomes a stub returning `SHIM_ERR_NOT_SUPPORTED`, so an app that
+/// submits no jobs needs no `work` and links no worker.
 #[macro_export]
 macro_rules! entry {
     ($ctor:expr) => {
-        $crate::entry!($ctor, palette = $crate::symbian_ui::Palette::DARK);
+        $crate::entry!(
+            $ctor,
+            palette = $crate::symbian_ui::Palette::DARK,
+            work = $crate::no_work
+        );
     };
     ($ctor:expr, palette = $palette:expr) => {
+        $crate::entry!($ctor, palette = $palette, work = $crate::no_work);
+    };
+    ($ctor:expr, work = $work:path) => {
+        $crate::entry!($ctor, palette = $crate::symbian_ui::Palette::DARK, work = $work);
+    };
+    ($ctor:expr, palette = $palette:expr, work = $work:path) => {
+        /// Called on the worker thread. The slices are built from the caller's pointers,
+        /// which the ABI requires to stay alive until SHIM_EV_WORK_DONE.
+        #[no_mangle]
+        pub extern "C" fn rust_work(
+            opcode: i32,
+            input: *const u8,
+            in_len: i32,
+            out: *mut u8,
+            out_len: i32,
+        ) -> i32 {
+            // SAFETY: the shim validated that a non-zero length comes with a non-null
+            // pointer, and the ABI requires both buffers to outlive the job.
+            let input: &[u8] = if in_len > 0 {
+                unsafe { core::slice::from_raw_parts(input, in_len as usize) }
+            } else {
+                &[]
+            };
+            let out: &mut [u8] = if out_len > 0 {
+                unsafe { core::slice::from_raw_parts_mut(out, out_len as usize) }
+            } else {
+                &mut []
+            };
+            $work(opcode, input, out)
+        }
+
         #[global_allocator]
         static __SYMBIAN_HEAP: $crate::Heap = $crate::Heap;
 
