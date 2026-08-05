@@ -54,6 +54,7 @@ for length in range(0, 301):
     d = series(length, 0x12345678)
     print(f"sha256 {length} {hashlib.sha256(d).hexdigest()}")
     print(f"sha1 {length} {hashlib.sha1(d).hexdigest()}")
+    print(f"sha512 {length} {hashlib.sha512(d).hexdigest()}")
 
 for klen in [0, 1, 20, 63, 64, 65, 100, 131]:
     k = series(klen, 0xABCD0001)
@@ -61,6 +62,7 @@ for klen in [0, 1, 20, 63, 64, 65, 100, 131]:
         d = series(dlen, 0x0000BEEF)
         print(f"hmac256 {klen} {dlen} {hmaclib.new(k, d, hashlib.sha256).hexdigest()}")
         print(f"hmac1 {klen} {dlen} {hmaclib.new(k, d, hashlib.sha1).hexdigest()}")
+        print(f"hmac512 {klen} {dlen} {hmaclib.new(k, d, hashlib.sha512).hexdigest()}")
 
 for klen in [16, 24, 32]:
     k = series(klen, 0x55550003)

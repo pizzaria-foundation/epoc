@@ -9,7 +9,9 @@
 //!
 //! See the header it prints for the reference command.
 
-use symbian_crypto::{aes::Aes, bignum, hmac, ige, sha1::sha1, sha256::sha256};
+use symbian_crypto::{
+    aes::Aes, bignum, hmac, ige, inflate, sha1::sha1, sha256::sha256, sha512::sha512,
+};
 
 /// xorshift32, so the inputs vary without needing a random source and the series is the
 /// same on both sides of the comparison.
@@ -36,6 +38,7 @@ fn main() {
         let d = series(len, 0x1234_5678);
         println!("sha256 {len} {}", hex(&sha256(&d)));
         println!("sha1 {len} {}", hex(&sha1(&d)));
+        println!("sha512 {len} {}", hex(&sha512(&d)));
     }
 
     // HMAC over key lengths either side of the 64-byte block boundary, which is the case
@@ -46,6 +49,7 @@ fn main() {
             let d = series(dlen, 0x0000_BEEF);
             println!("hmac256 {klen} {dlen} {}", hex(&hmac::hmac_sha256(&k, &d)));
             println!("hmac1 {klen} {dlen} {}", hex(&hmac::hmac_sha1(&k, &d)));
+            println!("hmac512 {klen} {dlen} {}", hex(&hmac::hmac_sha512(&k, &d)));
         }
     }
 
@@ -91,5 +95,45 @@ fn main() {
             bignum::modpow(&base, &exp, &m, &mut out).unwrap();
             println!("modpow {} {} {} {}", hex(&n), hex(&base), hex(&exp), hex(&out));
         }
+    }
+
+    // inflate: the reference side *compresses*, this side decompresses, and the check is that
+    // the plaintext comes back. That is the only shape available — nothing here compresses, so
+    // there is no output to compare byte for byte.
+    //
+    // The compressed blobs arrive on stdin as hex, one per line, so the two programs stay
+    // independent: this one never has to know zlib's framing choices.
+    let mut input = String::new();
+    std::io::Read::read_to_string(&mut std::io::stdin(), &mut input).unwrap();
+    let mut seen = 0usize;
+    for line in input.lines() {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        // Report a malformed line rather than skipping it. Skipping in silence is how nine
+        // empty-input cases went unchecked while the run said everything passed — an empty
+        // hex field made the line two columns instead of three.
+        if parts.len() != 3 {
+            println!("inflate <malformed line, {} columns> FAILED", parts.len());
+            continue;
+        }
+        let (label, want_hex, blob_hex) = (parts[0], parts[1], parts[2]);
+        let want_hex = if want_hex == "-" { "" } else { want_hex };
+        let unhex = |s: &str| -> Vec<u8> {
+            (0..s.len())
+                .step_by(2)
+                .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+                .collect()
+        };
+        let blob = unhex(blob_hex);
+        seen += 1;
+        match inflate::inflate_any(&blob, 1 << 22) {
+            Ok(out) => println!(
+                "inflate {label} {}",
+                if hex(&out) == want_hex { "ok" } else { "WRONG" }
+            ),
+            Err(e) => println!("inflate {label} FAILED {e:?}"),
+        }
+    }
+    if seen > 0 {
+        println!("inflate <total> {seen} cases");
     }
 }

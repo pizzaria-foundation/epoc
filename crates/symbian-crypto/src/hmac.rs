@@ -17,6 +17,7 @@
 
 use crate::sha1::{self, Sha1};
 use crate::sha256::{self, Sha256};
+use crate::sha512::{self, Sha512};
 
 /// A hash this module can build an HMAC over.
 ///
@@ -65,9 +66,11 @@ impl Hash for Sha1 {
     }
 }
 
-/// The largest block length in use, so the padded key can live on the stack.
-const MAX_BLOCK: usize = 64;
-const MAX_DIGEST: usize = 32;
+/// The largest block length in use, so the padded key can live on the stack. SHA-512's block
+/// is 128 bytes, twice SHA-256's — which is exactly the value an HMAC implementation is most
+/// likely to hardcode from the digest it was written for first.
+const MAX_BLOCK: usize = 128;
+const MAX_DIGEST: usize = 64;
 
 pub struct Hmac<H: Hash> {
     inner: H,
@@ -124,6 +127,32 @@ pub fn hmac_sha256(key: &[u8], data: &[u8]) -> [u8; sha256::DIGEST_LEN] {
     let mut m = Hmac::<Sha256>::new(key);
     m.update(data);
     let mut out = [0u8; sha256::DIGEST_LEN];
+    m.finish_into(&mut out);
+    out
+}
+
+impl Hash for Sha512 {
+    const BLOCK_LEN: usize = sha512::BLOCK_LEN;
+    const DIGEST_LEN: usize = sha512::DIGEST_LEN;
+
+    fn new() -> Self {
+        Sha512::new()
+    }
+
+    fn update(&mut self, data: &[u8]) {
+        Sha512::update(self, data)
+    }
+
+    fn finish_into(self, out: &mut [u8]) {
+        out[..sha512::DIGEST_LEN].copy_from_slice(&self.finish());
+    }
+}
+
+/// One-shot HMAC-SHA-512. Telegram's 2FA password check is PBKDF2 over this.
+pub fn hmac_sha512(key: &[u8], data: &[u8]) -> [u8; sha512::DIGEST_LEN] {
+    let mut m = Hmac::<Sha512>::new(key);
+    m.update(data);
+    let mut out = [0u8; sha512::DIGEST_LEN];
     m.finish_into(&mut out);
     out
 }
@@ -196,6 +225,28 @@ mod tests {
         assert_eq!(
             hex(&hmac_sha1(&[0xaa; 80], b"Test Using Larger Than Block-Size Key - Hash Key First")),
             "aa4ae5e15272d00e95705637ce8a3b55ed402112"
+        );
+    }
+
+    /// RFC 4231, the HMAC-SHA-512 cases. The 131-byte key matters most here: it is longer
+    /// than SHA-512's 128-byte block, so it gets hashed — and an implementation that kept
+    /// SHA-256's 64-byte block would hash it too, and agree by accident on nothing else.
+    #[test]
+    fn rfc4231_sha512() {
+        assert_eq!(
+            hex(&hmac_sha512(&[0x0b; 20], b"Hi There")),
+            "87aa7cdea5ef619d4ff0b4241a1d6cb02379f4e2ce4ec2787ad0b30545e17cde\
+             daa833b7d6b8a702038b274eaea3f4e4be9d914eeb61f1702e696c203a126854"
+        );
+        assert_eq!(
+            hex(&hmac_sha512(b"Jefe", b"what do ya want for nothing?")),
+            "164b7a7bfcf819e2e395fbe73b56e0a387bd64222e831fd610270cd7ea250554\
+             9758bf75c05a994a6d034f65f8f0e6fdcaeab1a34d4a6b4b636e070a38bce737"
+        );
+        assert_eq!(
+            hex(&hmac_sha512(&[0xaa; 131], b"Test Using Larger Than Block-Size Key - Hash Key First")),
+            "80b24263c7c1a3ebb71493c1dd7be8b49b46d1f41b4aeec1121b013783f8f352\
+             6b56d037e05f2598bd0fd2215d6a1e5295e64f73f63f0aec8b915a985d786598"
         );
     }
 

@@ -45,14 +45,18 @@ extern crate alloc;
 pub mod aes;
 pub mod bignum;
 pub mod hmac;
+pub mod inflate;
 pub mod ige;
 pub mod sha1;
 pub mod sha256;
+pub mod sha512;
 
 pub use aes::Aes;
 pub use bignum::{modpow, Modulus};
+pub use inflate::{inflate, inflate_any, inflate_gzip, inflate_zlib};
 pub use sha1::Sha1;
 pub use sha256::Sha256;
+pub use sha512::Sha512;
 
 /// Compare two byte slices without an early exit.
 ///

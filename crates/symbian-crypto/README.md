@@ -35,16 +35,19 @@ The tests are the specification:
 | | |
 |---|---|
 | SHA-256 | FIPS 180-4, plus the million-`a` long-message vector |
+| SHA-512 | FIPS 180-4, plus the million-`a` vector. Constants **derived** from the definition, not transcribed |
 | SHA-1 | FIPS 180-4, plus the million-`a` vector |
 | AES-128/192/256 | FIPS 197 appendix C, plus SP 800-38A block vectors |
 | HMAC-SHA-256 | RFC 4231 cases 1, 2, 3 and 6 |
 | HMAC-SHA-1 | RFC 2202 |
+| HMAC-SHA-512 | RFC 4231, including the 131-byte over-block key |
+| inflate | 81 blobs from real zlib and gzip, every level, every block type |
 | AES-IGE | vectors generated from an independent AES driving the recurrence |
 | modpow | `pow(b, e, m)` from Python, which is exact ground truth rather than another implementation |
 
-Plus a differential check: `examples/dump` and `examples/reference.py` produce 736 lines of
-digests, ciphertexts and modular exponentiations across every input length from 0 to 300 and
-every modulus size from 32 to 2048 bits, and they are byte-identical.
+Plus a differential check: `examples/dump` and `examples/reference.py` produce **1077 lines**
+of digests, ciphertexts and modular exponentiations across every input length from 0 to 300
+and every modulus size from 32 to 2048 bits, and they are byte-identical.
 The reference side uses OpenSSL through `hashlib` and pycrypto for AES. Fixed vectors pin the
 algorithm at a handful of lengths; the differential is what catches a partial-block or
 padding bug that only appears at one.
@@ -134,10 +137,44 @@ A login runs two exponentiations, so budget about a second. `rust_step` must ret
 milliseconds, so it **cannot** be called from the event pump — it needs a second thread or to
 be split across steps.
 
+## inflate
+
+DEFLATE decompression with the zlib and gzip wrappers, plus `inflate_any` which sniffs
+between the three. MTProto wraps large responses in `gzip_packed`, so a client that cannot
+inflate cannot read a dialog list.
+
+Canonical Huffman decoded bit by bit against the code-length counts, the way zlib's own
+`puff.c` reference does, rather than by building lookup tables. Slower per symbol, and the
+right trade twice: the payloads are kilobytes against a network measured in hundreds of
+milliseconds, and the table-building step is where an inflate implementation's subtle bugs
+live. There is no table to get wrong.
+
+`max_out` is **required**, not optional. A compressed stream is attacker-controlled and
+DEFLATE's ratio is unbounded — a few hundred bytes can expand to gigabytes, which on a device
+with 45 MB free is a denial of service by way of one message.
+
+### The test, and a silent skip it caught
+
+`examples/deflate_cases.py` compresses with real zlib and gzip at levels 0, 1, 6 and 9 plus
+raw deflate, over inputs chosen to reach every corner: stored blocks, fixed Huffman, dynamic
+Huffman, multi-block streams, a run whose back-reference distance is *shorter* than its length
+(a copy that reads bytes the same loop is writing — what any bulk memmove gets wrong), and a
+match at the 32 KB maximum distance.
+
+```
+python3 crates/symbian-crypto/examples/deflate_cases.py \
+  | cargo run -q --release -p symbian-crypto --example dump \
+  | grep '^inflate'
+```
+
+81 cases, all passing. The first run reported 72 with zero failures, because the nine
+empty-input cases hex-encoded to an empty field, which made the line two columns instead of
+three, and the consumer skipped short lines in silence. The consumer now reports a malformed
+line as a failure and prints its total, because a check that silently examines less than it
+claims is worse than no check.
+
 ## Still missing, for MTProto
 
-- **`inflate`**, for `gzip_packed`. `libz` has it if the handset has Open C; otherwise ~400
-  lines.
-- **SHA-512**, for the 2FA password KDF. Not needed until passwords are.
 - **`RSA_PAD`**, MTProto 2.0's padding scheme around the raw RSA primitive. Protocol work
   rather than crypto work.
+- **PBKDF2**, twenty lines over `hmac_sha512`, for when 2FA passwords matter.
