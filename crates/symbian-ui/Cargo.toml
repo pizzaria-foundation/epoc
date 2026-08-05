@@ -16,3 +16,8 @@ testing = []
 
 [dependencies]
 symbian-gfx = { workspace = true }
+# For ShimEvent, which App::handle_raw hands through unchanged. The toolkit was
+# deliberately ABI-free for a while; the cost was a second, identical RawEvent in
+# `symbian` and a field-by-field copy between them at every call site, which is worse
+# than the coupling. symbian-sys is no_std, dependency-free and builds for the host.
+symbian-sys = { workspace = true }

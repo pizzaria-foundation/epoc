@@ -34,31 +34,22 @@ use crate::theme::Theme;
 
 /// A platform event, before any interpretation.
 ///
-/// A plain copy of the shim's `ShimEvent`, redeclared here so the toolkit does not have
-/// to depend on the ABI crate. Most apps never see one: [`App::handle_raw`] defaults to
-/// ignoring them and the host translates keys into [`KeyEvent`] instead.
+/// The shim's own event type, handed through unchanged rather than copied into a
+/// toolkit-shaped one. There used to be a separate struct here, on the reasoning that a
+/// widget toolkit should not know about the ABI — and the result was two identical
+/// definitions and a field-by-field conversion wherever `symbian::net` met
+/// `App::handle_raw`. One type is worth the dependency.
 ///
-/// It exists for the two cases where translation is the wrong thing:
+/// Most apps never see one: [`App::handle_raw`] defaults to ignoring them and the host
+/// translates keys into [`KeyEvent`] instead. It exists for the two cases where
+/// translation is the wrong thing:
 ///
 /// - **diagnostics**, which need the numbers the platform actually sent. The E72's
 ///   keyboard bug was invisible for two rounds precisely because a translated view was
 ///   all anyone looked at.
 /// - **async completions** — a socket connecting, a timer firing — which are not keys and
 ///   have no `KeyEvent` to become.
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
-pub struct RawEvent {
-    pub kind: i32,
-    /// Which socket, timer or window; 0 when global.
-    pub handle: i32,
-    /// The platform error code, 0 on success.
-    pub status: i32,
-    pub a: i32,
-    pub b: i32,
-    pub c: i32,
-    pub d: i32,
-    /// Platform-native extra; for key events, the raw `iModifiers` word.
-    pub native: i32,
-}
+pub type RawEvent = symbian_sys::ShimEvent;
 
 /// An application the SDK can run, on a device or in the simulator.
 pub trait App {

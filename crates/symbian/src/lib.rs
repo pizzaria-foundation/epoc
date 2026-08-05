@@ -21,6 +21,8 @@ extern crate alloc;
 
 pub mod error;
 pub mod fs;
+pub mod net;
 
 pub use error::{Error, Result};
 pub use fs::{File, Fs, OpenMode, ShimFs};
+pub use net::{Bearer, Iap, Ipv4, Lookup, Net, Progress, RawEvent, ShimNet, TcpStream};
