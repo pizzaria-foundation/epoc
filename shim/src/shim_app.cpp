@@ -173,17 +173,30 @@ TBool FnActive()
  * letter identity is applied above it by Avkon's FEP, from the input mode of the
  * focused editor.
  *
- * We cannot get that. Declaring TCoeInputCapabilities::EAllText is not enough (tried
- * on device; no change), and the class that actually carries the input mode,
- * CAknEdwinState, is not in the public SDK — neither is EAknEditorTextInputMode as a
- * C++ enum; it exists only in eikon.rh as a resource constant. So even a full
- * MCoeFepAwareTextEditor implementation, twelve pure virtuals of it, could not say
- * "alphabetic".
+ * Declaring TCoeInputCapabilities::EAllText is not enough — tried on device, no
+ * change. What the FEP actually reads is the input mode on the focused editor's state
+ * object, CAknEdwinState (aknedsts.h), through SetCurrentInputMode.
  *
- * So we translate. Which is arguably where this belongs anyway: the FEP's job is
- * inline editing and predictive text, the Rust side already owns the caret and the
- * text buffer, and handing the FEP an editor interface would give it a second
- * opinion about both.
+ * An earlier version of this comment claimed that class was absent from the public
+ * SDK. That was wrong, and wrong for an instructive reason: the grep that "proved" it
+ * returned nothing because these headers carry a © in extended-ASCII, which makes grep
+ * treat them as binary and suppress every match in silence. `grep -a` shows the class
+ * on line 158 of aknedsts.h. See docs/device-notes.md.
+ *
+ * So the FEP path is available, and we translate anyway — a choice, not a limitation:
+ *
+ *   - The FEP's job is inline editing and predictive text. Taking it means
+ *     implementing MCoeFepAwareTextEditor, twelve pure virtuals, and handing the FEP
+ *     authority over a caret and a text buffer the Rust toolkit already owns. Two
+ *     things holding one buffer is the bug, not the wiring.
+ *   - This translation is tested on hardware. That is worth more than an untested
+ *     alternative that is architecturally tidier.
+ *
+ * What it costs is real and worth stating: the FEP would give the whole Fn layer,
+ * including symbols. Fn+Q should produce '!' and produces 'q', because only the twelve
+ * digit keys are in the table below. Fixing that our way needs a second, larger,
+ * device-specific table; fixing it the FEP's way needs the interface above. Neither is
+ * done.
  *
  * The trigger is self-identifying and needs no state: for a letter key the window
  * server *does* translate, so iCode differs from iScanCode ('e' 0x65 vs 'E' 0x45).

@@ -82,13 +82,26 @@ It is not a mistranslation. At the window server's level, that key **is** the 1 
 letter identity is applied above it by Avkon's FEP, from the input mode of the focused
 editor.
 
-**We cannot get that.** `TCoeInputCapabilities::EAllText` is not enough — tried on device,
-no change — and `CAknEdwinState`, the class that actually carries the input mode, is not in
-the public SDK. Neither is `EAknEditorTextInputMode` as a C++ enum; it exists only in
-`eikon.rh` as a resource constant. So even a full `MCoeFepAwareTextEditor` implementation,
-twelve pure virtuals of it, could not say "alphabetic".
+`TCoeInputCapabilities::EAllText` is not enough — tried on device, no change. What the FEP
+reads is the input mode on the focused editor's state object, `CAknEdwinState`, through
+`SetCurrentInputMode`.
 
-So the shim translates, and the trigger is self-identifying and needs no state: for a
+**So the shim translates, by choice.** An earlier version of this page said the FEP path was
+*impossible* because `CAknEdwinState` was absent from the public SDK. That was false — see
+the grep note below — and the correction matters, because "we had no option" and "we picked
+this" are different claims and only one of them was true.
+
+Taking the FEP means implementing `MCoeFepAwareTextEditor`, twelve pure virtuals, and giving
+the FEP authority over a caret and text buffer the Rust toolkit already owns. Two components
+holding one buffer is the bug, not the wiring. And the translation below is tested on
+hardware, which beats a tidier untested alternative.
+
+What that costs, stated rather than glossed: the FEP would supply the **whole** Fn layer.
+Fn+Q should give `!` and gives `q`, because only the twelve digit keys are in the table.
+Fixing it our way needs a second, larger, device-specific table; fixing it the FEP's way
+needs the interface above. Neither is done.
+
+The trigger is self-identifying and needs no state: for a
 letter key the window server *does* translate, so `iCode` differs from `iScanCode` (`'e'`
 0x65 vs `'E'` 0x45). For these twelve it does not. `iCode == iScanCode` plus a scan code in
 the table identifies exactly those twelve, and a device without the overlay is unaffected
@@ -158,6 +171,31 @@ there does not degrade: the E32 loader refuses to start the process, which prese
 icon doing nothing. `examples/libprobe` asks with `RLibrary::Load` instead, which is also a
 stronger test than checking the filesystem — a DLL can be present and still fail to load
 through a wrong UID, its own unsatisfied imports, or a capability we do not hold.
+
+## Searching this SDK
+
+**Always `grep -a`.** Most of these headers carry a `©` in the copyright line, encoded as
+extended-ASCII rather than UTF-8. `grep` sees a byte outside the locale's character set,
+concludes the file is binary, and **suppresses every match without saying so** — not
+"binary file matches", nothing at all. `file` calls them "Non-ISO extended-ASCII text".
+
+```
+grep -n  'class RThread' sdk/epoc32/include/e32std.h    # → nothing
+grep -an 'class RThread' sdk/epoc32/include/e32std.h    # → 3522:class RThread : ...
+```
+
+This produced a wrong conclusion that reached committed code and documentation: that the
+FEP path for the keyboard was unavailable, because a search for `CAknEdwinState` came back
+empty. The class is on line 158 of `aknedsts.h`.
+
+It is worth naming the shape, because it has now happened twice. The key probe reported
+`mod 00` for every key while masking three bits of a 32-bit word, and the inflate check
+reported 72 cases passing while silently skipping nine. In all three the tool reported
+success while examining less than it claimed — which is worse than a tool that fails, because
+a failure gets investigated.
+
+An empty search result is evidence of nothing until the search itself has been tested against
+a string you know is there.
 
 ## Host toolchain
 
