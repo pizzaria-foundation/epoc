@@ -530,6 +530,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "symbian-crypto"
+version = "0.1.0"
+
+[[package]]
 name = "symbian-gfx"
 version = "0.1.0"
 

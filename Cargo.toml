@@ -7,6 +7,7 @@ members = [
     "crates/symbian",
     "crates/symbian-sim",
     "crates/symbian-app",
+    "crates/symbian-crypto",
     "apps/telegram",
     "tools/preview",
     "tools/sim",
@@ -30,6 +31,7 @@ symbian-sys = { path = "crates/symbian-sys" }
 symbian = { path = "crates/symbian" }
 symbian-sim = { path = "crates/symbian-sim" }
 symbian-app = { path = "crates/symbian-app" }
+symbian-crypto = { path = "crates/symbian-crypto" }
 tg = { path = "apps/telegram" }
 
 # Small binaries matter a lot on a device with ~30 MB of usable RAM and a
