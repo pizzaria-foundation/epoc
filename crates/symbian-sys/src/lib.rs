@@ -61,6 +61,11 @@ pub const SHIM_EV_RECV: i32 = 21;
 pub const SHIM_EV_SENT: i32 = 22;
 pub const SHIM_EV_CLOSED: i32 = 23;
 pub const SHIM_EV_RESOLVED: i32 = 24;
+/// `RConnection` is up. `a` is the IAP the OS chose — persist it and pass it back to
+/// [`shim_net_start`] next time to connect without prompting.
+pub const SHIM_EV_NET_READY: i32 = 25;
+/// A worker-thread job finished; `status` is what `rust_work` returned.
+pub const SHIM_EV_WORK_DONE: i32 = 30;
 pub const SHIM_EV_QUIT: i32 = 90;
 
 /// Abstract key ids, mirroring `TShimKey` in `shim_app.cpp`.
@@ -115,6 +120,13 @@ pub struct ShimEvent {
     /// clean event from one carrying `EModifierNumLock`.
     pub native: i32,
 }
+
+// ------------------------------------------------------------------ network --
+
+/// Let the OS ask the user which access point to use.
+pub const SHIM_IAP_PROMPT: i32 = -1;
+/// Take the configured default without asking.
+pub const SHIM_IAP_DEFAULT: i32 = -2;
 
 // --------------------------------------------------------------------- files --
 
@@ -196,6 +208,29 @@ extern "C" {
     pub fn shim_file_delete(path: *const u16, len: i32) -> i32;
     pub fn shim_file_rename(from: *const u16, from_len: i32, to: *const u16, to_len: i32) -> i32;
     pub fn shim_file_close(handle: i32);
+
+    // network
+    pub fn shim_net_start(iap: i32, handle: *mut i32) -> i32;
+    pub fn shim_net_stop(handle: i32);
+    pub fn shim_dns_resolve(conn: i32, host: *const u16, len: i32, handle: *mut i32) -> i32;
+    pub fn shim_tcp_open(conn: i32, handle: *mut i32) -> i32;
+    pub fn shim_tcp_connect(handle: i32, ipv4: u32, port: u16) -> i32;
+    pub fn shim_tcp_send(handle: i32, buf: *const u8, len: i32) -> i32;
+    pub fn shim_tcp_recv(handle: i32, buf: *mut u8, cap: i32) -> i32;
+    pub fn shim_tcp_close(handle: i32);
+    pub fn shim_udp_open(conn: i32, handle: *mut i32) -> i32;
+    pub fn shim_udp_send_to(handle: i32, buf: *const u8, len: i32, ipv4: u32, port: u16) -> i32;
+    pub fn shim_udp_recv_from(handle: i32, buf: *mut u8, cap: i32) -> i32;
+
+    // worker thread
+    pub fn shim_work_submit(
+        opcode: i32,
+        input: *const u8,
+        in_len: i32,
+        out: *mut u8,
+        out_len: i32,
+    ) -> i32;
+    pub fn shim_work_busy() -> i32;
 
     // timers
     pub fn shim_timer_after(ms: i32, handle: *mut i32) -> i32;
@@ -290,6 +325,58 @@ mod host_stubs {
         SHIM_ERR_NOT_READY
     }
     pub unsafe fn shim_file_close(_h: i32) {}
+    pub unsafe fn shim_net_start(_iap: i32, _h: *mut i32) -> i32 {
+        SHIM_ERR_NOT_READY
+    }
+    pub unsafe fn shim_net_stop(_h: i32) {}
+    pub unsafe fn shim_dns_resolve(
+        _c: i32,
+        _host: *const u16,
+        _l: i32,
+        _h: *mut i32,
+    ) -> i32 {
+        SHIM_ERR_NOT_READY
+    }
+    pub unsafe fn shim_tcp_open(_c: i32, _h: *mut i32) -> i32 {
+        SHIM_ERR_NOT_READY
+    }
+    pub unsafe fn shim_tcp_connect(_h: i32, _ip: u32, _p: u16) -> i32 {
+        SHIM_ERR_NOT_READY
+    }
+    pub unsafe fn shim_tcp_send(_h: i32, _b: *const u8, _l: i32) -> i32 {
+        SHIM_ERR_NOT_READY
+    }
+    pub unsafe fn shim_tcp_recv(_h: i32, _b: *mut u8, _c: i32) -> i32 {
+        SHIM_ERR_NOT_READY
+    }
+    pub unsafe fn shim_tcp_close(_h: i32) {}
+    pub unsafe fn shim_udp_open(_c: i32, _h: *mut i32) -> i32 {
+        SHIM_ERR_NOT_READY
+    }
+    pub unsafe fn shim_udp_send_to(
+        _h: i32,
+        _b: *const u8,
+        _l: i32,
+        _ip: u32,
+        _p: u16,
+    ) -> i32 {
+        SHIM_ERR_NOT_READY
+    }
+    pub unsafe fn shim_udp_recv_from(_h: i32, _b: *mut u8, _c: i32) -> i32 {
+        SHIM_ERR_NOT_READY
+    }
+    pub unsafe fn shim_work_submit(
+        _op: i32,
+        _in: *const u8,
+        _il: i32,
+        _out: *mut u8,
+        _ol: i32,
+    ) -> i32 {
+        SHIM_ERR_NOT_READY
+    }
+    pub unsafe fn shim_work_busy() -> i32 {
+        0
+    }
     pub unsafe fn shim_timer_after(_ms: i32, _h: *mut i32) -> i32 {
         SHIM_ERR_NOT_SUPPORTED
     }

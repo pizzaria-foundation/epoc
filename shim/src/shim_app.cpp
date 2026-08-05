@@ -510,6 +510,11 @@ CShimAppUi::~CShimAppUi()
     rust_app_stop();
     ShimTimersCleanup();
     ShimFilesCleanup();
+#ifdef SHIM_USE_NET
+    /* Compiled in only when the app opted into networking, because shim_net.cpp is
+     * only compiled then — see the source selection in tools/symbuild. */
+    ShimNetCleanup();
+#endif
     if (iControl)
         {
         RemoveFromStack(iControl);

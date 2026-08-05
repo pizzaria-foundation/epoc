@@ -302,6 +302,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "netprobe"
+version = "0.1.0"
+dependencies = [
+ "symbian-gfx",
+ "symbian-sim",
+ "symbian-ui",
+]
+
+[[package]]
 name = "nix"
 version = "0.24.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"

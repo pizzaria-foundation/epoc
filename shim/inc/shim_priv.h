@@ -93,4 +93,13 @@ void ShimTimersCleanup();
  * rather than us. */
 void ShimFilesCleanup();
 
+/* Close every socket, resolver and bearer, and the socket server session. Sockets
+ * before bearers: a socket being closed still belongs to one.
+ *
+ * Only defined when the app set USE_NET=1, which is also what puts shim_net.cpp into
+ * the build; the call site in shim_app.cpp is guarded by the same SHIM_USE_NET. */
+#ifdef SHIM_USE_NET
+void ShimNetCleanup();
+#endif
+
 #endif /* SHIM_PRIV_H */

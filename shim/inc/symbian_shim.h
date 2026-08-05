@@ -79,6 +79,12 @@ enum ShimEventKind {
     SHIM_EV_SENT = 22,
     SHIM_EV_CLOSED = 23,
     SHIM_EV_RESOLVED = 24,
+    /* RConnection is up. `a` is the IAP id the OS actually chose, which is worth
+     * persisting: passing it back to shim_net_start next time connects with no
+     * prompt. */
+    SHIM_EV_NET_READY = 25,
+    /* A worker-thread job finished. `status` is what rust_work returned. */
+    SHIM_EV_WORK_DONE = 30,
     /* The app should exit; nothing may be queued after it. */
     SHIM_EV_QUIT = 90
 };
@@ -257,7 +263,17 @@ int64_t shim_unix_time(void);
 #define SHIM_IAP_PROMPT   (-1)
 #define SHIM_IAP_DEFAULT  (-2)
 
+/* Bring up a bearer. Returns immediately with a handle; completion is
+ * SHIM_EV_NET_READY, whose `a` carries the IAP the OS settled on.
+ *
+ * `iap` is SHIM_IAP_PROMPT to let the OS ask, SHIM_IAP_DEFAULT to take the
+ * configured default, or a positive id from a previous SHIM_EV_NET_READY. The
+ * intended shape is: prompt on first run, remember the answer, connect silently
+ * afterwards, and fall back to prompting if the saved id has gone away. */
 int32_t shim_net_start(int32_t iap, int32_t* handle);
+
+/* Releases our handle. Deliberately not RConnection::Stop(): Stop tears down the
+ * shared interface and would drop every other application's connection with it. */
 void shim_net_stop(int32_t handle);
 
 /* DNS. Completion is SHIM_EV_RESOLVED with the IPv4 address in `a`. */
@@ -271,6 +287,48 @@ int32_t shim_tcp_send(int32_t handle, const uint8_t* buf, int32_t len);
 /* Likewise until SHIM_EV_RECV, whose `a` is the byte count. */
 int32_t shim_tcp_recv(int32_t handle, uint8_t* buf, int32_t cap);
 void shim_tcp_close(int32_t handle);
+
+/* --------------------------------------------------------------------- UDP --
+ * The same RSocket with KSockDatagram, so this is the TCP path with the addresses
+ * moved from connect-time to per-message.
+ *
+ * On SHIM_EV_RECV from a UDP socket, `a` is the byte count as usual and `b` and `c`
+ * carry the sender's address and port — which a datagram socket needs and a stream
+ * socket has no use for. */
+int32_t shim_udp_open(int32_t conn, int32_t* handle);
+int32_t shim_udp_send_to(int32_t handle, const uint8_t* buf, int32_t len,
+                         uint32_t ipv4, uint16_t port);
+int32_t shim_udp_recv_from(int32_t handle, uint8_t* buf, int32_t cap);
+
+/* ---------------------------------------------------------------- worker --
+ * A second thread, for work too slow to do on the GUI thread.
+ *
+ * rust_step runs from a CIdle on the GUI thread and must return in milliseconds: a
+ * long one starves the window server, which freezes the whole phone rather than just
+ * this app. A 2048-bit modular exponentiation takes 0.4-0.6 s on this hardware, so
+ * the login handshake of any real protocol cannot happen in the pump.
+ *
+ * THE JOB MUST NOT ALLOCATE. RThread::Create gives the new thread its own heap, so
+ * memory allocated on the worker and freed on the GUI thread is a cross-heap free —
+ * silent corruption, not a clean failure. The contract is therefore that a job reads
+ * an input buffer and writes an output buffer that the *caller* allocated, and does
+ * no allocation of its own. Fixed-size arithmetic over byte slices fits; anything
+ * that builds a Vec does not.
+ *
+ * Both buffers must stay alive and untouched until SHIM_EV_WORK_DONE arrives.
+ *
+ * One job at a time. A queue here would be a scheduler, and the caller already has a
+ * better one; submitting while busy returns SHIM_ERR_IN_USE. */
+int32_t shim_work_submit(int32_t opcode, const uint8_t* in, int32_t in_len,
+                         uint8_t* out, int32_t out_len);
+
+/* Non-zero while a job is running. */
+int32_t shim_work_busy(void);
+
+/* Implemented by the application, called on the worker thread. See the allocation
+ * rule above; `symbian_app::entry!` wires this up and defaults it to a stub. */
+extern int32_t rust_work(int32_t opcode, const uint8_t* in, int32_t in_len,
+                         uint8_t* out, int32_t out_len);
 
 /* ------------------------------------------------------------------- files --
  * RFile has genuine synchronous overloads that need no active scheduler, so this

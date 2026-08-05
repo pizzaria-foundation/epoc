@@ -68,7 +68,14 @@ source "$APP/app.conf"
 # graphics context the shim blits through; efsrv/estor the file server, which
 # Avkon's resource loading needs whether or not we open a file ourselves.
 if [ "${USE_SHIM:-0}" = 1 ]; then
-  : "${SYMBIAN_LIBS:=euser apparc cone eikcore avkon ws32 fbscli bitgdi gdi fntstr efsrv estor hal}"
+  NET_LIBS=""
+  if [ "${USE_NET:-0}" = 1 ]; then
+    # esock is the socket server client, insock the IPv4 address and protocol
+    # constants, commdb TCommDbConnPref, netmeta the connection preference plumbing
+    # underneath it.
+    NET_LIBS="esock insock commdb netmeta"
+  fi
+  : "${SYMBIAN_LIBS:=euser apparc cone eikcore avkon ws32 fbscli bitgdi gdi fntstr efsrv estor hal $NET_LIBS}"
 fi
 
 BUILD="$APP/build"
@@ -125,7 +132,18 @@ fi
 SRCS=()
 for src in $CXX_SOURCES; do SRCS+=("$APP/$src"); done
 if [ "${USE_SHIM:-0}" = 1 ]; then
-  for src in "$SDK"/shim/src/*.cpp; do SRCS+=("$src"); done
+  for src in "$SDK"/shim/src/*.cpp; do
+    case "$(basename "$src")" in
+      # Opt-in, not because the code is optional but because linking it is: an app
+      # that never opens a socket should not import the socket server, and
+      # --no-undefined checks referenced symbols before --gc-sections gets a chance
+      # to sweep them, so the libraries have to be there or the file has to be out.
+      shim_net.cpp|shim_work.cpp)
+        [ "${USE_NET:-0}" = 1 ] || continue
+        ;;
+    esac
+    SRCS+=("$src")
+  done
 fi
 
 OBJS=()
@@ -167,6 +185,7 @@ if [ ${#SRCS[@]} -gt 0 ]; then
       -D__SUPPORT_CPP_EXCEPTIONS__ \
       -D__PRODUCT_INCLUDE__="<variant/${VARIANT_HRH:-symbian_os_v9.3.hrh}>" \
       -DSHIM_APP_UID3="$UID3" \
+      ${USE_NET:+$([ "$USE_NET" = 1 ] && echo -DSHIM_USE_NET)} \
       -fexceptions -fno-rtti \
       -Wall -Wno-narrowing -Wno-ctor-dtor-privacy -Wno-unknown-pragmas \
       -Wno-attributes \
