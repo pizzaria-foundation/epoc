@@ -1,0 +1,411 @@
+#!/bin/bash
+# symnew — scaffold a working Symbian app.
+#
+#   tools/symnew <name> [uid3]
+#
+# Produces a project that builds, installs and runs, so the first thing you do is see
+# something on screen rather than debug a manifest. Then you edit src/lib.rs.
+#
+# Why a generator rather than a template repository: a Symbian app needs four things to
+# agree — the UID in app.conf, in the registration resource, in the E32 header and in the
+# shim — and getting them out of step produces the least debuggable failure this platform
+# has. AppArc finds a registration for a UID no installed binary claims, so the icon
+# appears and tapping it does nothing at all: no error, no panic, no log. A generator
+# writes all four from one value.
+set -euo pipefail
+
+SDK="$(cd "$(dirname "$0")/.." && pwd)"
+NAME="${1:?usage: symnew <name> [uid3]}"
+UID3="${2:-}"
+
+case "$NAME" in
+  [a-z]*) ;;
+  *) echo "name must start with a lowercase letter: $NAME" >&2; exit 1 ;;
+esac
+case "$NAME" in
+  *[^a-z0-9_]*) echo "name must be lowercase letters, digits and underscores: $NAME" >&2; exit 1 ;;
+esac
+
+DIR="$SDK/apps/$NAME"
+[ -e "$DIR" ] && { echo "$DIR already exists" >&2; exit 1; }
+
+# Pick an unused UID in the 0xE development block if none was given. Derived from the
+# name rather than random, so re-running for the same name is idempotent and two
+# developers scaffolding the same app do not collide with each other's installs.
+if [ -z "$UID3" ]; then
+  h=$(printf '%s' "$NAME" | cksum | cut -d' ' -f1)
+  UID3=$(printf '0xE%07X' $(( h & 0xFFFFFFF )))
+fi
+
+# A four-letter resource name: rcomp's NAME directive is exactly four characters, and it
+# must be unique among installed resources on the device.
+RSSNAME=$(printf '%s' "$NAME" | tr -d 'aeiou_' | tr '[:lower:]' '[:upper:]' | cut -c1-4)
+while [ ${#RSSNAME} -lt 4 ]; do RSSNAME="${RSSNAME}X"; done
+
+# CamelCase for the Rust type.
+TYPE=$(printf '%s' "$NAME" | awk -F_ '{for(i=1;i<=NF;i++) printf toupper(substr($i,1,1)) substr($i,2)}')
+CAPTION=$(printf '%s' "$NAME" | awk -F_ '{for(i=1;i<=NF;i++) printf (i>1?" ":"") toupper(substr($i,1,1)) substr($i,2)}')
+
+mkdir -p "$DIR/src" "$DIR/data" "$DIR/device/src" "$DIR/examples"
+
+# ------------------------------------------------------------------ the app crate
+cat > "$DIR/Cargo.toml" <<EOF
+[package]
+name = "$NAME"
+description = "A Symbian application"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+symbian-ui = { path = "../../crates/symbian-ui" }
+symbian-gfx = { path = "../../crates/symbian-gfx" }
+
+# Host-only. The simulator pulls in a windowing library, which has no business anywhere
+# near the device build — keeping it here means it never gets there.
+[dev-dependencies]
+symbian-sim = { path = "../../crates/symbian-sim" }
+# `testing` gives you a Theme and a Canvas in one call, so a test of handle_key or draw is
+# three lines rather than twenty of byte-packing a font atlas.
+symbian-ui = { path = "../../crates/symbian-ui", features = ["testing"] }
+EOF
+
+cat > "$DIR/src/lib.rs" <<EOF
+//! $CAPTION.
+
+#![cfg_attr(not(test), no_std)]
+
+extern crate alloc;
+
+use symbian_ui::{
+    chrome, App, Canvas, Handled, Key, KeyEvent, Rect, Softkey, Theme,
+};
+
+pub struct $TYPE {
+    count: i32,
+    exit: bool,
+}
+
+impl $TYPE {
+    pub fn new() -> Self {
+        Self { count: 0, exit: false }
+    }
+}
+
+impl Default for $TYPE {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl App for $TYPE {
+    fn title(&self) -> &str {
+        "$CAPTION"
+    }
+
+    fn handle_key(&mut self, ev: KeyEvent, _theme: &Theme<'_>, _screen: Rect) -> Handled {
+        match ev.key {
+            Key::Up => self.count += 1,
+            Key::Down => self.count -= 1,
+            // The right softkey is Back on this platform, and on the first screen Back
+            // means exit. Never call the framework's exit yourself — set a flag and let
+            // the host do it, because Avkon owns the loop.
+            Key::Softkey(Softkey::Right) | Key::End => self.exit = true,
+            _ => return Handled::Ignored,
+        }
+        Handled::Consumed
+    }
+
+    fn should_exit(&self) -> bool {
+        self.exit
+    }
+
+    fn draw(&mut self, c: &mut Canvas<'_>, theme: &Theme<'_>) {
+        use symbian_ui::Align;
+
+        let screen = Rect::from_size(c.size());
+        let frame = chrome::Frame::split(screen, theme, true, true);
+
+        chrome::clear(c, theme);
+        chrome::title_bar(c, frame.title, theme, "$CAPTION", None);
+        chrome::softkey_bar(c, frame.softkeys, theme, [Some("Options"), None, Some("Exit")]);
+
+        // A number and a hint. Replace this with your screen.
+        let mut buf = [0u8; 16];
+        let text = fmt_i32(self.count, &mut buf);
+        c.draw_text_in(frame.content, text, theme.fonts.title, theme.palette.text, Align::Center);
+
+        let hint = Rect { y0: frame.content.y1 - 20, ..frame.content };
+        c.draw_text_in(hint, "up / down", theme.fonts.small, theme.palette.dim, Align::Center);
+    }
+}
+
+/// Format an integer without \`core::fmt\`, which on this target pulls in far more code
+/// than a two-line loop.
+fn fmt_i32(v: i32, buf: &mut [u8; 16]) -> &str {
+    let neg = v < 0;
+    let mut m = v.unsigned_abs();
+    let mut i = buf.len();
+    loop {
+        i -= 1;
+        buf[i] = b'0' + (m % 10) as u8;
+        m /= 10;
+        if m == 0 || i == 0 {
+            break;
+        }
+    }
+    if neg && i > 0 {
+        i -= 1;
+        buf[i] = b'-';
+    }
+    core::str::from_utf8(&buf[i..]).unwrap_or("?")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use symbian_ui::testing;
+
+    fn press(app: &mut $TYPE, key: Key) -> Handled {
+        testing::with_theme(symbian_ui::Palette::DARK, |theme| {
+            let ev = KeyEvent { key, mods: Default::default(), repeat: false };
+            app.handle_key(ev, theme, testing::SCREEN)
+        })
+    }
+
+    #[test]
+    fn up_and_down_move_the_count() {
+        let mut app = $TYPE::new();
+        assert_eq!(press(&mut app, Key::Up), Handled::Consumed);
+        assert_eq!(press(&mut app, Key::Up), Handled::Consumed);
+        assert_eq!(press(&mut app, Key::Down), Handled::Consumed);
+        assert_eq!(app.count, 1);
+    }
+
+    #[test]
+    fn keys_this_app_does_not_use_are_left_alone() {
+        // Returning Ignored is what lets the platform act on a key instead — and on the
+        // device that includes the red End key, which is how the user gets out.
+        let mut app = $TYPE::new();
+        assert_eq!(press(&mut app, Key::Left), Handled::Ignored);
+    }
+
+    #[test]
+    fn back_asks_to_exit_rather_than_exiting() {
+        let mut app = $TYPE::new();
+        assert!(!app.should_exit());
+        press(&mut app, Key::Softkey(Softkey::Right));
+        assert!(app.should_exit(), "Back on the first screen should ask to close");
+    }
+
+    #[test]
+    fn draw_fills_the_screen() {
+        // A widget that silently draws nothing passes every test about its return value.
+        let mut app = $TYPE::new();
+        let (_, px) = testing::with_canvas(symbian_gfx::Size::new(320, 240), |c| {
+            testing::with_theme(symbian_ui::Palette::DARK, |theme| app.draw(c, theme));
+        });
+        assert!(px.iter().any(|&p| p != 0), "draw produced an empty frame");
+    }
+
+    #[test]
+    fn formatting_covers_the_awkward_values() {
+        let mut b = [0u8; 16];
+        assert_eq!(fmt_i32(0, &mut b), "0");
+        let mut b = [0u8; 16];
+        assert_eq!(fmt_i32(-42, &mut b), "-42");
+        let mut b = [0u8; 16];
+        assert_eq!(fmt_i32(i32::MAX, &mut b), "2147483647");
+    }
+}
+EOF
+
+cat > "$DIR/examples/sim.rs" <<EOF
+//! \`cargo run -p $NAME --example sim\` — this app in a window, on your desktop.
+//!
+//! Same widgets, same rasterizer, same 320x240 canvas as the device. What it does not
+//! reproduce is timing: the device runs this from a \`CIdle\` on a 600 MHz ARM1136, so the
+//! moment a question is about speed it has to go back to the phone.
+
+fn main() {
+    if let Err(e) = symbian_sim::run($NAME::$TYPE::new()) {
+        eprintln!("{e}");
+        std::process::exit(1);
+    }
+}
+EOF
+
+# ---------------------------------------------------------------- the device crate
+cat > "$DIR/device/Cargo.toml" <<EOF
+# Its own workspace root, and it has to be: a crate that defines #[panic_handler] cannot
+# be built for the host at all, because cargo links the test harness against std, which
+# already defines it. Excluding it keeps \`cargo test --workspace\` green, and costs
+# nothing — nothing depends on this crate and it only ever builds for ARM.
+[workspace]
+
+[package]
+name = "$NAME-device"
+description = "Device entry point for $NAME"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+# The only staticlib. arm-none-symbianelf-ld links this with the C++ shim objects; Rust
+# itself never links, which keeps LLVM's total ignorance of Symbian at the object boundary.
+crate-type = ["staticlib"]
+
+[dependencies]
+$NAME = { path = ".." }
+symbian-app = { path = "../../../crates/symbian-app" }
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true
+debug = false
+overflow-checks = false
+EOF
+
+cat > "$DIR/device/src/lib.rs" <<EOF
+//! The device build.
+//!
+//! \`entry!\` supplies the allocator, the panic handler, the three \`extern "C"\` functions
+//! the shim calls, the event translation and the theme. See crates/symbian-app for why
+//! the lang items have to be expanded here rather than provided by a library.
+
+#![no_std]
+#![no_main]
+
+extern crate alloc;
+
+symbian_app::entry!($NAME::$TYPE::new());
+EOF
+
+# -------------------------------------------------------------------- the manifest
+cat > "$DIR/app.conf" <<EOF
+# Build manifest, read by tools/symbuild.
+
+NAME=$NAME
+VENDOR="RustSdkDev"
+VERSION=0,1,0
+
+# 0xE is the unprotected development block. This one value becomes three things that must
+# agree: the E32 header UID3, the UID3 in data/${NAME}_reg.rss, and KUidShimApp in the
+# shim (via -DSHIM_APP_UID3). symbuild wires all three.
+UID3=$UID3
+
+# Declare only what the binary uses. A capability an app does not need is a capability the
+# user is asked to trust for no reason — and an unsigned package declaring a protected one
+# will not install on a stock phone at all.
+CAPABILITIES=none
+
+USE_SHIM=1
+CXX_SOURCES=""
+RUST_CRATE=device
+
+HEAP=0x1000,0x200000
+STACK=0x8000
+
+# The dev handset runs a patched installserver; see tools/symbuild.
+SIGN=0
+EOF
+
+# ------------------------------------------------------------------- the resources
+cat > "$DIR/data/$NAME.rss" <<EOF
+/* The localisable resource: the caption and icon the S60 menu shows. */
+
+NAME $RSSNAME
+
+#include <eikon.rh>
+#include <appinfo.rh>
+
+RESOURCE RSS_SIGNATURE { }
+RESOURCE TBUF { buf = ""; }
+
+/* Empty on purpose: the AppUi is constructed with ENoScreenFurniture, so Avkon has no
+ * menu bar or CBA to populate — the softkey bar is drawn by the Rust toolkit. The
+ * resource is still required for Avkon to finish initialising. */
+RESOURCE EIK_APP_INFO { }
+
+RESOURCE LOCALISABLE_APP_INFO r_${NAME}_localisable_app_info
+    {
+    short_caption = "$CAPTION";
+    caption_and_icon =
+        CAPTION_AND_ICON_INFO
+            {
+            caption = "$CAPTION";
+            /* Add an icon by writing data/mkicon.py; symbuild runs it and packages the
+             * result. Zero means the shell draws a default. */
+            number_of_icons = 0;
+            };
+    }
+EOF
+
+cat > "$DIR/data/${NAME}_reg.rss" <<EOF
+/* Application registration. Installed into \\private\\10003a3f\\import\\apps\\ — that
+ * exact path is what makes the app appear in the S60 menu.
+ *
+ * 10003a3f is AppArc's own SID, not ours, and \`import\` is its writable drop-box.
+ * Installing to \\private\\10003a3f\\apps\\ instead works on the emulator and fails
+ * silently on a device: the classic "installs fine but never shows up" bug. */
+
+#include <appinfo.rh>
+#include "$NAME.rsg"
+
+UID2 KUidAppRegistrationResourceFile
+UID3 $UID3
+
+RESOURCE APP_REGISTRATION_INFO
+    {
+    app_file = "$NAME";
+    localisable_resource_file = "\\\\resource\\\\apps\\\\$NAME";
+    localisable_resource_id = R_$(printf '%s' "$NAME" | tr '[:lower:]' '[:upper:]')_LOCALISABLE_APP_INFO;
+    hidden = KAppNotHidden;
+    embeddability = KAppNotEmbeddable;
+    newfile = KAppDoesNotSupportNewFile;
+    launch = KAppLaunchInForeground;
+    }
+EOF
+
+# --------------------------------------------------------- register in the workspace
+python3 - "$SDK/Cargo.toml" "$NAME" <<'PY'
+import sys
+path, name = sys.argv[1], sys.argv[2]
+s = open(path).read()
+member = f'    "apps/{name}",\n'
+if member not in s:
+    s = s.replace('    "tools/preview",', member + '    "tools/preview",')
+dep = f'{name} = {{ path = "apps/{name}" }}\n'
+if dep not in s:
+    s = s.replace('tg = { path = "apps/telegram" }', f'tg = {{ path = "apps/telegram" }}\n{dep}'.rstrip('\n'))
+open(path, 'w').write(s)
+PY
+
+# The device crate is excluded, for the reason in its Cargo.toml.
+python3 - "$SDK/Cargo.toml" "$NAME" <<'PY'
+import sys
+path, name = sys.argv[1], sys.argv[2]
+s = open(path).read()
+entry = f'"apps/{name}/device"'
+if entry not in s:
+    s = s.replace('exclude = [', f'exclude = [{entry}, ')
+open(path, 'w').write(s)
+PY
+
+cat <<EOF
+
+created apps/$NAME
+  uid3        $UID3   (derived from the name, so re-running is idempotent)
+  resource    $RSSNAME
+  type        ${TYPE}
+
+next
+  cargo test -p $NAME
+  cargo run  -p $NAME --example sim        # see it on your desktop
+  tools/symbuild apps/$NAME                # → apps/$NAME/build/$NAME.sis
+
+then edit apps/$NAME/src/lib.rs. The device crate and the resources should not need
+touching again.
+EOF

@@ -5,6 +5,8 @@ members = [
     "crates/symbian-ui",
     "crates/symbian-sys",
     "crates/symbian",
+    "crates/symbian-sim",
+    "crates/symbian-app",
     "apps/telegram",
     "tools/preview",
     "tools/sim",
@@ -26,6 +28,8 @@ symbian-gfx = { path = "crates/symbian-gfx", default-features = false }
 symbian-ui = { path = "crates/symbian-ui", default-features = false }
 symbian-sys = { path = "crates/symbian-sys" }
 symbian = { path = "crates/symbian" }
+symbian-sim = { path = "crates/symbian-sim" }
+symbian-app = { path = "crates/symbian-app" }
 tg = { path = "apps/telegram" }
 
 # Small binaries matter a lot on a device with ~30 MB of usable RAM and a

@@ -9,6 +9,10 @@ rust-version.workspace = true
 [features]
 default = []
 std = ["symbian-gfx/std"]
+# Host test helpers: a valid one-glyph atlas and a Theme builder. Behind a feature so
+# nothing in it reaches a device binary; apps enable it under [dev-dependencies], which
+# the device build never sees at all.
+testing = []
 
 [dependencies]
 symbian-gfx = { workspace = true }

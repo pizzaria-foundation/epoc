@@ -6,6 +6,14 @@ version = 4
 name = "keyprobe-device"
 version = "0.1.0"
 dependencies = [
+ "symbian-app",
+ "symbian-ui",
+]
+
+[[package]]
+name = "symbian-app"
+version = "0.1.0"
+dependencies = [
  "symbian-gfx",
  "symbian-sys",
  "symbian-ui",

@@ -44,7 +44,7 @@ impl App {
         Self::new(Store::mock())
     }
 
-    pub fn handle_key(&mut self, ev: KeyEvent, theme: &Theme<'_>, screen_rect: Rect) -> Handled {
+    fn on_key(&mut self, ev: KeyEvent, theme: &Theme<'_>, screen_rect: Rect) -> Handled {
         match &mut self.screen {
             Screen::Chats(list) => {
                 let frame = symbian_ui::Frame::split(screen_rect, theme, true, true);
@@ -111,7 +111,7 @@ impl App {
         }
     }
 
-    pub fn draw(&mut self, c: &mut Canvas<'_>, theme: &Theme<'_>) {
+    fn paint(&mut self, c: &mut Canvas<'_>, theme: &Theme<'_>) {
         match &mut self.screen {
             Screen::Chats(list) => list.draw(c, &self.store, theme),
             Screen::Conversation(conv) => {
@@ -132,10 +132,33 @@ impl App {
     }
 }
 
+/// The SDK's application contract. Everything that runs this app — the device entry
+/// points and the host simulator — goes through here, so neither needs to know the
+/// concrete type.
+impl symbian_ui::App for App {
+    fn handle_key(&mut self, ev: KeyEvent, theme: &Theme<'_>, screen: Rect) -> Handled {
+        self.on_key(ev, theme, screen)
+    }
+
+    fn draw(&mut self, c: &mut Canvas<'_>, theme: &Theme<'_>) {
+        self.paint(c, theme)
+    }
+
+    fn should_exit(&self) -> bool {
+        self.should_exit
+    }
+
+    fn title(&self) -> &str {
+        "Telegram"
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use symbian_ui::{BitmapFont, Fonts, Key, Size, Softkey};
+    // App is imported for its methods: handle_key and draw are trait methods now, so the
+    // trait has to be in scope to call them.
+    use symbian_ui::{App as _, BitmapFont, Fonts, Key, Size, Softkey};
 
     fn atlas() -> alloc::vec::Vec<u8> {
         let chars: alloc::vec::Vec<char> = (0x20u32..0x500).filter_map(char::from_u32).collect();

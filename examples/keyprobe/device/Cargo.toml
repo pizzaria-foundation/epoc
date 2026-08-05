@@ -16,9 +16,8 @@ publish = false
 crate-type = ["staticlib"]
 
 [dependencies]
-symbian-gfx = { path = "../../../crates/symbian-gfx" }
+symbian-app = { path = "../../../crates/symbian-app" }
 symbian-ui = { path = "../../../crates/symbian-ui" }
-symbian-sys = { path = "../../../crates/symbian-sys" }
 
 [profile.release]
 opt-level = "z"

@@ -1,0 +1,19 @@
+[package]
+name = "symbian-sim"
+description = "Host simulator: runs any symbian_ui::App in a window"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+symbian-gfx = { workspace = true }
+symbian-ui = { workspace = true }
+
+# Host-only and never reaches the device. An app declares this crate under
+# [dev-dependencies] and puts its runner in examples/, so the device build never sees
+# minifb at all.
+#
+# minifb over winit+softbuffer because all this needs is "put these pixels in a window
+# and tell me about keys", and minifb is that in two calls.
+minifb = "0.28"

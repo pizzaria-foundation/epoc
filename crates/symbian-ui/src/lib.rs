@@ -42,6 +42,7 @@
 
 extern crate alloc;
 
+pub mod app;
 pub mod chrome;
 pub mod edit;
 pub mod icon;
@@ -49,8 +50,11 @@ pub mod input;
 pub mod list;
 pub mod paint;
 pub mod theme;
+#[cfg(any(test, feature = "testing"))]
+pub mod testing;
 pub mod tokens;
 
+pub use app::{App, RawEvent};
 pub use chrome::Frame;
 pub use edit::TextField;
 pub use input::{Handled, Key, KeyEvent, Modifiers, Softkey};

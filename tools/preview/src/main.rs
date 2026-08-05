@@ -4,6 +4,9 @@
 
 mod png;
 
+// handle_key and draw are trait methods; the trait must be in scope to call them.
+use symbian_ui::App as _;
+
 use symbian_gfx::{Align, BitmapFont, Canvas, Color, Font, Point, Rect, Size, E72_SCREEN};
 
 const SCALE: usize = 2;

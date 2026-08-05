@@ -1,0 +1,15 @@
+[package]
+name = "symbian-app"
+description = "Device entry points: one macro instead of 120 lines of unsafe glue per app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+symbian-gfx = { workspace = true }
+symbian-sys = { workspace = true }
+symbian-ui = { workspace = true }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_vendor, values("symbian"))'] }
