@@ -9,14 +9,14 @@ members = [
     "crates/symbian-app",
     "crates/symbian-crypto",
     "apps/telegram",
-    "apps/netprobe",
+    "examples/netprobe",
     "tools/preview",
     "tools/sim",
 ]
 # apps/telegram/device is deliberately absent: it is a no_std staticlib carrying a
 # #[panic_handler], which collides with std's when cargo builds the test harness.
 # It is its own workspace root, built only for the ARM target. See its Cargo.toml.
-exclude = ["apps/netprobe/device", "apps/telegram/device"]
+exclude = ["examples/netprobe/device", "apps/telegram/device"]
 
 [workspace.package]
 version = "0.1.0"
@@ -34,7 +34,7 @@ symbian-sim = { path = "crates/symbian-sim" }
 symbian-app = { path = "crates/symbian-app" }
 symbian-crypto = { path = "crates/symbian-crypto" }
 tg = { path = "apps/telegram" }
-netprobe = { path = "apps/netprobe" }
+netprobe = { path = "examples/netprobe" }
 
 # Small binaries matter a lot on a device with ~30 MB of usable RAM and a
 # ~100 KB-per-page demand loader. These settings apply to the device profile;

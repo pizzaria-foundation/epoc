@@ -103,7 +103,76 @@ code has to survive to the surface rather than being flattened into a generic fa
 does not exist yet" is the ordinary first-run path for a settings or session file and
 callers branch on it constantly.
 
-## Coming
+## `net`
 
-`net`, over the shim's TCP functions, once those exist on the C++ side. Same shape: a
-trait so the retry and framing logic is host-testable, with the sockets behind it.
+```rust
+let mut net = ShimNet;
+
+// Prompt on the first run, then pass the saved id and connect in silence.
+let mut bearer = Bearer::start(&mut net, saved_iap)?;
+// ... feed events until bearer.on_event returns Ok(true)
+persist(bearer.iap());
+
+let mut sock = TcpStream::open(&mut net, &bearer, 512, 256)?;
+sock.connect(&mut net, Ipv4::new(192, 168, 15, 74), 7654)?;
+
+// From App::handle_raw, with the event passed through unchanged:
+match sock.on_event(&mut net, ev) {
+    Progress::Connected  => { sock.write(&mut net, b"hello")?; }
+    Progress::Received(_) => { let n = sock.read(&mut net, &mut buf)?; }
+    Progress::Closed | Progress::Failed(_) => { /* done */ }
+    _ => {}
+}
+```
+
+### What the tests cover, and why each one is there
+
+Twenty-four of them, and every one is a bug that would otherwise be found on hardware:
+
+- **A `RECV` completion delivers what arrived, not what was asked for.** Reading a
+  length-prefixed frame accumulates across several, and each completion re-issues a read
+  into the *remaining* room — asking for the whole buffer again overwrites what is already
+  in it.
+- **Events carry a handle.** With two sockets open, one consuming another's completion is
+  a bug that cannot happen with one socket and always happens with two.
+- **A close while a send is queued abandons the queue.** Reporting those bytes as sent is
+  a lie the caller acts on: a protocol advances believing its request went out.
+- **A full receive buffer withholds the next read.** A zero-length slice comes back from
+  the shim as an argument error, not as "not now", so the read has to wait for a drain.
+- **`KErrEof` and `KErrDisconnected` are the peer closing, not faults.** Treating them as
+  errors makes every clean shutdown look like a failure. So does a zero-length read.
+- **Connecting issues a read immediately**, or a server that speaks first has its greeting
+  sitting unclaimed.
+
+### `Bearer`, and why the access point needs a type
+
+S60 will not silently pick a bearer, so a connection has to be started before any socket
+can open. The first run passes `Iap::Prompt` and lets the OS ask; `Bearer::iap()` then
+reports which access point it settled on, and persisting that through
+[`crate::fs::write_atomic`] is what makes every later run silent.
+
+The part that earns a type: a saved access point **stops working**. The network it names
+is gone, or the profile was deleted. An app that kept passing the stale id would simply
+stop connecting, reporting an error about the access point rather than about the
+situation. `Bearer` retries with a prompt exactly once, then gives up rather than looping.
+
+### Buffers
+
+`TcpStream` owns its send and receive buffers as `Box<[u8]>` and closes in `Drop`.
+
+That is not tidiness. The shim holds a descriptor over the caller's memory for the
+duration of a request rather than copying, so a buffer freed or moved while a request is
+outstanding gets read by the socket server after the fact. A `Box`'s contents do not move
+when the `Box` does, which is what lets the stream itself be moved while the shim's
+pointers stay valid.
+
+### A lookup that resolves to nothing is an error
+
+Not `0.0.0.0`. An AAAA-only name, or a record the shim could not read as IPv4, comes back
+as `Error::NotFound` — because the alternative is an address that gets attempted and fails
+later as a timeout, pointing at entirely the wrong thing.
+
+## Not here
+
+UDP is in the shim ABI but has no wrapper yet: `TcpStream`'s state machine does not fit a
+datagram socket, and a `UdpSocket` deserves its own rather than a flag.

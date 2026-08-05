@@ -305,6 +305,7 @@ dependencies = [
 name = "netprobe"
 version = "0.1.0"
 dependencies = [
+ "symbian",
  "symbian-crypto",
  "symbian-gfx",
  "symbian-sim",
