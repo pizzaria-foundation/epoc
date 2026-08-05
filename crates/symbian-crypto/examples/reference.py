@@ -74,3 +74,17 @@ for blocks in range(1, 9):
     pt = series(blocks * 16, 0x22220000 + blocks)
     iv = series(32, 0x33330000)
     print(f"ige {h(k)} {h(iv)} {h(pt)} {h(ige_encrypt(k, iv, pt))}")
+
+# modpow against Python's own pow(), which is exact ground truth rather than another
+# implementation of the same idea.
+for nbytes in [4, 8, 16, 32, 64, 128, 256]:
+    for trial in range(3):
+        n = bytearray(series(nbytes, 0xC0DE0000 + nbytes * 16 + trial))
+        n[0] |= 0x80
+        n[-1] |= 1
+        n = bytes(n)
+        base = series(nbytes, 0xBA5E0000 + trial)
+        exp = series(min(nbytes, 32), 0xE7E70000 + trial)
+        r = pow(int.from_bytes(base, "big"), int.from_bytes(exp, "big"),
+                int.from_bytes(n, "big"))
+        print(f"modpow {h(n)} {h(base)} {h(exp)} {h(r.to_bytes(nbytes, 'big'))}")

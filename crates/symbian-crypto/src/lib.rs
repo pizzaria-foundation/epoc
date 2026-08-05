@@ -43,12 +43,14 @@
 extern crate alloc;
 
 pub mod aes;
+pub mod bignum;
 pub mod hmac;
 pub mod ige;
 pub mod sha1;
 pub mod sha256;
 
 pub use aes::Aes;
+pub use bignum::{modpow, Modulus};
 pub use sha1::Sha1;
 pub use sha256::Sha256;
 

@@ -40,9 +40,11 @@ The tests are the specification:
 | HMAC-SHA-256 | RFC 4231 cases 1, 2, 3 and 6 |
 | HMAC-SHA-1 | RFC 2202 |
 | AES-IGE | vectors generated from an independent AES driving the recurrence |
+| modpow | `pow(b, e, m)` from Python, which is exact ground truth rather than another implementation |
 
-Plus a differential check: `examples/dump` and `examples/reference.py` produce 715 lines of
-digests and ciphertexts across every input length from 0 to 300, and they are byte-identical.
+Plus a differential check: `examples/dump` and `examples/reference.py` produce 736 lines of
+digests, ciphertexts and modular exponentiations across every input length from 0 to 300 and
+every modulus size from 32 to 2048 bits, and they are byte-identical.
 The reference side uses OpenSSL through `hashlib` and pycrypto for AES. Fixed vectors pin the
 algorithm at a handful of lengths; the differential is what catches a partial-block or
 padding bug that only appears at one.
@@ -96,11 +98,46 @@ stored. A table-driven AES would be perhaps 30% faster and cost 8 KB; that trade
 revisiting only if AES turns out to be on a hot path, and here the network is four orders of
 magnitude slower than the cipher.
 
+## Bignum
+
+2048-bit modular exponentiation, enough for RSA-2048 and MTProto's Diffie-Hellman. Nothing
+more — no division, no general modular inverse, no primality testing, because those are what
+a *key generator* needs and this only consumes keys the server sends.
+
+32-bit limbs, because the ARM1136 has `umull` (32×32→64) and that is exactly one limb
+product. Fixed size on the stack, no allocation: an exponentiation that fails for lack of
+memory halfway through a login is worse than one that cannot be attempted.
+
+Montgomery multiplication by the CIOS method, which replaces a division per multiply — the
+one operation this word size makes genuinely expensive — with a multiply and a shift.
+
+### Timing
+
+Exponentiation is a **Montgomery ladder**: one squaring and one multiply per exponent bit,
+always, with the operands swapped by a masked select rather than a branch. Plain
+square-and-multiply multiplies only when a bit is set, which makes the running time a direct
+readout of the exponent's Hamming weight — and in Diffie-Hellman the exponent is the secret.
+
+It costs about a third more. Unlike the AES S-box concern above, this leak needs no cache
+access to exploit, just a clock, so it is worth paying for.
+
+### Cost
+
+**Measured 37 ms** on an aarch64 host — `cargo run --release --example bench`. On the E72
+expect **roughly 0.4 to 0.6 s**: the host figure scaled by 10–15×, which is an estimate and
+not a measurement (5× the clock, plus an in-order pipeline and a non-pipelined `umull`).
+
+An earlier version of these docs claimed a quarter of a second. That was the arithmetic done
+hopefully rather than carefully, and the bench exists so the number is not a guess again.
+
+A login runs two exponentiations, so budget about a second. `rust_step` must return in
+milliseconds, so it **cannot** be called from the event pump — it needs a second thread or to
+be split across steps.
+
 ## Still missing, for MTProto
 
-- **Bignum `modpow`**, for RSA-2048 and the 2048-bit DH. The largest remaining piece.
-  Roughly 0.2–0.3 s per exponentiation on this hardware with Montgomery reduction, once, at
-  login.
 - **`inflate`**, for `gzip_packed`. `libz` has it if the handset has Open C; otherwise ~400
   lines.
 - **SHA-512**, for the 2FA password KDF. Not needed until passwords are.
+- **`RSA_PAD`**, MTProto 2.0's padding scheme around the raw RSA primitive. Protocol work
+  rather than crypto work.
