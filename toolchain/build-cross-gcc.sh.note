@@ -1,0 +1,8 @@
+--disable-multilib rationale:
+arm/t-symbian asks for a `softfp` multilib. -mfloat-abi=softfp means "soft-float
+calling convention, hardware FP instructions permitted", which is incoherent on
+armv5te with no FPU -- and GCC 15 responds with an ICE in arm_init_builtin
+(config/arm/arm-builtins.cc:1599) rather than a clean diagnostic. We only ever
+want the pure soft-float armv5te library, which is what --disable-multilib
+leaves us with. Revisit only if we later opt into --fpu=vfpv2 in elf2e32, since
+the E72's ARM1136JF-S does have VFPv2 in hardware.

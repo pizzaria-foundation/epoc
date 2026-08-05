@@ -1,0 +1,15 @@
+[package]
+name = "symbian-sys"
+description = "Raw FFI bindings to the Symbian C++ shim"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+
+# `symbian` is not a vendor rustc ships, so every #[cfg(target_vendor = "symbian")]
+# draws an unexpected_cfgs warning on the host. Declaring it as a known value keeps
+# the real warnings visible.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_vendor, values("symbian"))'] }

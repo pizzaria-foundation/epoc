@@ -1,0 +1,332 @@
+/* The flat C ABI between Symbian C++ and Rust.
+ *
+ * This header is the contract. Both sides include it — C++ directly, Rust through
+ * crates/symbian-sys, which mirrors it by hand.
+ *
+ * THREE RULES, all of them load-bearing.
+ *
+ * 1. Every `shim_*` function is a TRAP barrier and returns a Symbian error code.
+ *    A Symbian Leave is a longjmp-style unwind that does not run destructors —
+ *    that is why CleanupStack exists. Letting one cross a Rust frame compiled
+ *    panic=abort, which has no landing pads, skips every Drop and is undefined
+ *    behaviour, not merely a leak. So the leaving work stays in a private
+ *    DoSomethingL() and the exported wrapper TRAPs it. The few functions that
+ *    genuinely cannot Leave say so in a comment and skip the TRAP.
+ *
+ * 2. Rust never blocks and never owns the loop. Avkon calls
+ *    CActiveScheduler::Start(); there is no taking that away. Every asynchronous
+ *    completion is converted by a CActive::RunL() into a POD ShimEvent on a ring
+ *    buffer, and a CIdle pump calls rust_step(), which drains the queue. That is
+ *    the same shape as a winit ApplicationHandler.
+ *
+ * 3. Handles are opaque int32_t, never pointers. A handle table turns a
+ *    use-after-free into KErrBadHandle instead of a crash, and keeps C++ object
+ *    lifetimes invisible to Rust.
+ *
+ * Strings cross as (const uint16_t*, int32_t len) — UTF-16 code units, which
+ * TPtrC16 wraps with no copy. Rust keeps UTF-8 internally and converts at the
+ * boundary.
+ */
+
+#ifndef SYMBIAN_SHIM_H
+#define SYMBIAN_SHIM_H
+
+#include <stdint.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/* ---------------------------------------------------------------- errors --
+ * A subset of e32err.h, repeated so Rust has the values without parsing headers.
+ * KErrPermissionDenied is the one to expect when a capability is missing. */
+#define SHIM_OK                    0
+#define SHIM_ERR_NOT_FOUND        -1
+#define SHIM_ERR_GENERAL          -2
+#define SHIM_ERR_CANCEL           -3
+#define SHIM_ERR_NO_MEMORY        -4
+#define SHIM_ERR_NOT_SUPPORTED    -5
+#define SHIM_ERR_ARGUMENT         -6
+#define SHIM_ERR_BAD_HANDLE       -8
+#define SHIM_ERR_OVERFLOW         -9
+#define SHIM_ERR_ALREADY_EXISTS  -11
+#define SHIM_ERR_IN_USE          -14
+#define SHIM_ERR_NOT_READY       -18
+#define SHIM_ERR_ACCESS_DENIED   -21
+#define SHIM_ERR_EOF             -25
+#define SHIM_ERR_TIMED_OUT       -33
+#define SHIM_ERR_DISCONNECTED    -36
+#define SHIM_ERR_PERMISSION      -46
+
+/* ----------------------------------------------------------------- events -- */
+enum ShimEventKind {
+    SHIM_EV_NONE = 0,
+    /* Translated character in `a` — Shift, Caps Lock and the Fn layer have
+     * already been applied by the window server. This is the text input stream. */
+    SHIM_EV_KEY_CHAR = 1,
+    /* Raw scan code in `a`, for keys with no character (softkeys, D-pad). */
+    SHIM_EV_KEY_DOWN = 2,
+    SHIM_EV_KEY_UP = 3,
+    /* The framework wants us to repaint; `a`..`d` are the dirty rect. */
+    SHIM_EV_REDRAW = 4,
+    SHIM_EV_RESIZE = 5,
+    /* Went to background or came back; `a` is 1 for foreground. */
+    SHIM_EV_FOCUS = 6,
+    SHIM_EV_TIMER = 10,
+    /* Socket: `a` is the byte count, `status` the Symbian error. */
+    SHIM_EV_CONNECTED = 20,
+    SHIM_EV_RECV = 21,
+    SHIM_EV_SENT = 22,
+    SHIM_EV_CLOSED = 23,
+    SHIM_EV_RESOLVED = 24,
+    /* The app should exit; nothing may be queued after it. */
+    SHIM_EV_QUIT = 90
+};
+
+/* Deliberately POD and fixed-size so RunL() can push one without allocating and
+ * without any chance of leaving. */
+typedef struct ShimEvent {
+    int32_t kind;
+    /* Which socket, timer or window the event belongs to; 0 when global. */
+    int32_t handle;
+    /* Symbian error code, SHIM_OK on success. */
+    int32_t status;
+    int32_t a, b, c, d;
+    /* Platform-native extra. For key events this is the raw Symbian iModifiers
+     * word, unmasked.
+     *
+     * `b` carries a three-bit summary (shift/ctrl/func) because that is all a
+     * portable toolkit should care about — but a summary is exactly what made the
+     * E72's keyboard bug hard to see: `b` read 00 for every key, which only ever
+     * meant "none of those three", and said nothing about EModifierNumLock,
+     * EModifierKeyboardExtend or EModifierPureKeycode. A diagnostic needs the whole
+     * word; apps should keep using `b`. */
+    int32_t native;
+} ShimEvent;
+
+/* Pull one event. Returns 1 when `out` was filled, 0 when the queue is empty.
+ * Cannot leave. */
+int32_t shim_poll_event(ShimEvent* out);
+
+/* How many events were dropped because the ring was full, and reset the counter.
+ * A non-zero result means rust_step() is not keeping up — worth surfacing rather
+ * than silently losing input. */
+int32_t shim_events_dropped(void);
+
+/* -------------------------------------------------------------- lifecycle --
+ * Called by the shim INTO Rust. Rust must export these. */
+void rust_app_start(void);
+void rust_app_stop(void);
+/* Drain events, update, redraw. Must return within a few milliseconds: it runs
+ * on the GUI thread, and a long one starves the window server so the phone
+ * appears frozen. */
+void rust_step(void);
+
+/* Ask the app to close. */
+void shim_request_exit(void);
+
+/* ------------------------------------------------------------ framebuffer --
+ * The back buffer is a CFbsBitmap, whose pixels live in a chunk shared with the
+ * font and bitmap server and mapped into the window server too. So Rust writes
+ * straight into memory the window server blits from — no copy crosses a process
+ * boundary. */
+
+enum ShimPixelFormat {
+    /* 16bpp, RRRRRGGG GGGBBBBB. What symbian-gfx renders natively. */
+    SHIM_PF_RGB565 = 1,
+    /* 32bpp 0x00RRGGBB. Reported for information; Rust is always handed RGB565
+     * (see shim_fb_lock). */
+    SHIM_PF_XRGB8888 = 2
+};
+
+typedef struct ShimFb {
+    uint8_t* pixels;
+    /* BYTES per scanline. Symbian aligns CFbsBitmap scanlines to 4 bytes, so a
+     * 320-wide bitmap is not guaranteed to have stride == width * bpp. Always
+     * read this; never compute it. */
+    int32_t stride;
+    int32_t width;
+    int32_t height;
+    /* Always SHIM_PF_RGB565. Present so a future format is not an ABI break. */
+    int32_t format;
+} ShimFb;
+
+/* Take the lock and hand out the pixel pointer.
+ *
+ * The pointer is valid only until shim_fb_unlock(): CFbsBitmap::DataAddress()
+ * must be preceded by BeginDataAccess() on 9.1+ or it crashes, and the server
+ * heap may compact in between, so re-fetch after every lock rather than caching.
+ *
+ * Do not call any other shim function while holding the lock.
+ *
+ * Rust always receives RGB565. If the screen is 32bpp the shim renders into its
+ * own RGB565 staging buffer and converts during present — one pass over 76800
+ * pixels, paid only on hardware that needs it. */
+int32_t shim_fb_lock(ShimFb* out);
+/* Cannot leave. */
+void shim_fb_unlock(void);
+
+/* Blit the dirty rectangle to the screen and flush the window server queue.
+ * Without the flush the frame sits in the client-side command buffer and appears
+ * late. Pass the whole screen for a full repaint. */
+int32_t shim_present(int32_t x, int32_t y, int32_t w, int32_t h);
+
+int32_t shim_screen_size(int32_t* w, int32_t* h);
+/* The mode the window server actually reports, as a ShimPixelFormat. Query it;
+ * the E72's panel is 24-bit but which Symbian display mode it exposes is not
+ * documented anywhere we could find. */
+int32_t shim_screen_format(int32_t* format);
+
+/* Fill a 1x1 bitmap with pure red through the documented TRgb API and return the
+ * first word of its memory. Turns "which byte is red?" from a guess into a fact,
+ * on whatever device this happens to be running. */
+int32_t shim_probe_pixel_layout(uint32_t* out_word);
+
+/* Is a DLL present on this device? Returns SHIM_OK if it loads, or the Symbian
+ * error (KErrNotFound is -1).
+ *
+ * This is a real capability query, not only a diagnostic. The SDK links against a
+ * device ROM we cannot inspect: Open C (libc, libcrypto, libssl, libz) shipped as a
+ * separate package on S60 3rd Edition, so whether it exists is a property of the
+ * handset and not of the SDK. Importing a missing DLL is the worst way to find out —
+ * the E32 loader refuses to start the process, which on a phone looks exactly like
+ * "the icon does nothing", with no error and no log. Asking first turns that into a
+ * value.
+ *
+ * `name` is the DLL's filename, e.g. "libcrypto.dll" — the .dll name, not the .dso
+ * import library the linker sees. */
+int32_t shim_dll_present(const uint16_t* name, int32_t len);
+
+/* -------------------------------------------------------------------- text --
+ * Text is drawn by Symbian into the same buffer Rust owns pixels of. That gets
+ * real hinted glyphs and full UCS-2 coverage for nothing, and avoids decoding
+ * Symbian's undocumented RLE glyph bitmaps. symbian-gfx's own .sbf atlas remains
+ * the portable path, used for the host preview and when guaranteed coverage
+ * matters more than binary size. */
+
+enum ShimSystemFont {
+    SHIM_FONT_NORMAL = 0,
+    SHIM_FONT_TITLE = 1,
+    SHIM_FONT_ANNOTATION = 2,
+    SHIM_FONT_LEGEND = 3,
+    SHIM_FONT_DENSE = 4
+};
+
+int32_t shim_font_open_system(int32_t which, int32_t* handle);
+/* Nearest match to a pixel design height. */
+int32_t shim_font_open_size(int32_t px, int32_t bold, int32_t* handle);
+/* Cannot leave. Releasing a system font is a no-op: CEikonEnv owns those. */
+void shim_font_close(int32_t handle);
+
+typedef struct ShimFontMetrics {
+    int32_t height;
+    int32_t ascent;
+    int32_t descent;
+    int32_t max_width;
+} ShimFontMetrics;
+
+int32_t shim_font_metrics(int32_t handle, ShimFontMetrics* out);
+/* Width in pixels, or a negative error. */
+int32_t shim_text_width(int32_t handle, const uint16_t* text, int32_t len);
+/* `y` is the BASELINE, not the top: that is what CGraphicsContext::DrawText
+ * takes, and pretending otherwise would misplace every string by the ascent. */
+int32_t shim_text_draw(int32_t handle, int32_t x, int32_t y,
+                       const uint16_t* text, int32_t len, uint32_t rgb);
+
+/* ------------------------------------------------------------------ timers -- */
+/* One-shot. Completion arrives as SHIM_EV_TIMER carrying this handle. */
+int32_t shim_timer_after(int32_t ms, int32_t* handle);
+/* Repeating, for a frame clock. */
+int32_t shim_timer_every(int32_t ms, int32_t* handle);
+void shim_timer_cancel(int32_t handle);
+/* Monotonic microseconds, for measuring elapsed time. Cannot leave. */
+uint64_t shim_now_us(void);
+/* Seconds since the Unix epoch, for message timestamps. The device clock drifts;
+ * a networked app should correct against the server rather than trust this. */
+int64_t shim_unix_time(void);
+
+/* ---------------------------------------------------------------- sockets --
+ * Every ESock operation is asynchronous — there are no synchronous variants of
+ * Connect, Send or Recv. Each call here returns immediately and the completion
+ * arrives as an event.
+ *
+ * S60 will not silently pick a bearer, so a connection must be started first;
+ * SHIM_IAP_PROMPT lets the OS ask the user once per session. NetworkServices is
+ * the only capability any of this needs, and it is user-grantable. */
+
+#define SHIM_IAP_PROMPT   (-1)
+#define SHIM_IAP_DEFAULT  (-2)
+
+int32_t shim_net_start(int32_t iap, int32_t* handle);
+void shim_net_stop(int32_t handle);
+
+/* DNS. Completion is SHIM_EV_RESOLVED with the IPv4 address in `a`. */
+int32_t shim_dns_resolve(int32_t conn, const uint16_t* host, int32_t len, int32_t* handle);
+
+int32_t shim_tcp_open(int32_t conn, int32_t* handle);
+/* Completion: SHIM_EV_CONNECTED. */
+int32_t shim_tcp_connect(int32_t handle, uint32_t ipv4, uint16_t port);
+/* `buf` must stay alive and untouched until SHIM_EV_SENT arrives. */
+int32_t shim_tcp_send(int32_t handle, const uint8_t* buf, int32_t len);
+/* Likewise until SHIM_EV_RECV, whose `a` is the byte count. */
+int32_t shim_tcp_recv(int32_t handle, uint8_t* buf, int32_t cap);
+void shim_tcp_close(int32_t handle);
+
+/* ------------------------------------------------------------------- files --
+ * RFile has genuine synchronous overloads that need no active scheduler, so this
+ * is a plain blocking API with no event plumbing. A welcome exception. */
+
+#define SHIM_FILE_READ   0x01
+#define SHIM_FILE_WRITE  0x02
+#define SHIM_FILE_CREATE 0x04
+#define SHIM_FILE_APPEND 0x08
+
+/* The app's private data cage, C:\private\<UID3>\, created if absent. Needs no
+ * capability: it is our own directory and only our SID (or an AllFiles holder)
+ * can reach it. */
+int32_t shim_private_path(uint16_t* buf, int32_t cap, int32_t* len);
+
+int32_t shim_file_open(const uint16_t* path, int32_t len, int32_t mode, int32_t* handle);
+int32_t shim_file_read(int32_t handle, uint8_t* buf, int32_t cap, int32_t* got);
+int32_t shim_file_write(int32_t handle, const uint8_t* buf, int32_t len);
+int32_t shim_file_size(int32_t handle, int64_t* out);
+int32_t shim_file_seek(int32_t handle, int64_t pos);
+int32_t shim_file_delete(const uint16_t* path, int32_t len);
+
+/* Rename, which is how a save is made atomic: write a temp file, close it, then
+ * replace the real one in a single filesystem operation. Without this the only way
+ * to update a file is to truncate and rewrite it, and a battery pull halfway
+ * through leaves a session store that exists, parses as far as it goes, and is
+ * wrong — the worst of the three possible outcomes.
+ *
+ * Overwrites the destination if it exists, which plain RFs::Rename refuses to do;
+ * the shim does the delete first. */
+int32_t shim_file_rename(const uint16_t* from, int32_t from_len,
+                         const uint16_t* to, int32_t to_len);
+void shim_file_close(int32_t handle);
+
+/* ------------------------------------------------------------------- alloc --
+ * None of these can leave, so none of them TRAP. That is the point: the shim
+ * calls User::Alloc and User::ReAlloc, never the AllocL/ReAllocL variants, so an
+ * out-of-memory condition returns null instead of becoming a C++ throw that
+ * would unwind through Rust frames. */
+void* shim_alloc(uint32_t size);
+void* shim_realloc(void* p, uint32_t size);
+void shim_free(void* p);
+/* Usable size of a cell, for a Rust allocator that wants to avoid a realloc. */
+uint32_t shim_alloc_len(const void* p);
+
+/* ------------------------------------------------------------------ panic --
+ * Terminal. Rust's #[panic_handler] calls this; it does not return. */
+void shim_panic(const uint8_t* file, uint32_t file_len, uint32_t line);
+
+/* Write a line to the debug log (RDebug::Print). Cheap to leave in: it compiles
+ * to nothing useful on a retail device but is the only way to see anything from
+ * a process with no console. */
+void shim_debug(const uint16_t* text, int32_t len);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* SYMBIAN_SHIM_H */

@@ -1,0 +1,378 @@
+#!/bin/bash
+# symbuild — drive a Rust+C++ Symbian app from sources to a signed .sisx.
+#
+# The pipeline, and why each stage exists:
+#
+#   Rust  --cargo staticlib-->  libapp.a      Rust never links; see targets/README.md
+#   C++   --g++ -c---------->   *.o           the shim: everything that may Leave
+#   both  --ld -shared------>   app.elf       Symbian EXEs are shared objects so the
+#                                             loader can relocate them
+#   ELF   --elf2e32-------->    app.exe       E32Image: UIDs, capabilities, heap/stack
+#   files --makesis-------->    app.sis       installable as-is on a patched phone
+#   sis   --signsis-------->    app.sisx      only when SIGN=1 (see below)
+#
+# Signing is OFF by default. The target E72 runs a patched installserver
+# (Open4All / RomPatcher+), which drops both the signature requirement and the
+# capability ceiling — so an unsigned .sis installs directly and may declare
+# capabilities beyond the six a self-signed package could ever get. Set SIGN=1
+# in app.conf if you need a package for a stock handset.
+#
+# Usage:
+#   symbuild <app-dir>            build and sign
+#   symbuild <app-dir> clean
+#
+# The app directory must contain a manifest named `app.conf`; see
+# examples/hello/app.conf for the full set of keys.
+set -euo pipefail
+
+SDK="$(cd "$(dirname "$0")/.." && pwd)"
+HOST="$SDK/toolchain/host/bin"
+CROSS="$SDK/toolchain/cross/bin"
+TARGET_JSON="$SDK/targets/armv5te-symbian-eabi.json"
+TC=arm-none-symbianelf
+
+APP="${1:?usage: symbuild <app-dir> [clean]}"
+APP="$(cd "$APP" && pwd)"
+ACTION="${2:-build}"
+
+# Only relevant when SIGN=1. Fedora and RHEL ship OpenSSL with
+# rh-allow-sha1-signatures=no, but Symbian 9.x SIS signatures are RSA-with-SHA-1
+# (OID 1.2.840.113549.1.1.5) and the device accepts nothing else, so we opt back
+# in. Affects both `openssl req` and signsis, which links the same libcrypto.
+export OPENSSL_ENABLE_SHA1_SIGNATURES=1
+
+# rcomp shells out to `uidcrc` to stamp the UIDs on a .rsc, and finds it only on
+# PATH — it does not look beside itself. Without this, rcomp prints "Failed to
+# write UIDs" and exits 0, leaving a .rsc that exists and is unusable.
+export PATH="$HOST:$PATH"
+
+# shellcheck source=/dev/null
+source "$APP/app.conf"
+
+: "${NAME:?app.conf must set NAME}"
+: "${UID3:?app.conf must set UID3}"
+: "${CAPABILITIES:=NetworkServices}"
+: "${VERSION:=1,0,0}"
+: "${VENDOR:=Unknown}"
+: "${HEAP:=0x1000,0x400000}"
+: "${STACK:=0x8000}"
+: "${EPOCROOT:=$SDK/sdk}"
+: "${RUST_CRATE:=}"
+: "${CXX_SOURCES:=}"
+# Off by default: the dev handset has a patched installserver.
+: "${SIGN:=0}"
+
+# An app built on the shim always needs the whole GUI set, so it is not worth
+# making every app.conf repeat it. apparc/cone/eikcore/avkon are the application
+# framework; ws32 the window server; fbscli/bitgdi/gdi/fntstr the bitmap and
+# graphics context the shim blits through; efsrv/estor the file server, which
+# Avkon's resource loading needs whether or not we open a file ourselves.
+if [ "${USE_SHIM:-0}" = 1 ]; then
+  : "${SYMBIAN_LIBS:=euser apparc cone eikcore avkon ws32 fbscli bitgdi gdi fntstr efsrv estor hal}"
+fi
+
+BUILD="$APP/build"
+LIBDIR="$EPOCROOT/epoc32/release/armv5/lib"
+
+# The cross compiler's own header directory. Needed because -nostdinc removes it
+# along with the host's, and the shim's ABI is written in <stdint.h> types that
+# Symbian 9.3 has no header for. Asking gcc rather than hardcoding 15.2.0 means a
+# toolchain rebuild does not silently break the shim.
+GCC_INC="$("$CROSS/$TC-gcc" -print-file-name=include)"
+
+if [ "$ACTION" = clean ]; then
+  rm -rf "$BUILD"
+  [ -n "$RUST_CRATE" ] && (cd "$APP/$RUST_CRATE" && cargo clean) || true
+  echo "cleaned $NAME"
+  exit 0
+fi
+
+# UID3 should sit in the unprotected range (>= 0x80000000): 0xE... is the
+# development/testing block, 0xA... is for self-signed apps meant for
+# distribution. Below 0x80000000 is Symbian-Signed territory, which no longer
+# issues. A patched installserver will accept anything, but staying in 0xE keeps
+# the package installable on a stock phone too, and avoids colliding with a real
+# app's UID — which would silently overwrite it, since UID3 is the identity the
+# installer and the data cage both key on.
+case "$UID3" in
+  0x[eE]*|0x[aA]*) ;;
+  *) echo "warning: UID3 $UID3 is outside the unprotected 0xA/0xE ranges" >&2 ;;
+esac
+
+mkdir -p "$BUILD"
+echo "==> $NAME  (uid3 $UID3, caps: $CAPABILITIES)"
+
+# ---------------------------------------------------------------- 1. Rust
+RUST_LIB=""
+if [ -n "$RUST_CRATE" ]; then
+  echo "--> rust: $RUST_CRATE"
+  ( cd "$APP/$RUST_CRATE" && \
+    cargo +nightly build --release \
+      -Zjson-target-spec \
+      -Zbuild-std=core,alloc \
+      -Zbuild-std-features=compiler-builtins-mem \
+      --target "$TARGET_JSON" )
+  tgt="$(basename "$TARGET_JSON" .json)"
+  RUST_LIB="$(find "$APP/$RUST_CRATE/target/$tgt/release" -maxdepth 1 -name 'lib*.a' | head -1)"
+  [ -n "$RUST_LIB" ] || { echo "no staticlib produced; is crate-type=[\"staticlib\"]?" >&2; exit 1; }
+  echo "    $(basename "$RUST_LIB") $(stat -c%s "$RUST_LIB") bytes"
+fi
+
+# ------------------------------------------------------------------ 2. C++
+# Sources are gathered from two places: the app's own (relative to app.conf, so
+# app.conf stays portable) and the shared shim (USE_SHIM=1). An app that only
+# drives Rust through the shim therefore lists no C++ of its own at all.
+SRCS=()
+for src in $CXX_SOURCES; do SRCS+=("$APP/$src"); done
+if [ "${USE_SHIM:-0}" = 1 ]; then
+  for src in "$SDK"/shim/src/*.cpp; do SRCS+=("$src"); done
+fi
+
+OBJS=()
+if [ ${#SRCS[@]} -gt 0 ]; then
+  echo "--> c++ (${#SRCS[@]} sources)"
+  for src in "${SRCS[@]}"; do
+    obj="$BUILD/$(basename "${src%.*}").o"
+    # -fno-exceptions/-fno-rtti: Symbian 9.x uses its own Leave/TRAP mechanism and
+    # supplies no GCC C++ runtime. -D__SYMBIAN32__ et al mirror what the SDK's own
+    # GCCE recipe passes.
+    # Flags mirror the SDK's own epoc32/tools/compilation_config/gcce.mk, minus
+    # -fno-unit-at-a-time which no longer exists in GCC.
+    #
+    # -fexceptions and -D__SUPPORT_CPP_EXCEPTIONS__ are load-bearing, not
+    # cosmetic. symbian_os_v9.3.hrh says __LEAVE_EQUALS_THROW__ is switched off
+    # automatically unless __SUPPORT_CPP_EXCEPTIONS__ (which "the tools" are
+    # expected to define) is present. Without it TRAPD falls back to the legacy
+    # TTrap mechanism, whose implementation is not in the public SDK at all —
+    # TTrap::Trap and TTrap::UnTrap appear in no .dso and no .lib, and the link
+    # dies. With it, a Leave is a throw and a TRAP is a catch, which is what
+    # Symbian 9.x actually does.
+    #
+    # The variant header is lowercase: GnuPoc's case fixups leave
+    # symbian_os_v9.3.hrh with no capitalised twin, unlike Symbian_OS.hrh.
+    # -isystem <gcc include>: -nostdinc drops the compiler's own headers along with
+    # the host's, and Symbian 9.3 predates <stdint.h> — it has no e32 equivalent.
+    # The shim's ABI is spelled in uint32_t, so this is not optional.
+    #
+    # -Wno-narrowing: the SDK's own vwsdef.h brace-initialises a TUid from a value
+    # that does not fit TInt32, which C++11 promoted from warning to error.
+    "$CROSS/$TC-g++" -c -O2 -march=armv5t -msoft-float -mapcs -nostdinc \
+      -ffunction-sections -fdata-sections \
+      -isystem "$GCC_INC" \
+      -include "$EPOCROOT/epoc32/include/gcce/gcce.h" \
+      -I"$EPOCROOT/epoc32/include" -I"$EPOCROOT/epoc32/include/variant" \
+      -I"$EPOCROOT/epoc32/include/stdapis" \
+      -D__SYMBIAN32__ -D__GCCE__ -D__EPOC32__ -D__MARM__ -D__EABI__ \
+      -D__MARM_ARMV5__ -D__EXE__ -D_UNICODE -DNDEBUG \
+      -D__SUPPORT_CPP_EXCEPTIONS__ \
+      -D__PRODUCT_INCLUDE__="<variant/${VARIANT_HRH:-symbian_os_v9.3.hrh}>" \
+      -DSHIM_APP_UID3="$UID3" \
+      -fexceptions -fno-rtti \
+      -Wall -Wno-narrowing -Wno-ctor-dtor-privacy -Wno-unknown-pragmas \
+      -Wno-attributes \
+      -I"$APP/inc" -I"$APP/data" -I"$SDK/shim/inc" ${CXX_FLAGS:-} \
+      "$src" -o "$obj"
+    OBJS+=("$obj")
+  done
+fi
+
+[ ${#OBJS[@]} -gt 0 ] || [ -n "$RUST_LIB" ] || { echo "nothing to build" >&2; exit 1; }
+
+# ----------------------------------------------------------------- 3. link
+echo "--> link"
+LIBGCC_DIR="$(dirname "$("$CROSS/$TC-gcc" -print-libgcc-file-name)")"
+
+# --target1-abs: R_ARM_TARGET1 must resolve to ABS32, not REL32. ld enables this
+# implicitly for a real symbianelf BFD target, but our binutils aliases symbianelf
+# onto the plain EABI config (see toolchain/patches/), so we pass it explicitly.
+# Getting it wrong yields REL32 where elf2e32 accepts only ABS32, and the
+# relocation is silently dropped.
+#
+# -shared: E32 images are relocatable shared objects, not ET_EXEC. elf2e32 reads
+# the PT_LOAD program headers to find codeBase (R+X) and dataBase/bssSize (R+W).
+#
+# STATLINK holds the per-variant static libraries, which live beside the built
+# binaries rather than in lib/: eexe.lib carries _E32Startup, and usrt2_2.lib the
+# user-side runtime (CallThrdProcEntry and friends).
+STATLINK="$EPOCROOT/epoc32/release/armv5/${VARIANT:-urel}"
+
+# Runtime import libraries, in the order the SDK's gcce.mk demands — scppnwdl
+# before drtrvct2_2, or operator new resolves to the wrong implementation.
+RT_LIBS=(dfpaeabi.dso dfprvct2_2.dso drtaeabi.dso scppnwdl.dso drtrvct2_2.dso)
+
+LINK_LIBS=()
+for l in ${SYMBIAN_LIBS:-euser}; do LINK_LIBS+=("-l:$l.dso"); done
+for l in "${RT_LIBS[@]}"; do LINK_LIBS+=("-l:$l"); done
+
+# -lsupc++ supplies __gxx_personality_v0. Symbian's drtaeabi.dso covers the
+# __cxa_* and __aeabi_unwind_cpp_pr* half of the ARM C++ ABI but not GCC's
+# personality routine, and with exceptions on (see above) every TRAP needs it.
+# --gc-sections earns its place: compiler_builtins ships the whole soft-float libm
+# (erfc, lgamma, pow, cbrt, the f128 helpers) because the target declares no system
+# libm, and without sweeping, 136 KB of math this app never calls was 78% of a
+# 305 KB image. Rust already emits one section per function; -ffunction-sections
+# above does the same for the shim.
+#
+# The two -u roots are functions the *kernel* calls, never our code: they are named
+# by the exception descriptor rather than referenced by a relocation, so a sweep
+# would take them. .emb_text is KEEP'd in the linker script for the same reason.
+"$CROSS/$TC-ld" -shared --target1-abs --no-undefined -nostdlib \
+  --entry "${ENTRY:-_E32Startup}" -u "${ENTRY:-_E32Startup}" \
+  --gc-sections \
+  -u _xxxx_call_user_invariant -u _xxxx_call_user_handle_exception \
+  --default-symver \
+  -T "$SDK/toolchain/symbian-exe.lds" \
+  "$STATLINK/eexe.lib" \
+  ${OBJS[@]+"${OBJS[@]}"} ${RUST_LIB:+"$RUST_LIB"} \
+  --start-group "$STATLINK/usrt2_2.lib" --end-group \
+  -L"$LIBDIR" "${LINK_LIBS[@]}" \
+  -L"$LIBGCC_DIR" -lsupc++ -lgcc \
+  -o "$BUILD/$NAME.elf"
+
+# No -Ttext. It fights -shared: it relocates only .text and strands every other
+# section at its natural address, which put codeBase at 0xc748 instead of 0x8000.
+# The linker script owns the layout.
+
+"$CROSS/$TC-readelf" -l "$BUILD/$NAME.elf" | grep -E '^  LOAD' | sed 's/^/    /'
+
+# -------------------------------------------------- 3b. prepare the ELF for elf2e32
+# Clears SHF_ALLOC on the link-time-only sections and zeroes the GOT, by rewriting
+# the section header table in place.
+#
+# Both halves are load-bearing. elf2e32 concatenates *every* SHF_ALLOC section into
+# the code segment, so leaving the dynamic-linking metadata marked baked 18 KB of
+# .dynsym and friends into the image and pushed codeBase off 0x8000. And GNU ld
+# pre-fills .got with PLT stub addresses for lazy binding, which elf2e32 reads as
+# relocation addends — 81 of 230 imports came out pointing at 0xa3ac000e.
+#
+# Not objcopy: --set-section-flags reclassified .rel.plt and discarded its 82
+# R_ARM_JUMP_SLOT relocations, dropping dllRefTableCount from 12 to 6 without a
+# word of complaint. See tools/e32prep.py.
+echo "--> prepare ELF"
+python3 "$SDK/tools/e32prep.py" "$BUILD/$NAME.elf"
+
+# ---------------------------------------------------------------- 4. elf2e32
+echo "--> elf2e32"
+"$HOST/elf2e32" \
+  --uncompressed \
+  --sid="$UID3" \
+  --uid1=0x1000007a \
+  --uid2=0x100039ce \
+  --uid3="$UID3" \
+  --vid=0x00000000 \
+  --capability="$CAPABILITIES" \
+  --fpu=softvfp \
+  --targettype=EXE \
+  --linkas="$NAME{000a0000}.exe" \
+  --libpath="$LIBDIR/" \
+  --elfinput="$BUILD/$NAME.elf" \
+  --output="$BUILD/$NAME.exe" \
+  --heap="$HEAP" \
+  --stack="$STACK"
+echo "    $NAME.exe $(stat -c%s "$BUILD/$NAME.exe") bytes"
+
+# Validate before packaging. A malformed E32 is refused by the device with no
+# error, no panic and no log entry — it simply does nothing when you tap the icon
+# — so every check that can run here saves an install round trip. e32dump also
+# re-derives the UID checksum and the header CRC independently of elf2e32, which
+# is how you catch the tool itself being wrong.
+python3 "$SDK/tools/e32dump.py" "$BUILD/$NAME.exe" --quiet
+echo "    header validated"
+
+# --------------------------------------------------------------- 5. resources
+if [ -f "$APP/data/${NAME}_reg.rss" ]; then
+  echo "--> resources"
+  # Order matters: ${NAME}_reg.rss #includes the .rsg that compiling $NAME.rss
+  # generates, so the UI resource has to be built first.
+  for rss in "$APP/data/$NAME.rss" "$APP/data/${NAME}_reg.rss"; do
+    [ -f "$rss" ] || continue
+    base="$(basename "$rss" .rss)"
+    # epocrc is just cpp followed by rcomp; do it by hand so we need no Perl.
+    "$CROSS/$TC-g++" -E -P -x c++ -nostdinc \
+      -I"$EPOCROOT/epoc32/include" -I"$EPOCROOT/epoc32/include/variant" \
+      -I"$APP/data" -D_UNICODE -DLANGUAGE_SC "$rss" -o "$BUILD/$base.rpp"
+    # rcomp runs from data/ so the -h header lands next to the .rss that will
+    # #include it. Run it from build/ and the _reg compile fails to find the .rsg.
+    ( cd "$APP/data" && "$HOST/rcomp" -u -o"$BUILD/$base.rsc" \
+        -h"$base.rsg" -s"$BUILD/$base.rpp" )
+    echo "    $base.rsc"
+  done
+fi
+
+# ------------------------------------------------------------------- 5b. icon
+# A 44x44 colour bitmap plus a 1bpp mask, packed into an .mbm.
+#
+# Two bmconv quirks, both learned the hard way:
+#   - the depth option is glued to the filename (/c24foo.bmp), not a separate arg;
+#   - it parses DOS-style options, so it mistakes ANY argument starting with `/`
+#     for one — an absolute Unix path silently becomes garbage. Every path handed
+#     to bmconv must be relative, hence the cd.
+ICON_MBM=""
+# Generated, not committed: a checked-in .bmp is a binary nobody can review, and
+# the generator is the actual source.
+if [ -f "$APP/data/mkicon.py" ] && [ ! -f "$APP/data/${NAME}_icon.bmp" ]; then
+  python3 "$APP/data/mkicon.py" "$APP/data"
+fi
+if [ -f "$APP/data/${NAME}_icon.bmp" ]; then
+  echo "--> icon"
+  ( cd "$APP/data" && "$HOST/bmconv" /q "../build/${NAME}_icon.mbm" \
+      "/c24${NAME}_icon.bmp" "/1${NAME}_icon_mask.bmp" )
+  ICON_MBM="$BUILD/${NAME}_icon.mbm"
+  echo "    ${NAME}_icon.mbm"
+fi
+
+# ------------------------------------------------------------------ 6. sign
+echo "--> package"
+cat > "$BUILD/$NAME.pkg" <<EOF
+; Generated by symbuild — do not edit.
+&EN
+#{"$NAME"},($UID3),$VERSION,TYPE=SISAPP
+%{"$VENDOR"}
+:"$VENDOR"
+; S60 3rd Edition base platform UID. Present on FP1 and FP2 devices too, so
+; depending on it rather than the FP2 UID gives the widest install compatibility.
+[0x101F7961],0,0,0,{"Series60ProductID"}
+"$BUILD/$NAME.exe"-"!:\\sys\\bin\\$NAME.exe"
+EOF
+for rsc in "$BUILD"/*_reg.rsc; do
+  [ -f "$rsc" ] || continue
+  # The device wants _reg.rsc in the AppArc import drop-box; 10003a3f is the
+  # AppArc server's SID, not ours. Getting this path wrong is the classic
+  # "installs fine but never appears in the menu" bug.
+  echo "\"$rsc\"-\"!:\\private\\10003a3f\\import\\apps\\$(basename "$rsc")\"" >> "$BUILD/$NAME.pkg"
+done
+for rsc in "$BUILD"/*.rsc; do
+  case "$rsc" in *_reg.rsc) continue ;; esac
+  [ -f "$rsc" ] || continue
+  echo "\"$rsc\"-\"!:\\resource\\apps\\$(basename "$rsc")\"" >> "$BUILD/$NAME.pkg"
+done
+if [ -n "$ICON_MBM" ]; then
+  echo "\"$ICON_MBM\"-\"!:\\resource\\apps\\$(basename "$ICON_MBM")\"" >> "$BUILD/$NAME.pkg"
+fi
+
+( cd "$BUILD" && "$HOST/makesis" "$NAME.pkg" "$NAME.sis" )
+OUT="$BUILD/$NAME.sis"
+
+if [ "$SIGN" = 1 ]; then
+  KEY="${SIGN_KEY:-$SDK/keys/dev.key}"
+  CER="${SIGN_CERT:-$SDK/keys/dev.cer}"
+  if [ ! -f "$KEY" ] || [ ! -f "$CER" ]; then
+    echo "    minting a 10-year self-signed dev certificate"
+    mkdir -p "$(dirname "$KEY")"
+    # SHA-1 on purpose: it is what Symbian 9.x verifies.
+    openssl req -x509 -newkey rsa:2048 -keyout "$KEY" -out "$CER" \
+      -days 3650 -sha1 -nodes -subj "/CN=$VENDOR Dev/O=$VENDOR" 2>/dev/null
+  fi
+  "$HOST/signsis" "$BUILD/$NAME.sis" "$BUILD/$NAME.sisx" "$CER" "$KEY"
+  OUT="$BUILD/$NAME.sisx"
+fi
+
+echo
+echo "==> $OUT  ($(stat -c%s "$OUT") bytes)"
+if [ "$SIGN" = 1 ]; then
+  "$HOST/signsis" -o "$OUT" 2>/dev/null | sed 's/^/    /'
+else
+  echo "    unsigned — needs a patched installserver (Open4All / RomPatcher+)"
+fi
+echo
+echo "Install: copy to the phone, then Menu > Ctrl. panel > App. mgr."

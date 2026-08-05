@@ -1,0 +1,39 @@
+/* The localisable resource: the caption the menu shows and the icon it draws.
+ * Compiled to hello.rsc and installed into \resource\apps\.
+ *
+ * hello_reg.rss points at this file and at R_HELLO_LOCALISABLE_APP_INFO, so the
+ * two are a pair — the registration says where to look, this says what to show.
+ */
+
+NAME HELO
+
+#include <eikon.rh>
+#include <appinfo.rh>
+
+RESOURCE RSS_SIGNATURE { }
+
+RESOURCE TBUF { buf = ""; }
+
+/* No menu bar and no CBA: the AppUi is constructed with ENoScreenFurniture, so
+ * there is nothing for Avkon to populate. An empty EIK_APP_INFO is still required
+ * for Avkon to finish initialising. */
+RESOURCE EIK_APP_INFO
+    {
+    }
+
+RESOURCE LOCALISABLE_APP_INFO r_hello_localisable_app_info
+    {
+    /* Shown when the full caption does not fit. */
+    short_caption = "Rust";
+
+    caption_and_icon =
+        CAPTION_AND_ICON_INFO
+            {
+            caption = "Rust Hello";
+            /* One icon: an MBM bitmap/mask pair. Icons are optional — with
+             * number_of_icons = 0 the shell draws a default — but a real one
+             * proves the mifconv/bmconv path works on Linux. */
+            number_of_icons = 1;
+            icon_file = "\\resource\\apps\\hello_icon.mbm";
+            };
+    }

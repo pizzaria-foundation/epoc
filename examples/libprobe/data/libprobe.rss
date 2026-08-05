@@ -1,0 +1,21 @@
+NAME LPRB
+
+#include <eikon.rh>
+#include <appinfo.rh>
+
+RESOURCE RSS_SIGNATURE { }
+RESOURCE TBUF { buf = ""; }
+RESOURCE EIK_APP_INFO { }
+
+RESOURCE LOCALISABLE_APP_INFO r_libprobe_localisable_app_info
+    {
+    short_caption = "LibProbe";
+    caption_and_icon =
+        CAPTION_AND_ICON_INFO
+            {
+            caption = "Library Probe";
+            /* No icon: the shell draws a default, and a diagnostic tool does not
+             * need one. Saves the bmconv step entirely. */
+            number_of_icons = 0;
+            };
+    }

@@ -1,0 +1,63 @@
+# What is deliberately not in this repository, and why.
+#
+# The rule: source and recipes are tracked, anything a recipe produces is not, and
+# anything belonging to someone else is not. That keeps the tree small enough to
+# clone and keeps third-party material out of it.
+
+# ---------------------------------------------------------- other people's code
+
+# The extracted S60 3rd Edition FP2 SDK: ~1 GB of Nokia's headers, import libraries
+# and tools. Proprietary, and not ours to redistribute. Rebuild it with
+# vendor/gnupoc-git and the original Nokia installer; tools/symbuild takes its
+# location from EPOCROOT in app.conf, so it does not have to live here.
+/sdk/
+
+# Third-party sources and preserved research artifacts: GnuPoc, the Telegram TL
+# schema, S60 documentation, theme files, irssi sources. Mixed licences, ~800 MB.
+# Our own change to elf2e32 is tracked as a patch under toolchain/patches/ instead,
+# which is the part worth keeping under review.
+/vendor/
+
+# ------------------------------------------------------------ build products
+
+# The cross toolchain: 1.6 GB of built GCC and binutils, plus their source trees.
+# toolchain/build-cross-gcc.sh and toolchain/patches/ are the recipe and are
+# tracked; everything the recipe produces is not.
+/toolchain/cross/
+/toolchain/src/
+/toolchain/host/
+/toolchain/*.log
+
+# Cargo. The device crates are their own workspace roots (a #[panic_handler] cannot
+# be built for the host), so each has a target/ of its own.
+/target/
+**/device/target/
+
+# Per-app build directories: objects, ELF, E32, resources, .sis.
+**/build/
+
+# Staged packages, ready to push to a phone.
+/out/
+
+# Rendered UI previews. Regenerate with `cargo run -p preview`.
+/preview-out/
+
+# Generated icon bitmaps. The generator (data/mkicon.py) is the source; a checked-in
+# .bmp is a binary nobody can review.
+**/data/*_icon.bmp
+**/data/*_icon_mask.bmp
+
+# Generated resource headers, emitted by rcomp next to the .rss that includes them.
+**/data/*.rsg
+
+# ------------------------------------------------------------------- secrets
+
+# Self-signed development certificates, minted on demand by tools/symbuild when
+# SIGN=1. Never useful to anyone else, and a private key in a repository is a
+# private key on the internet.
+/keys/
+
+# --------------------------------------------------------------------- noise
+*.swp
+*~
+.DS_Store

@@ -1,0 +1,51 @@
+Restore the arm-none-symbianelf target triple in binutils.
+
+Upstream binutils retired `arm*-*-symbianelf*` (it sits in the obsolete-targets
+list in bfd/config.bfd, and gas/ld never learned it back). GCC, however, still
+carries the target: gcc/config.gcc maps `arm*-*-symbianelf*` to arm/symbian.h +
+arm/t-symbian, which is what gives us __SYMBIAN32__, the Symbian dllimport/
+dllexport semantics, and "don't assume GCC's libstdc++" behaviour. To build that
+GCC we need a binutils that accepts the same triple.
+
+We do NOT need to resurrect BFD's old `elf32-littlearm-symbian` vector. Its job
+was to emit a program-header-less, postlinker-friendly image; in our pipeline
+that role belongs to elf2e32, which reads a perfectly ordinary ARM ELF via
+libelf and emits the E32Image itself. So we alias symbianelf onto the plain
+little-endian ARM ELF/EABI configuration.
+
+Three files, one line each.
+
+--- a/bfd/config.bfd
++++ b/bfd/config.bfd
+@@ -93,7 +93,6 @@
+  arm*-*-netbsdaout* | \
+  arm-*-oabi | \
+  arm-*-riscix* | \
+- arm*-*-symbianelf* | \
+  arm-epoc-pe* | \
+  c30-*-*aout* | tic30-*-*aout* | \
+  cr16c-*-* | \
+@@ -422,7 +421,7 @@
+   arm-*-elf | arm*-*-freebsd* | arm*-*-linux-* | arm*-*-conix* | \
+   arm*-*-uclinux* | arm-*-kfreebsd*-gnu | \
+-  arm*-*-eabi* | arm-*-rtems* | arm*-*-uclinuxfdpiceabi)
++  arm*-*-eabi* | arm*-*-symbianelf* | arm-*-rtems* | arm*-*-uclinuxfdpiceabi)
+     targ_defvec=arm_elf32_le_vec
+     targ_selvecs="arm_elf32_be_vec arm_elf32_fdpic_le_vec arm_elf32_fdpic_be_vec"
+     ;;
+
+--- a/gas/configure.tgt
++++ b/gas/configure.tgt
+@@ -151,7 +151,7 @@
+   arm-*-phoenix*)			fmt=elf ;;
+   arm-*-elf)				fmt=elf ;;
+-  arm-*-eabi* | arm-*-rtems* | arm-*-genode*)	fmt=elf em=armeabi ;;
++  arm-*-eabi* | arm-*-symbianelf* | arm-*-rtems* | arm-*-genode*)	fmt=elf em=armeabi ;;
+
+--- a/ld/configure.tgt
++++ b/ld/configure.tgt
+@@ -206,1 +206,1 @@
+-arm-*-elf | arm*-*-eabi* | arm-*-rtems* | arm-*-genode*)
++arm-*-elf | arm*-*-eabi* | arm*-*-symbianelf* | arm-*-rtems* | arm-*-genode*)
+ 			targ_emul=armelf
+ 			;;

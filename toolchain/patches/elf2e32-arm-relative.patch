@@ -1,0 +1,35 @@
+diff --git a/tools/elf2e32/elf2e32.cpp b/tools/elf2e32/elf2e32.cpp
+index 5b6153a..2744c4a 100644
+--- a/tools/elf2e32/elf2e32.cpp
++++ b/tools/elf2e32/elf2e32.cpp
+@@ -93,6 +93,30 @@ void checkRelocations(Elf* elf, Elf_Scn* relocationSection, Elf32_Shdr* relocati
+ 		Elf32_Half verIndex = ver[index];
+ 		if (sym >= symArray && sym < endSym) {
+ 			const char* name = elf_strptr(elf, sections->dynsymHeader->sh_link, symArray[index].st_name);
++			/* R_ARM_RELATIVE carries no symbol: GNU ld emits it with symbol index
++			   0 for an absolute address inside the image, where RVCT would have
++			   emitted R_ARM_ABS32 against a real symbol. Symbol 0 has st_shndx
++			   == 0, so without this the import branch below is taken, getDsoName
++			   returns NULL for version index 0, and fixImportRelocation
++			   dereferences it.
++			   The target address is the word already stored in the image, and the
++			   E32 relocation type is derived from where that address points, so
++			   read it back rather than looking up an import that does not exist.
++			   fixRelocation(..., 0) adds nothing and returns the existing word. */
++			if (type == R_ARM_RELATIVE && index == 0) {
++				if (rel->r_offset >= header->codeBase &&
++				    rel->r_offset < header->codeBase + header->codeSize) {
++					uint32_t target = fixRelocation(rel->r_offset - header->codeBase + header->codeOffset, out, 0);
++					relocationList.addRelocation(rel->r_offset - header->codeBase, target);
++				} else if (rel->r_offset >= header->dataBase &&
++				           rel->r_offset < header->dataBase + header->dataSize + header->bssSize) {
++					uint32_t target = fixRelocation(rel->r_offset - header->dataBase + header->dataOffset, out, 0);
++					dataRelocationList.addRelocation(rel->r_offset - header->dataBase, target);
++				} else {
++					printf("unhandled R_ARM_RELATIVE at %08x\n", rel->r_offset);
++				}
++				continue;
++			}
+ 			if (sym->st_shndx) {
+ 				Elf32_Addr value = sym->st_value;
+ //				if (!strcmp(name, "Image$$ER_RO$$Base"))

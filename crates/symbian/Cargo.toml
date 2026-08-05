@@ -1,0 +1,13 @@
+[package]
+name = "symbian"
+description = "Safe wrappers over the Symbian shim: files, and later sockets"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+symbian-sys = { workspace = true }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_vendor, values("symbian"))'] }

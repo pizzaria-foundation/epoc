@@ -1,0 +1,29 @@
+# Its own workspace root, for the same reason apps/telegram/device is: a crate that
+# defines #[panic_handler] cannot be built for the host at all, because cargo links
+# the test harness against std, which already defines it.
+[workspace]
+
+[package]
+name = "libprobe-device"
+description = "Diagnostic: reports which optional device DLLs are present"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+rust-version = "1.85"
+publish = false
+
+[lib]
+crate-type = ["staticlib"]
+
+[dependencies]
+symbian-gfx = { path = "../../../crates/symbian-gfx" }
+symbian-ui = { path = "../../../crates/symbian-ui" }
+symbian-sys = { path = "../../../crates/symbian-sys" }
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true
+debug = false
+overflow-checks = false

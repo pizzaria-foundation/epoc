@@ -1,0 +1,20 @@
+[package]
+name = "tg"
+description = "Telegram client for Symbian — UI first, protocol later"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lib]
+# A plain rlib. The device build wraps this in a thin staticlib crate that
+# supplies #[global_allocator], #[panic_handler] and the extern "C" entry points
+# — runtime glue belongs next to the shim, not in the app logic.
+crate-type = ["rlib"]
+
+[features]
+default = []
+std = ["symbian-ui/std"]
+
+[dependencies]
+symbian-ui = { workspace = true }

@@ -1,0 +1,15 @@
+[package]
+name = "symbian-gfx"
+description = "no_std software rasterizer targeting Symbian's 16bpp framebuffers"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[features]
+default = []
+# Pulls in std for host-side tests and the preview tool. The device build never
+# enables this; the crate is no_std + alloc otherwise.
+std = []
+
+[dependencies]

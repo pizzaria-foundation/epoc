@@ -1,0 +1,19 @@
+[package]
+name = "sim"
+description = "Interactive host simulator: the real app, in a window, driven by the keyboard"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+symbian-gfx = { workspace = true }
+symbian-ui = { workspace = true }
+tg = { workspace = true }
+
+# Host-only, and it never reaches the device: the simulator is a development tool, so a
+# dependency here costs nothing in the shipped binary. minifb over winit+softbuffer
+# because all this needs is "put these pixels in a window and tell me about keys", and
+# minifb is that in two calls.
+minifb = "0.28"

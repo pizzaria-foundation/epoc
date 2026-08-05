@@ -1,0 +1,33 @@
+/* Application registration. This file, compiled to hello_reg.rsc and installed
+ * into \private\10003a3f\import\apps\, is what makes the app appear in the S60
+ * menu at all.
+ *
+ * 10003a3f is the AppArc (application architecture) server's own SID, not ours,
+ * and the `import` subdirectory is its writable drop-box. Installing to
+ * \private\10003a3f\apps\ instead works on the emulator and silently fails on a
+ * device — the classic "installs fine but never shows up" bug.
+ */
+
+#include <appinfo.rh>
+#include "hello.rsg"
+
+/* UID2 identifies the file as a registration resource; UID3 is the application,
+ * and must match KUidHelloApp in hello.h and the --uid3 given to elf2e32. */
+UID2 KUidAppRegistrationResourceFile
+UID3 0xE1234568
+
+RESOURCE APP_REGISTRATION_INFO
+    {
+    /* Basename of the executable, no path and no extension. */
+    app_file = "hello";
+
+    /* Where the caption and icon live. Path only, without the drive letter: the
+     * installer substitutes whichever drive the app landed on. */
+    localisable_resource_file = "\\resource\\apps\\hello";
+    localisable_resource_id = R_HELLO_LOCALISABLE_APP_INFO;
+
+    hidden = KAppNotHidden;
+    embeddability = KAppNotEmbeddable;
+    newfile = KAppDoesNotSupportNewFile;
+    launch = KAppLaunchInForeground;
+    }

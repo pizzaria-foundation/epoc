@@ -1,0 +1,41 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/symbian-gfx",
+    "crates/symbian-ui",
+    "crates/symbian-sys",
+    "crates/symbian",
+    "apps/telegram",
+    "tools/preview",
+    "tools/sim",
+]
+# apps/telegram/device is deliberately absent: it is a no_std staticlib carrying a
+# #[panic_handler], which collides with std's when cargo builds the test harness.
+# It is its own workspace root, built only for the ARM target. See its Cargo.toml.
+exclude = ["apps/telegram/device"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/joshua/symbian-rust-sdk"
+rust-version = "1.85"
+
+[workspace.dependencies]
+symbian-gfx = { path = "crates/symbian-gfx", default-features = false }
+symbian-ui = { path = "crates/symbian-ui", default-features = false }
+symbian-sys = { path = "crates/symbian-sys" }
+symbian = { path = "crates/symbian" }
+tg = { path = "apps/telegram" }
+
+# Small binaries matter a lot on a device with ~30 MB of usable RAM and a
+# ~100 KB-per-page demand loader. These settings apply to the device profile;
+# the host preview tool is unaffected in practice.
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true
+debug = false
+overflow-checks = false
+

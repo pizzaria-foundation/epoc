@@ -1,0 +1,16 @@
+#include <appinfo.rh>
+#include "keyprobe.rsg"
+
+UID2 KUidAppRegistrationResourceFile
+UID3 0xE123456A
+
+RESOURCE APP_REGISTRATION_INFO
+    {
+    app_file = "keyprobe";
+    localisable_resource_file = "\\resource\\apps\\keyprobe";
+    localisable_resource_id = R_KEYPROBE_LOCALISABLE_APP_INFO;
+    hidden = KAppNotHidden;
+    embeddability = KAppNotEmbeddable;
+    newfile = KAppDoesNotSupportNewFile;
+    launch = KAppLaunchInForeground;
+    }
