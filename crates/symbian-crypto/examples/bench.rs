@@ -11,7 +11,7 @@
 
 use std::time::Instant;
 
-use symbian_crypto::{bignum, Aes};
+use symbian_crypto::{bignum, pbkdf2, sha256, sha512, Aes};
 
 /// The cipher as it was before the T-tables: FIPS 197 section 5 done a byte at a time.
 ///
@@ -190,8 +190,62 @@ fn bench_aes() {
     println!();
 }
 
+/// SHA-512 against SHA-256, and the 2FA key derivation that rides on it.
+///
+/// # The ratio this prints does not transfer to the device, and that is the finding
+///
+/// SHA-512 is *faster* than SHA-256 here — it does 128-byte blocks in 64-bit words, and
+/// this host has 64-bit registers. The E72 does not. On ARMv6 every one of those operations
+/// becomes a pair of 32-bit instructions, so the same comparison inverts: SHA-512 is the
+/// slower of the two by roughly the factor it is faster by here.
+///
+/// Which means the obvious extrapolation — scale the host PBKDF2 by the SHA-256 ratio the
+/// self test measured — is wrong in the safe-looking direction, and would have predicted
+/// about 2.5 s for something nearer eleven. The estimate below scales by an *assumed*
+/// device SHA-512 rate instead, and says so.
+fn bench_kdf() {
+    let data = vec![0u8; 1 << 20];
+
+    let t = Instant::now();
+    sha256::sha256(&data);
+    let s256 = t.elapsed().as_secs_f64();
+
+    let t = Instant::now();
+    sha512::sha512(&data);
+    let s512 = t.elapsed().as_secs_f64();
+
+    println!("hashing 1 MB, host:");
+    println!("  SHA-256:   {:>9.0} KB/s", 1024.0 / s256);
+    println!("  SHA-512:   {:>9.0} KB/s", 1024.0 / s512);
+    println!("  SHA-512 is {:.2}x the cost of SHA-256", s512 / s256);
+
+    // Telegram's count, measured rather than extrapolated -- it is only a second or two on
+    // a host and the extrapolation is what this exists to check.
+    let mut out = [0u8; 64];
+    let t = Instant::now();
+    pbkdf2::pbkdf2_hmac_sha512(b"password", b"salt", 100_000, &mut out);
+    let kdf = t.elapsed().as_secs_f64();
+    println!("  PBKDF2 100k iterations: {:.0} ms", kdf * 1000.0);
+
+    // A guess with its reasoning shown, not a measurement. The E72 does 8 MB/s of SHA-256;
+    // 64-bit arithmetic emulated in 32-bit registers costs somewhere around 2.5x, so call
+    // device SHA-512 3 MB/s. Anyone reading this should treat it as the shape of the answer
+    // and not the answer.
+    let host_s512_mb = 1.0 / s512;
+    const GUESS_DEVICE_SHA512_MB: f64 = 3.0;
+    println!();
+    println!("  SHA-512 is FASTER here because this host has 64-bit registers.");
+    println!("  On ARMv6 it is the slower of the two, so the sign of that ratio flips.");
+    println!("  Guessing {GUESS_DEVICE_SHA512_MB:.0} MB/s on the handset against this host's {host_s512_mb:.0} MB/s:");
+    println!("    PBKDF2 100k would be about {:.0} s there.",
+             kdf * host_s512_mb / GUESS_DEVICE_SHA512_MB);
+    println!("    That is a guess. examples/selftest measures it.");
+    println!();
+}
+
 fn main() {
     bench_aes();
+    bench_kdf();
 
     // A full-width odd modulus: the top bit set so it is genuinely 2048 bits, and the low
     // bit set because Montgomery reduction requires an odd modulus.

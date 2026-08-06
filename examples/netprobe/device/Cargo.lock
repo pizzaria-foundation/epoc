@@ -25,6 +25,7 @@ dependencies = [
 name = "symbian"
 version = "0.1.0"
 dependencies = [
+ "symbian-crypto",
  "symbian-sys",
 ]
 
