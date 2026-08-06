@@ -42,6 +42,9 @@
 
 extern crate alloc;
 
+pub mod crypto;
+pub mod handshake;
+pub mod keys;
 pub mod pq;
 pub mod tl;
 pub mod transport;

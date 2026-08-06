@@ -21,5 +21,9 @@ default = []
 # the fixtures the Python client writes. Never enabled for the device.
 std = []
 
+[dev-dependencies]
+# The differential test drives modpow itself, standing in for the worker thread.
+symbian-crypto = { workspace = true }
+
 [dependencies]
 symbian-crypto = { workspace = true }
