@@ -31,4 +31,10 @@ fn worker(opcode: i32, input: &[u8], out: &mut [u8]) -> i32 {
 static _CHATS_LINK: fn(&[u8]) -> Result<tg_proto::chats::Dialogs, tg_proto::walk::Error> =
     tg_proto::chats::parse_dialogs;
 
-symbian_app::entry!(tg::App::mock(), work = worker);
+/// `App::login()` rather than `App::mock()`.
+///
+/// It opens the connection as it is constructed — attaching to whatever is already up takes
+/// 263 ms on this handset — so the handshake is running before anyone finishes typing a
+/// phone number. `mock()` still exists for the preview and the tests, which draw the same
+/// screens with nothing behind them.
+symbian_app::entry!(tg::App::login(), work = worker);

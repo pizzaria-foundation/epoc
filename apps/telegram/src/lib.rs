@@ -10,6 +10,7 @@
 
 extern crate alloc;
 
+pub mod driver;
 pub mod link;
 pub mod login;
 pub mod session_store;
@@ -34,6 +35,9 @@ enum Screen {
 }
 
 pub struct App {
+    /// The connection, when this build is driving one. `None` for the mock and the preview,
+    /// which draw the same screens with nothing behind them.
+    driver: Option<driver::Driver>,
     pub store: Store,
     screen: Screen,
     /// Set when the app wants to close, for the shim to act on.
@@ -42,7 +46,7 @@ pub struct App {
 
 impl App {
     pub fn new(store: Store) -> Self {
-        Self { store, screen: Screen::Chats(ChatList::new()), should_exit: false }
+        Self { driver: None, store, screen: Screen::Chats(ChatList::new()), should_exit: false }
     }
 
     pub fn mock() -> Self {
@@ -57,7 +61,13 @@ impl App {
     /// cannot succeed should tell the user before they type a phone number, not after they
     /// have waited for `API_ID_INVALID` to come back from Telegram.
     pub fn login() -> Self {
+        let mut driver = driver::Driver::new();
+        // Asked for now rather than when a number is typed: attaching to a connection that
+        // is already up takes 263 ms on this handset, and the handshake behind it is four
+        // seconds. Both should be done before anyone finishes typing.
+        let _ = driver.connect();
         Self {
+            driver: Some(driver),
             store: Store::default(),
             screen: Screen::Login(Login::new(link::api_id(), link::api_hash())),
             should_exit: false,
@@ -66,7 +76,7 @@ impl App {
 
     /// The login screen with no credentials, for the preview and the tests.
     pub fn mock_login() -> Self {
-        Self { store: Store::mock(), screen: Screen::Login(Login::new(0, "")), should_exit: false }
+        Self { driver: None, store: Store::mock(), screen: Screen::Login(Login::new(0, "")), should_exit: false }
     }
 
     fn on_key(&mut self, ev: KeyEvent, theme: &Theme<'_>, screen_rect: Rect) -> Handled {
@@ -75,19 +85,23 @@ impl App {
                 let (handled, action) = login.handle_key(ev, theme, screen_rect);
                 match action {
                     LoginAction::SendCode(number) => {
-                        login.ask_send_code(&number);
+                        let p = login.ask_send_code(&number);
+                        drive(&mut self.driver, p, login);
                         Handled::Consumed
                     }
                     LoginAction::SubmitCode(code) => {
-                        login.submit_code(&code);
+                        let p = login.submit_code(&code);
+                        drive(&mut self.driver, p, login);
                         Handled::Consumed
                     }
                     LoginAction::SubmitPassword(pw) => {
-                        login.submit_password(&pw);
+                        let p = login.submit_password(&pw);
+                        drive(&mut self.driver, p, login);
                         Handled::Consumed
                     }
                     LoginAction::Resend => {
-                        login.ask_resend();
+                        let p = login.ask_resend();
+                        drive(&mut self.driver, p, login);
                         Handled::Consumed
                     }
                     LoginAction::Back => {
@@ -193,12 +207,61 @@ impl App {
     }
 }
 
+/// Hand a login action to the connection, if this build has one.
+///
+/// A free function because both borrows are of `App` fields and the borrow checker will not
+/// take `self.driver` and `self.screen` at once through methods.
+fn drive(
+    driver: &mut Option<driver::Driver>,
+    p: login::Progress,
+    login: &mut Login,
+) -> driver::Outcome {
+    let now = symbian::unix_time();
+    match driver {
+        Some(d) => d.apply(p, login, now),
+        // The preview and the tests draw the same screens with nothing behind them, and a
+        // key press there should do nothing rather than pretend.
+        None => driver::Outcome::None,
+    }
+}
+
 /// The SDK's application contract. Everything that runs this app — the device entry
 /// points and the host simulator — goes through here, so neither needs to know the
 /// concrete type.
 impl symbian_ui::App for App {
     fn handle_key(&mut self, ev: KeyEvent, theme: &Theme<'_>, screen: Rect) -> Handled {
         self.on_key(ev, theme, screen)
+    }
+
+    /// Everything the network and the worker thread do arrives here.
+    ///
+    /// The shim delivers socket completions, timer ticks and worker results as raw events;
+    /// `Driver` turns them into progress and this decides what the screen becomes. Returning
+    /// `Ignored` for events nobody claimed lets the toolkit handle its own.
+    fn handle_raw(&mut self, ev: &symbian_ui::RawEvent) -> Handled {
+        let now = symbian::unix_time();
+        let Screen::Login(login) = &mut self.screen else {
+            return Handled::Ignored;
+        };
+        let Some(d) = self.driver.as_mut() else {
+            return Handled::Ignored;
+        };
+
+        match d.on_event(ev, login, now) {
+            driver::Outcome::Authorized => {
+                // Signed in. The chat list is still the mock until messages.getDialogs is
+                // wired; what matters here is that the login screen goes away, because
+                // leaving it up after a successful sign-in reads as a failure.
+                self.screen = Screen::Chats(ChatList::new());
+                Handled::Consumed
+            }
+            driver::Outcome::Disconnected(why) => {
+                login.set_error(why);
+                Handled::Consumed
+            }
+            driver::Outcome::Redraw => Handled::Consumed,
+            driver::Outcome::None => Handled::Ignored,
+        }
     }
 
     fn draw(&mut self, c: &mut Canvas<'_>, theme: &Theme<'_>) {
@@ -348,7 +411,7 @@ mod tests {
                 length: Some(5),
                 error: None,
             };
-            let mut app = App { store: Store::mock(), screen: super::Screen::Login(login), should_exit: false };
+            let mut app = App { driver: None, store: Store::mock(), screen: super::Screen::Login(login), should_exit: false };
             let mut c = Canvas::from_slice(&mut buf, SCREEN);
             app.draw(&mut c, &t);
         }
@@ -366,7 +429,7 @@ mod tests {
                 hint: String::new(),
                 error: None,
             };
-            let mut app = App { store: Store::mock(), screen: super::Screen::Login(login), should_exit: false };
+            let mut app = App { driver: None, store: Store::mock(), screen: super::Screen::Login(login), should_exit: false };
             let mut c = Canvas::from_slice(&mut buf, SCREEN);
             app.draw(&mut c, &t);
         }

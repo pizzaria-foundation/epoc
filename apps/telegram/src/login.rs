@@ -106,6 +106,26 @@ impl Login {
         self.api_id == 0 || self.api_hash_empty
     }
 
+    /// Post an error on whatever screen is in front.
+    ///
+    /// For failures that do not come from the protocol — no route, a dead socket — which
+    /// have no `AuthError` and would otherwise be invisible: the screen would sit on
+    /// "conectando" with nothing behind it.
+    pub fn set_error(&mut self, text: &str) {
+        let msg = String::from(text);
+        match &mut self.screen {
+            Screen::Phone { error, .. } => *error = Some(msg),
+            Screen::Code { error, .. } => *error = Some(msg),
+            Screen::Password { error, .. } => *error = Some(msg),
+            Screen::Waiting(_) => {
+                self.screen = Screen::Phone {
+                    field: TextField::with_limit(16),
+                    error: Some(msg),
+                };
+            }
+        }
+    }
+
     /// The number this login is for, so a migration can restart with it.
     pub fn phone(&self) -> &str {
         self.machine.phone()

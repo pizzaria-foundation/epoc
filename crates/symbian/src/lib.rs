@@ -23,6 +23,18 @@ pub mod error;
 pub mod fs;
 pub mod net;
 pub mod random;
+
+/// Seconds since the Unix epoch, from the handset's clock.
+///
+/// Drifts, and the user can change it from the clock application — MTProto rejects a
+/// `msg_id` more than 30 s ahead or 300 s behind the server, which is why the handshake
+/// reports the server's time and the client keeps the difference.
+///
+/// Here rather than in each application: reaching for the shim directly means an `unsafe`
+/// block, and the crates above this one are `#![forbid(unsafe_code)]` on purpose.
+pub fn unix_time() -> i64 {
+    unsafe { symbian_sys::shim_unix_time() }
+}
 pub mod work;
 
 pub use error::{Error, Result};

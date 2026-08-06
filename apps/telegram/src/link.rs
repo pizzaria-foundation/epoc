@@ -104,6 +104,9 @@ pub enum Progress {
     Authenticated,
     /// A reply to a call made with [`Link::call`].
     Reply { tag: u32, body: Vec<u8> },
+    /// The result of work submitted through [`Link::submit_modpow`] or
+    /// [`Link::submit_kdf`]. Never the handshake's own, which is handled internally.
+    WorkDone(Vec<u8>),
     /// The server refused a call.
     Failed { tag: u32, code: i32, text: String },
     /// The connection is gone. Everything must be rebuilt.
@@ -123,6 +126,8 @@ pub struct Link {
     client: Client,
     rng: PlatformRng,
     job: Job,
+    /// Whether the job in flight belongs to the caller rather than to the handshake.
+    work_is_caller: bool,
     phase: Phase,
     dc: u8,
     /// Steps the client produced that have not been carried out yet.
@@ -183,6 +188,7 @@ impl Link {
             client,
             rng,
             job: Job::new(),
+            work_is_caller: false,
             phase: Phase::Connecting,
             dc,
             todo: first.into_iter().collect(),
@@ -247,6 +253,46 @@ impl Link {
         self.client.is_ready()
     }
 
+    /// Run an exponentiation on the worker, for a caller with its own state machine.
+    ///
+    /// SRP needs three of these and the handshake needs two, and the shim's worker takes
+    /// one job at a time — so they share this rather than each holding a `Job` and racing.
+    /// The result arrives as [`Progress::WorkDone`]. `false` when the worker is busy, and
+    /// then the caller must hold the work and try again.
+    pub fn submit_modpow(&mut self, base: &[u8], exp: &[u8], modulus: &[u8]) -> bool {
+        if self.job.is_busy() {
+            return false;
+        }
+        let ok = self.job.submit(&ModPow { base, exp, modulus }).is_ok();
+        self.work_is_caller = ok;
+        ok
+    }
+
+    /// Run the two-factor key derivation on the worker.
+    ///
+    /// 4.9 s on an E72, measured. On the GUI thread that is five seconds of frozen window
+    /// server — the whole phone, not just this application.
+    pub fn submit_kdf(&mut self, password: &[u8], salt1: &[u8], salt2: &[u8]) -> bool {
+        if self.job.is_busy() {
+            return false;
+        }
+        let ok = self
+            .job
+            .submit_kdf(&symbian::work::Kdf { password, salt1, salt2 })
+            .is_ok();
+        self.work_is_caller = ok;
+        ok
+    }
+
+    pub fn work_busy(&self) -> bool {
+        self.job.is_busy()
+    }
+
+    /// The random source. SRP needs one for its own secret and the Link owns the only one.
+    pub fn rng_mut(&mut self) -> &mut PlatformRng {
+        &mut self.rng
+    }
+
     pub fn auth_key(&self) -> Option<&AuthKey> {
         self.client.auth_key()
     }
@@ -276,7 +322,15 @@ impl Link {
         // before the socket means a modpow finishing in the same tick as a packet arriving
         // is handled in the order the protocol expects.
         if let Some(result) = self.job.on_event(ev) {
+            // Whose job was it?
+            //
+            // The Link owns the only worker, because the shim runs one at a time and two
+            // owners would race for the slot -- the handshake needs two exponentiations and
+            // SRP needs three plus a five-second derivation. Work the caller submitted comes
+            // back as Progress::WorkDone; the handshake's is fed back in here.
+            let theirs = core::mem::replace(&mut self.work_is_caller, false);
             return match result {
+                Ok(bytes) if theirs => Progress::WorkDone(bytes.to_vec()),
                 Ok(bytes) => {
                     let out = bytes.to_vec();
                     match self.client.on_modpow(&out, &mut self.rng) {
