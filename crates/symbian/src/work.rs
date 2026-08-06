@@ -44,6 +44,9 @@ use crate::error::{Error, Result};
 /// Opcode for a modular exponentiation. Must match the app's `rust_work` dispatcher.
 pub const OP_MODPOW: i32 = 1;
 
+/// Opcode for a PBKDF2 key derivation. Must match the app's `rust_work` dispatcher.
+pub const OP_KDF: i32 = 2;
+
 /// The largest operand this facility carries, matching `symbian_crypto::bignum::MAX_BYTES`.
 pub const MAX_OPERAND: usize = 256;
 
@@ -80,6 +83,52 @@ impl ModPow<'_> {
         }
         Ok(n)
     }
+}
+
+/// A PBKDF2 key derivation to run off the GUI thread.
+///
+/// `password`, `salt1`, `salt2` — the three inputs to [`tg_proto::srp::derive_x`].
+pub struct Kdf<'a> {
+    pub password: &'a [u8],
+    pub salt1: &'a [u8],
+    pub salt2: &'a [u8],
+}
+
+impl Kdf<'_> {
+    fn encode(&self, out: &mut [u8]) -> Result<usize> {
+        let n = 4 + self.password.len() + self.salt1.len() + self.salt2.len();
+        if n > out.len()
+            || self.password.len() > MAX_OPERAND
+            || self.salt1.len() > MAX_OPERAND
+            || self.salt2.len() > MAX_OPERAND
+        {
+            return Err(Error::Argument);
+        }
+        out[0..2].copy_from_slice(&(self.password.len() as u16).to_be_bytes());
+        out[2..4].copy_from_slice(&(self.salt1.len() as u16).to_be_bytes());
+        let mut at = 4;
+        for part in [self.password, self.salt1, self.salt2] {
+            out[at..at + part.len()].copy_from_slice(part);
+            at += part.len();
+        }
+        Ok(n)
+    }
+}
+
+/// Unpack what [`Kdf::encode`] wrote.
+///
+/// Called on the *worker thread*, from the app's `rust_work`.
+pub fn decode_kdf(input: &[u8]) -> Option<(&[u8], &[u8], &[u8])> {
+    if input.len() < 4 {
+        return None;
+    }
+    let pw = u16::from_be_bytes([input[0], input[1]]) as usize;
+    let s1 = u16::from_be_bytes([input[2], input[3]]) as usize;
+    let s2 = input.len().saturating_sub(4 + pw + s1);
+    if 4 + pw + s1 + s2 > input.len() {
+        return None;
+    }
+    Some((&input[4..4 + pw], &input[4 + pw..4 + pw + s1], &input[4 + pw + s1..4 + pw + s1 + s2]))
 }
 
 /// Unpack what [`ModPow::encode`] wrote.
@@ -141,9 +190,27 @@ impl Job {
         let n = job.encode(&mut self.input)?;
         self.result_len = job.modulus.len().min(MAX_OPERAND);
 
+        self.submit_raw(OP_MODPOW, n)
+    }
+
+    /// Start a key derivation.
+    ///
+    /// Same contract as [`submit`]: one at a time, off the GUI thread.
+    pub fn submit_kdf(&mut self, job: &Kdf<'_>) -> Result<()> {
+        if self.busy {
+            return Err(Error::InUse);
+        }
+        let n = job.encode(&mut self.input)?;
+        // KDF always produces 32 bytes (SHA-256 digest).
+        self.result_len = 32;
+
+        self.submit_raw(OP_KDF, n)
+    }
+
+    fn submit_raw(&mut self, opcode: i32, n: usize) -> Result<()> {
         let rc = unsafe {
             sys::shim_work_submit(
-                OP_MODPOW,
+                opcode,
                 self.input.as_ptr(),
                 n as i32,
                 self.output.as_mut_ptr(),

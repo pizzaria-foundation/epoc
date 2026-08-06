@@ -124,6 +124,12 @@ pub trait Net {
     fn net_start(&mut self, iap: Iap) -> Result<i32>;
     fn net_stop(&mut self, handle: i32);
     fn resolve(&mut self, conn: i32, host: &str) -> Result<i32>;
+
+    /// Abandon a lookup.
+    ///
+    /// Necessary rather than tidy: a resolver nobody answers holds the connection it was
+    /// made against, and on a handset with no route nothing is ever answered.
+    fn dns_close(&mut self, handle: i32);
     fn tcp_open(&mut self, conn: i32) -> Result<i32>;
     fn tcp_connect(&mut self, handle: i32, addr: Ipv4, port: u16) -> Result<()>;
     /// The buffer must stay alive and untouched until the send completes.
@@ -162,6 +168,10 @@ impl Net for ShimNet {
         let mut h = 0i32;
         Error::check(unsafe { sys::shim_dns_resolve(conn, buf.as_ptr(), n as i32, &mut h) })?;
         Ok(h)
+    }
+
+    fn dns_close(&mut self, handle: i32) {
+        unsafe { sys::shim_dns_close(handle) }
     }
 
     fn tcp_open(&mut self, conn: i32) -> Result<i32> {
@@ -612,6 +622,7 @@ mod tests {
         fn resolve(&mut self, _conn: i32, _host: &str) -> Result<i32> {
             Ok(self.alloc())
         }
+        fn dns_close(&mut self, _handle: i32) {}
         fn tcp_open(&mut self, _conn: i32) -> Result<i32> {
             Ok(self.alloc())
         }

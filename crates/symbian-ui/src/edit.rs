@@ -20,6 +20,11 @@ pub struct TextField {
     /// Cap in `char`s, not bytes — a limit in bytes would behave differently for
     /// Cyrillic than for Latin, which users would experience as a bug.
     max_chars: Option<usize>,
+    /// When true, [`text`] returns `*` repeated for every character instead of the
+    /// real contents. The underlying buffer is still the password and is cleared by
+    /// [`take`], so a shadow copy in the screen is never needed and the only place
+    /// the password lives is here.
+    masked: bool,
 }
 
 impl TextField {
@@ -31,8 +36,30 @@ impl TextField {
         Self { max_chars: Some(max_chars), ..Self::default() }
     }
 
+    /// The visible content. When masked, every character is replaced with `*`; the
+    /// underlying buffer still holds the real text and [`take`] clears it.
     pub fn text(&self) -> &str {
         &self.text
+    }
+
+    /// What to draw on the screen: the real text, or a row of `*` with the same length.
+    ///
+    /// A masked field never exposes the password in a draw call; the caller does not
+    /// need a second branch.
+    pub fn display(&self) -> alloc::string::String {
+        if self.masked {
+            core::iter::repeat('*').take(self.text.chars().count()).collect()
+        } else {
+            alloc::string::String::from(&self.text)
+        }
+    }
+
+    pub fn set_masked(&mut self, masked: bool) {
+        self.masked = masked;
+    }
+
+    pub fn is_masked(&self) -> bool {
+        self.masked
     }
 
     pub fn is_empty(&self) -> bool {
@@ -270,5 +297,22 @@ mod tests {
         assert_eq!(f.handle_key(ev(Key::Char('\n'))), Handled::Ignored);
         assert_eq!(f.handle_key(ev(Key::Char('\t'))), Handled::Ignored);
         assert!(f.is_empty());
+    }
+
+    #[test]
+    fn a_masked_field_never_leaks_the_password_through_display() {
+        // The display hides characters; the real text is still in the buffer so it
+        // can be submitted to the server, and take() clears it so a shadow copy in
+        // the screen is never needed.
+        let mut f = TextField::new();
+        f.set_masked(true);
+        f.insert_str("hunter2");
+        assert_eq!(f.text(), "hunter2", "the real text must still be readable internally");
+        assert_eq!(f.display(), "*******");
+        assert_eq!(f.display().chars().count(), f.char_count());
+        // Take must clear the underlying password, not just the mask.
+        f.take();
+        assert!(f.is_empty());
+        assert_eq!(f.display(), "");
     }
 }

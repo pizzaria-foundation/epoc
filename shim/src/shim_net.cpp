@@ -694,6 +694,16 @@ static int32_t OpenSocket(int32_t conn, int32_t* handle, TBool aDatagram)
     return SHIM_OK;
     }
 
+void shim_dns_close(int32_t handle)
+    {
+    if (handle < 0 || handle >= KMaxResolvers)
+        return;
+    /* The destructor cancels before closing, in that order -- an RHostResolver with a
+     * pending GetByName waits forever on Close, the same trap RSocket has. */
+    delete gResolvers[handle];
+    gResolvers[handle] = NULL;
+    }
+
 int32_t shim_tcp_open(int32_t conn, int32_t* handle)
     {
     return OpenSocket(conn, handle, EFalse);

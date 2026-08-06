@@ -1101,6 +1101,32 @@ impl SelfTest {
                 "compare above",
             );
         }
+
+        // SHA-512 and the two-factor key derivation.
+        //
+        // The host says SHA-512 is 1.7x *faster* than SHA-256, because it does 128-byte
+        // blocks in 64-bit words and the host has 64-bit registers. This core does not, so
+        // the comparison should invert here -- and that inversion is why the PBKDF2 estimate
+        // was scaled by the wrong hash and came out at 2.5 s for something guessed at
+        // twelve. These lines settle it.
+        let t = now_us();
+        let mut h = crypto::Sha512::new();
+        h.update(&data);
+        let _ = h.finish();
+        let us = (now_us() - t).max(1);
+        self.report.num("SHA-512 over 64 KB (us)", us as i64);
+        self.report.num("SHA-512 KB/s", (64 * 1_000_000 / us) as i64);
+
+        // A thousand iterations, extrapolated to Telegram's hundred thousand. Measuring the
+        // real count would be most of a minute inside one tick, which is the freeze the
+        // worker thread exists to avoid.
+        let mut dk = [0u8; 64];
+        let t = now_us();
+        crypto::pbkdf2_hmac_sha512(b"password", b"salt", 1000, &mut dk);
+        let us = (now_us() - t).max(1);
+        self.report.num("PBKDF2-SHA512 1000 iterations (us)", us as i64);
+        self.report.num("=> 100000 iterations, projected (ms)", (us / 10) as i64);
+        self.report.check("a 2FA password check would take under 30 s", us / 10 < 30_000);
     }
 
     fn do_graphics(&mut self) {
@@ -1677,6 +1703,14 @@ impl App for SelfTest {
                     Phase::WorkerWait => self.next(Phase::BearerSweep),
 
                     Phase::DnsWait => {
+                        // Close the lookup nobody is going to answer. Leaving it open holds
+                        // the connection it was made against, and the bearer sweep that
+                        // follows then answers KErrLocked on a prompt that waited two
+                        // minutes -- which is what the last device report showed.
+                        if self.dns_handle >= 0 {
+                            self.net.dns_close(self.dns_handle);
+                            self.dns_handle = -1;
+                        }
                         // A timeout and an error mean the same thing here and only one of
                         // them used to fall back. The routeless attempt succeeds trivially
                         // -- it just declines to open an RConnection -- so its failure shows

@@ -214,6 +214,7 @@ extern "C" {
     pub fn shim_net_start(iap: i32, handle: *mut i32) -> i32;
     pub fn shim_net_stop(handle: i32);
     pub fn shim_dns_resolve(conn: i32, host: *const u16, len: i32, handle: *mut i32) -> i32;
+    pub fn shim_dns_close(handle: i32);
     pub fn shim_tcp_open(conn: i32, handle: *mut i32) -> i32;
     pub fn shim_tcp_connect(handle: i32, ipv4: u32, port: u16) -> i32;
     pub fn shim_tcp_send(handle: i32, buf: *const u8, len: i32) -> i32;
@@ -351,6 +352,7 @@ mod host_stubs {
     ) -> i32 {
         SHIM_ERR_NOT_READY
     }
+    pub unsafe fn shim_dns_close(_h: i32) {}
     pub unsafe fn shim_tcp_open(_c: i32, _h: *mut i32) -> i32 {
         SHIM_ERR_NOT_READY
     }

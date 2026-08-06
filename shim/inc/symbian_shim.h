@@ -321,6 +321,17 @@ void shim_net_stop(int32_t handle);
 /* DNS. Completion is SHIM_EV_RESOLVED with the IPv4 address in `a`. */
 int32_t shim_dns_resolve(int32_t conn, const uint16_t* host, int32_t len, int32_t* handle);
 
+/* Abandon a lookup.
+ *
+ * There was no way to do this, and that was a leak with teeth. A resolver that is never
+ * answered stays open holding whatever connection it was made against -- and on a handset
+ * with no route, no lookup is ever answered. The self test then found the bearer sweep
+ * answering KErrLocked on a prompt that had waited nearly two minutes, which is what a held
+ * connection looks like from the other side.
+ *
+ * Safe on a handle that has already completed: the slot is empty and this does nothing. */
+void shim_dns_close(int32_t handle);
+
 int32_t shim_tcp_open(int32_t conn, int32_t* handle);
 /* Completion: SHIM_EV_CONNECTED. */
 int32_t shim_tcp_connect(int32_t handle, uint32_t ipv4, uint16_t port);

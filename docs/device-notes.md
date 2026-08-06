@@ -270,6 +270,39 @@ Also confirmed present: **fepbase.dll**, **random.dll** and **cryptography.dll**
 The FEP path for the keyboard's Fn layer is therefore available, and `CSystemRandom` is
 there if the entropy pool ever needs upgrading.
 
+## Three error codes, three different causes
+
+A bearer sweep on a handset with nothing available is not one failure repeated. Each code
+is a complete answer arriving on its own, not a deadline firing, and they say different
+things:
+
+| code | | what it means here |
+|---|---|---|
+| `-1` | `KErrNotFound` | the access point does not exist. ~450 ms |
+| `-4180` | ETel GSM range | packet data, and there is no SIM. ~13 s |
+| `-18` | `KErrNotReady` | **Wi-Fi, and the radio is off.** ~32 s |
+| `-22` | `KErrLocked` | something is holding a connection — see below |
+
+Which settles a question three rounds of work had been circling: with no SIM and Wi-Fi off,
+the handset has no route at all, and no amount of sweeping produces one. The stack was
+never the problem.
+
+The timings are as diagnostic as the codes. An access point that does not exist answers in
+under half a second; one that exists and cannot come up spends ten to thirty. Printing the
+elapsed time beside every result is what makes those distinguishable — and it is the one
+change that would have shortened the whole bearer investigation.
+
+## A lookup nobody answers holds the connection
+
+`shim_dns_resolve` had no closing call. On a handset with a route that is harmless, because
+every lookup completes. On one without, the resolver stays open holding whatever connection
+it was made against — and the bearer sweep that follows answers `KErrLocked` on a prompt
+that waited nearly two minutes.
+
+`shim_dns_close` exists now, and the self test calls it when a lookup times out. The general
+shape is worth keeping: **every asynchronous request needs a way to abandon it**, and the
+one that never completes is exactly the one that needs it.
+
 ## Opening a socket is not having a route
 
 `Bearer::none()` — open the socket with no `RConnection`, on whatever route is already up —
