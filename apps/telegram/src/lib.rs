@@ -11,6 +11,7 @@
 extern crate alloc;
 
 pub mod link;
+pub mod login;
 pub mod session_store;
 pub mod chats;
 pub mod conv;
@@ -21,6 +22,7 @@ use symbian_ui::{Canvas, Handled, KeyEvent, Rect, Theme};
 
 use chats::{ChatList, ChatListAction};
 use conv::{ConvAction, Conversation};
+use login::{Login, LoginAction};
 use model::{Delivery, Message, Store};
 
 /// Which screen is in front. A two-level stack is all this app needs, so it is an
@@ -28,6 +30,7 @@ use model::{Delivery, Message, Store};
 enum Screen {
     Chats(ChatList),
     Conversation(Conversation),
+    Login(Login),
 }
 
 pub struct App {
@@ -46,8 +49,55 @@ impl App {
         Self::new(Store::mock())
     }
 
+    /// The login screen, with whatever credentials this build has.
+    ///
+    /// `link::api_id()` reads what `apps/telegram/api.conf` put there at build time, and is
+    /// zero when the file was absent. Passing that through rather than hardcoding it is
+    /// what makes `Login::credentials_missing` able to say so on the screen — a login that
+    /// cannot succeed should tell the user before they type a phone number, not after they
+    /// have waited for `API_ID_INVALID` to come back from Telegram.
+    pub fn login() -> Self {
+        Self {
+            store: Store::default(),
+            screen: Screen::Login(Login::new(link::api_id(), link::api_hash())),
+            should_exit: false,
+        }
+    }
+
+    /// The login screen with no credentials, for the preview and the tests.
+    pub fn mock_login() -> Self {
+        Self { store: Store::mock(), screen: Screen::Login(Login::new(0, "")), should_exit: false }
+    }
+
     fn on_key(&mut self, ev: KeyEvent, theme: &Theme<'_>, screen_rect: Rect) -> Handled {
         match &mut self.screen {
+            Screen::Login(login) => {
+                let (handled, action) = login.handle_key(ev, theme, screen_rect);
+                match action {
+                    LoginAction::SendCode(number) => {
+                        login.ask_send_code(&number);
+                        Handled::Consumed
+                    }
+                    LoginAction::SubmitCode(code) => {
+                        login.submit_code(&code);
+                        Handled::Consumed
+                    }
+                    LoginAction::SubmitPassword(pw) => {
+                        login.submit_password(&pw);
+                        Handled::Consumed
+                    }
+                    LoginAction::Resend => {
+                        login.ask_resend();
+                        Handled::Consumed
+                    }
+                    LoginAction::Back => {
+                        // Back on the phone screen means exit.
+                        self.should_exit = true;
+                        Handled::Consumed
+                    }
+                    LoginAction::None => handled,
+                }
+            }
             Screen::Chats(list) => {
                 let frame = symbian_ui::Frame::split(screen_rect, theme, true, true);
                 let handled = list.handle_key(ev, &self.store, theme, frame.content.height());
@@ -115,6 +165,7 @@ impl App {
 
     fn paint(&mut self, c: &mut Canvas<'_>, theme: &Theme<'_>) {
         match &mut self.screen {
+            Screen::Login(login) => login.draw(c, theme),
             Screen::Chats(list) => list.draw(c, &self.store, theme),
             Screen::Conversation(conv) => {
                 let idx = conv.chat;
@@ -130,6 +181,14 @@ impl App {
         match &self.screen {
             Screen::Conversation(c) => Some(c.chat),
             _ => None,
+        }
+    }
+
+    /// Whether the login screen is showing and authorized.
+    pub fn login_authorized(&self) -> bool {
+        match &self.screen {
+            Screen::Login(l) => l.is_authorized(),
+            _ => false,
         }
     }
 }
@@ -160,7 +219,7 @@ mod tests {
     use super::*;
     // App is imported for its methods: handle_key and draw are trait methods now, so the
     // trait has to be in scope to call them.
-    use symbian_ui::{App as _, BitmapFont, Fonts, Key, Size, Softkey};
+    use symbian_ui::{App as _, BitmapFont, Fonts, Key, Size, Softkey, TextField};
 
     fn atlas() -> alloc::vec::Vec<u8> {
         let chars: alloc::vec::Vec<char> = (0x20u32..0x500).filter_map(char::from_u32).collect();
@@ -269,6 +328,45 @@ mod tests {
                 app.handle_key(KeyEvent::new(Key::Down), &t, r);
             }
             app.handle_key(KeyEvent::new(Key::Select), &t, r);
+            let mut c = Canvas::from_slice(&mut buf, SCREEN);
+            app.draw(&mut c, &t);
+        }
+
+        // Login screens: phone, code, password.
+        {
+            let mut login = App::mock_login();
+            let mut c = Canvas::from_slice(&mut buf, SCREEN);
+            login.draw(&mut c, &t);
+        }
+        // Code screen
+        {
+            use login::{Login, Screen};
+            let mut login = Login::new(12345, "abcdef");
+            login.code_sent = true;
+            login.screen = Screen::Code {
+                field: TextField::with_limit(8),
+                length: Some(5),
+                error: None,
+            };
+            let mut app = App { store: Store::mock(), screen: super::Screen::Login(login), should_exit: false };
+            let mut c = Canvas::from_slice(&mut buf, SCREEN);
+            app.draw(&mut c, &t);
+        }
+        // Password screen
+        {
+            use login::{Login, Screen};
+            let mut login = Login::new(12345, "abcdef");
+            login.password_needed = true;
+            login.screen = Screen::Password {
+                field: {
+                    let mut f = TextField::with_limit(128);
+                    f.set_masked(true);
+                    f
+                },
+                hint: String::new(),
+                error: None,
+            };
+            let mut app = App { store: Store::mock(), screen: super::Screen::Login(login), should_exit: false };
             let mut c = Canvas::from_slice(&mut buf, SCREEN);
             app.draw(&mut c, &t);
         }

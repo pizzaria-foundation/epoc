@@ -17,13 +17,16 @@
 //! The two exponentiations go to [`symbian::work::Job`], which is why a login takes about
 //! four seconds of wall time on an E72 and the interface stays alive through all of it.
 //!
-//! # No bearer
+//! # The bearer
 //!
-//! The socket is opened with no `RConnection`, on whatever route is already up. Six rounds
-//! of device testing went into bringing a bearer up before discovering that this works and
-//! is the only path with no dialog, no negotiation and nothing that can time out — see
-//! `docs/device-notes.md`. If nothing is up, the connect fails and the caller reports it,
-//! which is a better failure than a two-minute sweep.
+//! [`symbian::net::Bearer::attach`] joins a connection that is already up — the browser's,
+//! or whatever else is online. Synchronous underneath, no dialog, nothing to time out, and
+//! `NotFound` when there is nothing to join.
+//!
+//! An earlier version opened the socket with **no** `RConnection` and called that "use
+//! whatever route is up". It is not: that path uses the handset's *configured default
+//! connection*, and on one with none it reports success and then never connects. It cost
+//! two device runs. `docs/device-notes.md` has the account.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -157,8 +160,10 @@ impl Link {
         let mut net = ShimNet;
         let mut rng = PlatformRng(Random::new()?);
 
-        // No RConnection: see the module docs.
-        let bearer = Bearer::none();
+        // Join whatever is already up. If nothing is, this fails with NotFound and the
+        // caller has to bring a bearer up -- which is a real answer, unlike the path this
+        // replaced, which reported success and then never connected.
+        let bearer = Bearer::attach(&mut net)?;
         let mut sock = TcpStream::open(&mut net, &bearer, RX, TX)?;
         sock.connect(&mut net, dc_address(dc), DC_PORT)?;
 
@@ -418,21 +423,34 @@ impl Link {
 /// own heap. Nothing it allocates may escape: the output buffer belongs to the caller and
 /// this only writes into it.
 pub fn work(opcode: i32, input: &[u8], out: &mut [u8]) -> i32 {
-    if opcode != symbian::work::OP_MODPOW {
-        return sys::SHIM_ERR_NOT_SUPPORTED;
-    }
-    let Some((base, exp, modulus)) = symbian::work::decode_modpow(input) else {
-        return sys::SHIM_ERR_ARGUMENT;
-    };
-    let Ok(m) = symbian_crypto::Modulus::new(modulus) else {
-        return sys::SHIM_ERR_ARGUMENT;
-    };
-    // `out` is the GUI thread's buffer and modpow writes into it directly. A Vec here would
-    // be allocated on the worker's heap and freed on the GUI thread's, which is a cross-heap
-    // free and silent corruption rather than a clean failure.
-    match symbian_crypto::modpow(base, exp, &m, out) {
-        Ok(()) => sys::SHIM_OK,
-        Err(_) => sys::SHIM_ERR_ARGUMENT,
+    match opcode {
+        symbian::work::OP_MODPOW => {
+            let Some((base, exp, modulus)) = symbian::work::decode_modpow(input) else {
+                return sys::SHIM_ERR_ARGUMENT;
+            };
+            let Ok(m) = symbian_crypto::Modulus::new(modulus) else {
+                return sys::SHIM_ERR_ARGUMENT;
+            };
+            // `out` is the GUI thread's buffer and modpow writes into it directly. A Vec here would
+            // be allocated on the worker's heap and freed on the GUI thread's, which is a cross-heap
+            // free and silent corruption rather than a clean failure.
+            match symbian_crypto::modpow(base, exp, &m, out) {
+                Ok(()) => sys::SHIM_OK,
+                Err(_) => sys::SHIM_ERR_ARGUMENT,
+            }
+        }
+        symbian::work::OP_KDF => {
+            let Some((password, salt1, salt2)) = symbian::work::decode_kdf(input) else {
+                return sys::SHIM_ERR_ARGUMENT;
+            };
+            if out.len() < 32 {
+                return sys::SHIM_ERR_ARGUMENT;
+            }
+            let x = tg_proto::srp::derive_x(password, salt1, salt2);
+            out[..32].copy_from_slice(&x);
+            sys::SHIM_OK
+        }
+        _ => sys::SHIM_ERR_NOT_SUPPORTED,
     }
 }
 

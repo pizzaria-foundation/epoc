@@ -45,6 +45,13 @@ pub enum Iap {
     Default,
     /// A specific access point, from a previous [`Bearer::iap`].
     Id(u32),
+    /// Join a connection that is already up, rather than negotiating one.
+    ///
+    /// The cheapest strategy and the one that should usually work: if anything else on the
+    /// handset is online, this joins it. Synchronous underneath, no dialog, nothing to time
+    /// out — and [`Error::NotFound`] when there is nothing to join, which is the signal to
+    /// try [`Iap::Prompt`].
+    Attach,
 }
 
 impl Iap {
@@ -53,8 +60,32 @@ impl Iap {
             Iap::Prompt => sys::SHIM_IAP_PROMPT,
             Iap::Default => sys::SHIM_IAP_DEFAULT,
             Iap::Id(id) => id as i32,
+            Iap::Attach => sys::SHIM_IAP_ATTACH,
         }
     }
+}
+
+/// How many connections are up on the handset right now.
+///
+/// The one query that separates "nothing is online" from "we cannot join what is". Both
+/// look identical from a socket that never connects, and telling them apart took three
+/// device runs when there was no way to ask.
+pub fn connections_up() -> Result<u32> {
+    let n = unsafe { sys::shim_net_connections() };
+    if n < 0 {
+        return Err(Error::from_code(n));
+    }
+    Ok(n as u32)
+}
+
+/// The access point behind connection `index`, one-based.
+pub fn connection_iap(index: u32) -> Result<u32> {
+    let mut iap = -1i32;
+    Error::check(unsafe { sys::shim_net_connection_iap(index as i32, &mut iap) })?;
+    if iap < 0 {
+        return Err(Error::NotFound);
+    }
+    Ok(iap as u32)
 }
 
 /// An IPv4 address, host byte order — which is what the shim's ABI carries and what
@@ -215,28 +246,29 @@ pub struct Bearer {
 }
 
 impl Bearer {
-    /// No bearer at all: open sockets on whatever route is already up.
+    /// Join a connection that is already up.
     ///
-    /// `RSocket::Open` and `RHostResolver::Open` both have overloads that take no
-    /// `RConnection`, and the shim calls them when the handle resolves to nothing. The stack
-    /// then uses the existing default route.
+    /// The strategy to try first: if anything else on the handset is online, this joins it
+    /// immediately with no dialog and nothing to wait for. `Err(Error::NotFound)` when
+    /// there is nothing up, and then [`Bearer::start`] is the fallback.
     ///
-    /// **This is the path that works on the E72**, and finding that out cost six rounds of
-    /// device testing. Every attempt to bring a bearer up hit one of three walls: a dialog
-    /// that waits on a person, a deadline sized for a network rather than for a human, or —
-    /// after reading the comms database to stop guessing access-point ids — six new
-    /// `commdb` ordinals the handset does not export, which stopped the image loading
-    /// altogether. `docs/device-notes.md` has the whole account.
+    /// # What this replaced, and why it was wrong
     ///
-    /// This has none of those failure modes. It cannot raise a dialog, cannot negotiate and
-    /// cannot time out. If no route is up, the connect fails immediately and says so, which
-    /// is a better answer than a two-minute sweep that ends the same way.
+    /// `Bearer::none()` opened sockets with **no** `RConnection`, on the reasoning that the
+    /// stack would then use whatever route already existed. Its doc comment called that the
+    /// only path with no dialog, no negotiation and nothing that can time out — all true,
+    /// and all irrelevant, because it also could not *create* or *find* a route.
     ///
-    /// What it gives up is the *choice* of route. On a handset with both Wi-Fi and packet
-    /// data up, the stack picks — which for a metered connection is a real consideration and
-    /// is the reason [`Bearer::start`] still exists.
-    pub fn none() -> Self {
-        Bearer { handle: -1, iap: None, retried: true, up: true }
+    /// What that path actually uses is the handset's *configured default connection*. On
+    /// one with none, the socket opens, the connect is issued, and nothing ever completes —
+    /// so the strategy reported success and three phases timed out underneath it. It cost
+    /// two device runs and read as a network problem both times.
+    ///
+    /// `RConnection::Attach` is the platform's own answer to the question that path was
+    /// trying to ask, and it either joins something or says there is nothing to join.
+    pub fn attach<N: Net>(net: &mut N) -> Result<Self> {
+        let handle = net.net_start(Iap::Attach)?;
+        Ok(Bearer { handle, iap: None, retried: true, up: false })
     }
 
     /// Bring up a bearer. Pass the id from a previous session if there is one.

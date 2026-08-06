@@ -305,6 +305,21 @@ int64_t shim_unix_time(void);
 #define SHIM_IAP_PROMPT   (-1)
 #define SHIM_IAP_DEFAULT  (-2)
 
+/* Join a connection that is already up, rather than negotiating one.
+ *
+ * What "every other program on the phone works" actually means: something else brought an
+ * interface up and a client joins it. RConnection::Attach, so it is synchronous, shows no
+ * dialog and cannot time out -- but it still completes through the usual event, because a
+ * caller should not have to know that one strategy answers by a different mechanism.
+ *
+ * SHIM_ERR_NOT_FOUND when nothing is up, which is the honest answer and the signal to fall
+ * through to SHIM_IAP_PROMPT.
+ *
+ * This replaces a path that opened a socket with no RConnection at all. That relies on a
+ * *configured default connection*, not on one being up -- so on a handset with none it
+ * reported success and then every connect timed out underneath it. */
+#define SHIM_IAP_ATTACH   (-3)
+
 /* Bring up a bearer. Returns immediately with a handle; completion is
  * SHIM_EV_NET_READY, whose `a` carries the IAP the OS settled on.
  *
@@ -312,6 +327,16 @@ int64_t shim_unix_time(void);
  * configured default, or a positive id from a previous SHIM_EV_NET_READY. The
  * intended shape is: prompt on first run, remember the answer, connect silently
  * afterwards, and fall back to prompting if the saved id has gone away. */
+/* How many connections are up right now, or a negative error.
+ *
+ * The diagnostic that separates "nothing is online" from "we cannot join what is". Both
+ * look identical from a socket that never connects. */
+int32_t shim_net_connections(void);
+
+/* The access point behind connection `index`. One-based by Symbian convention, which the
+ * headers do not state -- so a caller that cares should try 1 and then 0. */
+int32_t shim_net_connection_iap(int32_t index, int32_t* iap);
+
 int32_t shim_net_start(int32_t iap, int32_t* handle);
 
 /* Releases our handle. Deliberately not RConnection::Stop(): Stop tears down the

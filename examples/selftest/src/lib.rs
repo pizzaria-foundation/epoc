@@ -301,7 +301,7 @@ pub struct SelfTest {
     sweep_handle: i32,
     bearer_handle: i32,
     bearer_iap: i32,
-    /// The routeless attempt was made. Not a route — see `do_sweep_step`.
+    /// The sweep is exhausted and said so once. Only so the line is not repeated.
     bearer_none: bool,
     attempt_started_us: u64,
     /// What to try, in order: the two id-less strategies then every access point the
@@ -343,25 +343,6 @@ pub struct SelfTest {
  * trip, so twenty of them cost almost nothing, and the ones that cost real time are
  * exactly the ones worth waiting for. The strategies that ask the system to choose go
  * last, because on this handset neither has ever completed and both are slow to say so. */
-/* "Open the socket without an RConnection at all": the fallback, and no longer a sweep
- * entry.
- *
- * RSocket::Open and RHostResolver::Open both take no RConnection, and shim_net.cpp calls
- * those overloads when the handle resolves to nothing. The stack then uses whatever route
- * is already up.
- *
- * It was the first thing tried, on the grounds that it cannot raise a dialog, cannot
- * negotiate and cannot time out. All three are true and none of them is a virtue: it also
- * cannot *create* a route, so on a handset with nothing up it reports success and then
- * three phases time out underneath it. That is exactly what the last device run showed.
- *
- * Worse, being first delayed the thing that does work. The prompt is what produces the
- * access-point dialog, and putting a free no-op in front of it meant the dialog was the
- * second thing to happen rather than the first.
- *
- * So: the prompt goes first, and this is what the network phases fall back to when the
- * sweep produces nothing. Costs nothing either way. */
-const IAP_NONE: i32 = -100;
 
 /* The prompt first, deliberately.
  *
@@ -369,7 +350,13 @@ const IAP_NONE: i32 = -100;
  * this that waits on a person -- so it has to be asked for in the first tick, while
  * somebody is still looking at the phone. Everything else in the sweep is the machine
  * talking to itself and can happen behind ten seconds of arithmetic. */
-const SWEEP_HEAD: [i32; 22] = [
+const SWEEP_HEAD: [i32; 23] = [
+    // Attach first: if anything else on the handset is online this joins it immediately,
+    // with no dialog and nothing to wait for. It is also the strategy that should have been
+    // here all along -- what preceded it opened a socket with no RConnection, which uses
+    // the *configured default connection* rather than one that is up, and reported success
+    // on a handset that had neither.
+    sys::SHIM_IAP_ATTACH,
     sys::SHIM_IAP_PROMPT,
     sys::SHIM_IAP_DEFAULT,
     1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
@@ -1232,8 +1219,8 @@ impl SelfTest {
     /// because "IAP 6 worked" is not an answer anyone can act on.
     fn sweep_name(&self) -> String {
         let iap = self.sweep[self.sweep_at];
-        if iap == IAP_NONE {
-            return String::from("no bearer");
+        if iap == sys::SHIM_IAP_ATTACH {
+            return String::from("attach to an existing connection");
         }
         if iap == sys::SHIM_IAP_DEFAULT || iap == sys::SHIM_IAP_PROMPT {
             return String::from(sweep_label(iap));
@@ -1248,6 +1235,32 @@ impl SelfTest {
     /// Kick the bearer off, concurrently with everything else.
     fn start_bearer(&mut self) {
         self.report.head("bearer (running in the background from here)");
+
+        // What is already up, asked before anything is attempted.
+        //
+        // This is the line that separates "nothing is online" from "we cannot join what
+        // is". Both look identical from a socket that never connects, and three device runs
+        // went into not being able to tell them apart.
+        match symbian::net::connections_up() {
+            Ok(n) => {
+                self.report.num("connections already up", n as i64);
+                // One-based by Symbian convention, which the headers do not state. Index 0
+                // is tried too, and the report says which answered -- one run settles it
+                // rather than a guess surviving in a comment.
+                for idx in [1u32, 0] {
+                    if let Ok(iap) = symbian::net::connection_iap(idx) {
+                        let mut note = String::from("index ");
+                        push_i64(&mut note, idx as i64);
+                        note.push_str(" -> IAP ");
+                        push_i64(&mut note, iap as i64);
+                        self.report.info("existing connection", &note);
+                        break;
+                    }
+                }
+            }
+            Err(e) => self.report.check_note("connections readable", false, err_name(e)),
+        }
+        self.report.flush(&mut self.fs);
         self.sweep_at = 0;
         self.do_sweep_step();
     }
@@ -1263,15 +1276,15 @@ impl SelfTest {
             return Some(true);
         }
         if self.sweep_at >= self.sweep.len() {
+            // Every strategy refused, including attaching to something already up. There is
+            // no route, and the phases below will say so by timing out -- which is the
+            // honest outcome now that nothing claims success on the way here.
             if !self.bearer_none {
                 self.bearer_none = true;
-                self.report.info(
-                    "no bearer came up",
-                    "falling back to whatever route already exists",
-                );
+                self.report.check("some bearer strategy worked", false);
                 self.report.flush(&mut self.fs);
             }
-            return Some(true);
+            return Some(false);
         }
         None
     }
@@ -1288,16 +1301,9 @@ impl SelfTest {
         }
         let iap = self.sweep[self.sweep_at];
 
-        if iap == IAP_NONE {
-            // No longer a sweep entry -- the network phases fall back to it when nothing
-            // came up. Kept so the sentinel has exactly one place that handles it.
-            self.bearer_none = true;
-            self.sweep_at += 1;
-            self.do_sweep_step();
-            return;
-        }
 
         let strategy = match iap {
+            sys::SHIM_IAP_ATTACH => Iap::Attach,
             sys::SHIM_IAP_PROMPT => Iap::Prompt,
             sys::SHIM_IAP_DEFAULT => Iap::Default,
             id => Iap::Id(id as u32),

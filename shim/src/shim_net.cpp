@@ -46,6 +46,7 @@
 #include <es_sock.h>
 #include <in_sock.h>
 #include <commdbconnpref.h>
+#include <es_enum.h>
 
 namespace {
 
@@ -102,6 +103,10 @@ private:
     TInt iHandle;
     TInt iIap;
     TBool iOpen;
+    /* The access point of the connection we joined, reported back so the caller can
+     * persist it -- the same value a negotiated Start reports through GetIntSetting. */
+    TInt iAttachedIap;
+    TInt AttachToExisting();
     };
 
 CShimNet* gNets[KMaxNets];
@@ -112,7 +117,8 @@ CShimNet* gNets[KMaxNets];
 RConnection* ConnFor(TInt aHandle);
 
 CShimNet::CShimNet(TInt aHandle, TInt aIap)
-    : CActive(EPriorityStandard), iHandle(aHandle), iIap(aIap), iOpen(EFalse)
+    : CActive(EPriorityStandard), iHandle(aHandle), iIap(aIap), iOpen(EFalse),
+      iAttachedIap(0)
     {
     }
 
@@ -146,8 +152,66 @@ void CShimNet::ConstructL()
     CActiveScheduler::Add(this);
     }
 
+/* Join a connection that is already up.
+ *
+ * This is what "every other program on the phone works" actually means. The browser brings
+ * an interface up; a client that wants the same route joins it rather than negotiating its
+ * own. Synchronous, no dialog, and nothing that can time out.
+ *
+ * It is not what the shim did before. The old "no bearer" path opened a socket with no
+ * RConnection at all, on the theory that the stack would use whatever was up. It does not:
+ * that path uses the *configured default connection*, and on a handset with none it fails
+ * -- but only later, when a connect never completes, so the strategy itself reported
+ * success and cost two device runs.
+ *
+ * Returns KErrNotFound when nothing is up, which is the honest answer and lets the caller
+ * fall through to bringing one up.
+ */
+TInt CShimNet::AttachToExisting()
+    {
+    TUint count = 0;
+    TInt err = iConnection.EnumerateConnections(count);
+    if (err != KErrNone)
+        return err;
+    if (count == 0)
+        return KErrNotFound;
+
+    /* One-based, which is Symbian's convention here and not something the header states.
+     * Index 0 is tried as a fallback so a wrong guess is a second call rather than a
+     * feature that silently never works. */
+    TPckgBuf<TConnectionInfo> info;
+    err = iConnection.GetConnectionInfo(1, info);
+    if (err != KErrNone)
+        err = iConnection.GetConnectionInfo(0, info);
+    if (err != KErrNone)
+        return err;
+
+    /* EAttachTypeNormal, not EAttachTypeMonitor: monitoring watches an interface without
+     * keeping it alive, so the idle timer would tear it down underneath us mid-transfer. */
+    err = iConnection.Attach(info, RConnection::EAttachTypeNormal);
+    if (err != KErrNone)
+        return err;
+
+    iAttachedIap = static_cast<TInt>(info().iIapId);
+    return KErrNone;
+    }
+
 void CShimNet::Start()
     {
+    if (iIap == SHIM_IAP_ATTACH)
+        {
+        /* Synchronous, so the completion is manufactured here rather than arriving from the
+         * socket server. The caller's event loop must not learn that this one strategy
+         * answered by a different mechanism -- so it is completed into iStatus and the
+         * active scheduler delivers RunL exactly as it would for a real Start. */
+        const TInt err = AttachToExisting();
+        iStatus = KRequestPending;
+        SetActive();
+        TRequestStatus* st = &iStatus;
+        User::RequestComplete(st, err);
+        return;
+        }
+
     if (iIap >= 0)
         {
         iPrefs.SetIapId(static_cast<TUint32>(iIap));
@@ -185,6 +249,8 @@ void CShimNet::RunL()
         TUint32 id = 0;
         if (iConnection.GetIntSetting(KIapId, id) == KErrNone)
             iap = static_cast<TInt>(id);
+        else if (iAttachedIap != 0)
+            iap = iAttachedIap;
         }
     ShimPushSimple(SHIM_EV_NET_READY, iHandle, iStatus.Int(), iap);
     }
@@ -630,6 +696,60 @@ void ShimNetCleanup()
     }
 
 extern "C" {
+
+/* How many connections are up on the handset right now.
+ *
+ * The one diagnostic that separates "nothing is online" from "we cannot join what is". Both
+ * produce the same silence from a socket, and three device runs went into not being able to
+ * tell them apart.
+ *
+ * A short-lived RConnection of its own: EnumerateConnections is a system-wide query and
+ * does not need the handle to be attached to anything. */
+int32_t shim_net_connections(void)
+    {
+    RSocketServ* serv = NULL;
+    const TInt err = Serv(serv);
+    if (err != KErrNone)
+        return err;
+
+    RConnection c;
+    const TInt oerr = c.Open(*serv);
+    if (oerr != KErrNone)
+        return oerr;
+    TUint count = 0;
+    const TInt eerr = c.EnumerateConnections(count);
+    c.Close();
+    return (eerr == KErrNone) ? static_cast<int32_t>(count) : eerr;
+    }
+
+/* The access point behind connection `index`, one-based.
+ *
+ * `iap` also receives which index answered, negative if neither did, so the self test can
+ * report whether the convention holds on this handset rather than assuming it. */
+int32_t shim_net_connection_iap(int32_t index, int32_t* iap)
+    {
+    if (!iap)
+        return SHIM_ERR_ARGUMENT;
+    *iap = -1;
+
+    RSocketServ* serv = NULL;
+    const TInt err = Serv(serv);
+    if (err != KErrNone)
+        return err;
+
+    RConnection c;
+    const TInt oerr = c.Open(*serv);
+    if (oerr != KErrNone)
+        return oerr;
+
+    TPckgBuf<TConnectionInfo> info;
+    TInt gerr = c.GetConnectionInfo(static_cast<TUint>(index), info);
+    c.Close();
+    if (gerr != KErrNone)
+        return gerr;
+    *iap = static_cast<int32_t>(info().iIapId);
+    return SHIM_OK;
+    }
 
 int32_t shim_net_start(int32_t iap, int32_t* handle)
     {

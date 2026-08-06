@@ -127,6 +127,8 @@ pub struct ShimEvent {
 pub const SHIM_IAP_PROMPT: i32 = -1;
 /// Take the configured default without asking.
 pub const SHIM_IAP_DEFAULT: i32 = -2;
+/// Join a connection that is already up. See the shim header.
+pub const SHIM_IAP_ATTACH: i32 = -3;
 
 // --------------------------------------------------------------------- files --
 
@@ -211,6 +213,8 @@ extern "C" {
     pub fn shim_file_close(handle: i32);
 
     // network
+    pub fn shim_net_connections() -> i32;
+    pub fn shim_net_connection_iap(index: i32, iap: *mut i32) -> i32;
     pub fn shim_net_start(iap: i32, handle: *mut i32) -> i32;
     pub fn shim_net_stop(handle: i32);
     pub fn shim_dns_resolve(conn: i32, host: *const u16, len: i32, handle: *mut i32) -> i32;
@@ -340,6 +344,15 @@ mod host_stubs {
         SHIM_ERR_NOT_READY
     }
     pub unsafe fn shim_file_close(_h: i32) {}
+    pub unsafe fn shim_net_connections() -> i32 {
+        0
+    }
+    pub unsafe fn shim_net_connection_iap(_i: i32, iap: *mut i32) -> i32 {
+        if !iap.is_null() {
+            *iap = -1;
+        }
+        SHIM_ERR_NOT_FOUND
+    }
     pub unsafe fn shim_net_start(_iap: i32, _h: *mut i32) -> i32 {
         SHIM_ERR_NOT_READY
     }

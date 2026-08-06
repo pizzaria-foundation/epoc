@@ -303,15 +303,39 @@ that waited nearly two minutes.
 shape is worth keeping: **every asynchronous request needs a way to abandon it**, and the
 one that never completes is exactly the one that needs it.
 
-## Opening a socket is not having a route
+## Joining a route that is already up: RConnection::Attach
 
-`Bearer::none()` — open the socket with no `RConnection`, on whatever route is already up —
-reports success unconditionally, because all it does is decline to open a connection. It
-creates nothing.
+Every other program on the handset reached the network and ours did not, through three
+device runs. The mechanism was wrong, and the platform has an explicit call for exactly
+what was wanted:
 
-On a handset with no active data connection the socket opens, the connect is issued, and
-nothing ever completes. The self test showed it as three timeouts in a row with a cheerful
-`ok` above them:
+```cpp
+TUint count = 0;
+conn.EnumerateConnections(count);              // es_sock.h:1172
+if (count) {
+    TPckgBuf<TConnectionInfo> info;
+    conn.GetConnectionInfo(1, info);           // one-based, by convention
+    conn.Attach(info, RConnection::EAttachTypeNormal);   // synchronous
+}
+```
+
+Synchronous, no dialog, nothing to time out, and `KErrNotFound` when there is nothing to
+join. All three are exported from `esock.dso`, which the shim already imports.
+
+`EAttachTypeNormal` rather than `EAttachTypeMonitor`: monitoring watches an interface
+without keeping it alive, so the idle timer would tear it down mid-transfer.
+
+### What it replaced, and why that looked like it worked
+
+The old path opened a socket with **no** `RConnection`, on the reasoning that the stack
+would then use whatever route already existed. Its comment called that the only strategy
+with no dialog, no negotiation and nothing that can time out. All three were true. All
+three were irrelevant, because it also could not find or create a route.
+
+What that path actually uses is the handset's **configured default connection** — not one
+that happens to be up. On a handset with none, the socket opens, the connect is issued, and
+nothing ever completes. So the strategy reported success unconditionally and three phases
+timed out beneath it:
 
 ```
 ok   no bearer: socket on the existing route
@@ -320,13 +344,18 @@ FAIL timed out  tcp echo
 FAIL timed out  http
 ```
 
-S60 tears connections down when they go idle, so "the browser worked earlier" does not mean
-a route exists now. The routeless path is a cheap first try and nothing more; a real client
-still has to bring a bearer up when it fails.
+**The absence of a mechanism is not a mechanism.** It cannot fail, which reads as working.
 
-The bug that hid it: the fallback to the bearer sweep fired on a DNS *error* and not on a
-DNS *timeout*, and a route that does not exist produces the second. One arm of a match
-going to the wrong place, in code whose whole purpose was to notice this.
+The corroborating evidence had been in the report all along: `RConnection::Start()` with no
+preferences answered `KErrNotFound`, which is that same default connection saying it does
+not exist.
+
+### And the reading that was skipped
+
+Four examples in this SDK open a connection. Two were read — `WebClient` and `Chat`, both
+of which use the synchronous `Start()` with no preferences — and `es_sock.h`'s own
+connection API was never read past `Start`. `Attach`, `EnumerateConnections` and
+`GetConnectionInfo` are thirteen lines further down the same class.
 
 ## Measured on the handset, not estimated
 
