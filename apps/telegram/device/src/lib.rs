@@ -22,4 +22,13 @@ fn worker(opcode: i32, input: &[u8], out: &mut [u8]) -> i32 {
     tg::link::work(opcode, input, out)
 }
 
+/// Keeps the chat parser and its schema table in the ARM link.
+///
+/// `--gc-sections` sweeps anything unreferenced, and the app still draws `Store::mock()` --
+/// so without this the 532-constructor table costs nothing and measures nothing. Referencing
+/// it here is what makes the image size in the commit message a real number.
+#[used]
+static _CHATS_LINK: fn(&[u8]) -> Result<tg_proto::chats::Dialogs, tg_proto::walk::Error> =
+    tg_proto::chats::parse_dialogs;
+
 symbian_app::entry!(tg::App::mock(), work = worker);

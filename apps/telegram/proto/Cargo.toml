@@ -19,7 +19,9 @@ crate-type = ["rlib"]
 default = []
 # Turns on the std-only helpers the reference differential uses: hex dumping, and reading
 # the fixtures the Python client writes. Never enabled for the device.
-std = []
+std = ["names"]
+# Constructor names in the schema table. ~15 KB, so on by default only for the host.
+names = []
 
 [dev-dependencies]
 # The differential test drives modpow itself, standing in for the worker thread.

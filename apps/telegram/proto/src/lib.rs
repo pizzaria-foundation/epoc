@@ -42,15 +42,18 @@
 
 extern crate alloc;
 
+pub mod chats;
 pub mod client;
 pub mod crypto;
 pub mod handshake;
 pub mod keys;
 pub mod pq;
 pub mod rpc;
+pub mod schema;
 pub mod session;
 pub mod srp;
 pub mod tl;
+pub mod walk;
 pub mod transport;
 
 pub use tl::{Reader, Writer};

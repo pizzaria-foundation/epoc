@@ -169,6 +169,15 @@ impl<'a> Reader<'a> {
         self.buf.len() - self.pos
     }
 
+    /// The bytes consumed since `start`.
+    ///
+    /// For a reader that has just walked a value and wants to hand back the span it
+    /// occupied without having copied it — see [`crate::walk`], where a hundred-message
+    /// vector is located once and interpreted only as far as the caller reads.
+    pub fn slice(&self, start: usize) -> &'a [u8] {
+        &self.buf[start..self.pos]
+    }
+
     pub fn is_empty(&self) -> bool {
         self.remaining() == 0
     }
