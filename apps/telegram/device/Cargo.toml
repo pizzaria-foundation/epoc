@@ -29,6 +29,7 @@ crate-type = ["staticlib"]
 # root workspace; cargo resolves their inherited fields from there.
 [dependencies]
 tg = { path = ".." }
+tg-proto = { path = "../proto" }
 symbian-app = { path = "../../../crates/symbian-app" }
 
 # Mirrors the root workspace profile; a separate workspace does not inherit it.

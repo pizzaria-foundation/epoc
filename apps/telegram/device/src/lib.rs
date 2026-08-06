@@ -13,4 +13,13 @@
 
 extern crate alloc;
 
+/// A compile check that the protocol builds for the device.
+///
+/// `tg-proto` is a `no_std` rlib and `cargo test` only ever builds it for the host, where
+/// `std` is in scope and every allocation is free. This reference keeps it in the ARM link
+/// so a `BTreeMap` or a `div_ceil` that does not exist on the target fails here rather
+/// than the first time someone tries to log in.
+#[used]
+static _PROTO_LINKS: fn(&tg_proto::client::Client) -> bool = tg_proto::client::Client::is_ready;
+
 symbian_app::entry!(tg::App::mock());
