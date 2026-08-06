@@ -49,6 +49,7 @@ pub mod keys;
 pub mod pq;
 pub mod rpc;
 pub mod session;
+pub mod srp;
 pub mod tl;
 pub mod transport;
 

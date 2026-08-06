@@ -350,6 +350,87 @@ pub fn modpow(base: &[u8], exp: &[u8], m: &Modulus, out: &mut [u8]) -> Result<()
     to_be_bytes(&result, out)
 }
 
+/// `out = a * b mod n`.
+///
+/// Three Montgomery products rather than one: both operands go in, the product comes out.
+/// A caller doing a long chain of multiplications should keep values in Montgomery form
+/// instead — but SRP does exactly one, and an API that made the form visible would push
+/// that decision onto a caller who has no reason to care.
+///
+/// `a` and `b` are reduced first, so an operand larger than the modulus is handled rather
+/// than rejected. That matters: SRP's `k * v` has both factors already below `p`, but the
+/// intermediate `g_b - k·v` arrives from the server and cannot be assumed to be.
+pub fn mulmod(a: &[u8], b: &[u8], m: &Modulus, out: &mut [u8]) -> Result<(), Error> {
+    let s = m.len;
+
+    let mut x = [0u32; MAX_LIMBS];
+    from_be_bytes(a, &mut x)?;
+    if ge(&x, &m.n, s) {
+        sub_assign(&mut x, &m.n, s);
+    }
+    let mut y = [0u32; MAX_LIMBS];
+    from_be_bytes(b, &mut y)?;
+    if ge(&y, &m.n, s) {
+        sub_assign(&mut y, &m.n, s);
+    }
+
+    let mut xm = [0u32; MAX_LIMBS];
+    m.mont_mul(&x, &m.rr, &mut xm);
+    let mut ym = [0u32; MAX_LIMBS];
+    m.mont_mul(&y, &m.rr, &mut ym);
+
+    let mut prod = [0u32; MAX_LIMBS];
+    m.mont_mul(&xm, &ym, &mut prod);
+
+    let mut one = [0u32; MAX_LIMBS];
+    one[0] = 1;
+    let mut result = [0u32; MAX_LIMBS];
+    m.mont_mul(&prod, &one, &mut result);
+    to_be_bytes(&result, out)
+}
+
+/// `out = (a - b) mod n`, landing in `[0, n)` however the subtraction goes.
+///
+/// SRP needs it for `t = g_b - k·v`, where the difference is negative about half the time
+/// and a version that returned a wrapped value would produce a shared secret the server
+/// does not share. There is no signed type here to get that wrong with; the borrow out of
+/// the subtraction is the sign.
+pub fn submod(a: &[u8], b: &[u8], m: &Modulus, out: &mut [u8]) -> Result<(), Error> {
+    let s = m.len;
+
+    let mut x = [0u32; MAX_LIMBS];
+    from_be_bytes(a, &mut x)?;
+    if ge(&x, &m.n, s) {
+        sub_assign(&mut x, &m.n, s);
+    }
+    let mut y = [0u32; MAX_LIMBS];
+    from_be_bytes(b, &mut y)?;
+    if ge(&y, &m.n, s) {
+        sub_assign(&mut y, &m.n, s);
+    }
+
+    // Add the modulus first when the difference would go negative, so the arithmetic stays
+    // in unsigned limbs throughout.
+    if ge(&x, &y, s) {
+        sub_assign(&mut x, &y, s);
+    } else {
+        let mut t = m.n;
+        sub_assign(&mut t, &y, s);
+        // x + (n - y), which is below 2n and below n because x < y <= n.
+        let mut carry = 0u64;
+        for i in 0..s {
+            let v = x[i] as u64 + t[i] as u64 + carry;
+            x[i] = v as u32;
+            carry = v >> 32;
+        }
+        if carry != 0 || ge(&x, &m.n, s) {
+            sub_assign(&mut x, &m.n, s);
+        }
+    }
+
+    to_be_bytes(&x, out)
+}
+
 /// The RSA public operation: `m^e mod n`. `e` is typically 65537.
 ///
 /// The **primitive only** — no padding. MTProto's handshake builds its own padded block
@@ -361,6 +442,118 @@ pub fn rsa_encrypt(message: &[u8], e: &[u8], n: &Modulus, out: &mut [u8]) -> Res
 
 #[cfg(test)]
 mod tests {
+    /// `mulmod` and `submod` against Python's arbitrary-precision integers.
+    ///
+    /// Written as a table of decimal strings so the expected values come from a source that
+    /// is not this file — computed with `pow` and `%` in Python and pasted, which is the
+    /// same reason the SHA-512 constants were derived rather than copied.
+    #[test]
+    fn modular_multiply_and_subtract_match_python() {
+        // n = 2^127 - 1 (prime, odd), and two operands either side of half.
+        let n = unhex("7fffffffffffffffffffffffffffffff");
+        let m = Modulus::new(&n).unwrap();
+
+        // Computed with Python's arbitrary-precision integers, not by hand. The first
+        // attempt at this table was hand-written and case 2 was wrong -- 2 - (n-1) mod n is
+        // 3, not 4 -- which failed against correct code and cost a debugging round. A table
+        // of expected values is a second implementation, and writing one by hand is writing
+        // an implementation without testing it.
+        let cases: [(&str, &str, &str, &str); 5] = [
+            // a, b, a*b mod n, (a-b) mod n
+            (
+                "0000000000000000000000000000000f", "00000000000000000000000000000011",
+                "000000000000000000000000000000ff", "7ffffffffffffffffffffffffffffffd",
+            ),
+            (
+                "7ffffffffffffffffffffffffffffffe", "00000000000000000000000000000002",
+                "7ffffffffffffffffffffffffffffffd", "7ffffffffffffffffffffffffffffffc",
+            ),
+            // The case that goes negative, which is where a wrapped subtraction shows.
+            (
+                "00000000000000000000000000000002", "7ffffffffffffffffffffffffffffffe",
+                "7ffffffffffffffffffffffffffffffd", "00000000000000000000000000000003",
+            ),
+            (
+                "3fffffffffffffffffffffffffffffff", "3fffffffffffffffffffffffffffffff",
+                "20000000000000000000000000000000", "00000000000000000000000000000000",
+            ),
+            // Zero minus almost everything, the far end of the same branch.
+            (
+                "00000000000000000000000000000000", "7ffffffffffffffffffffffffffffffe",
+                "00000000000000000000000000000000", "00000000000000000000000000000001",
+            ),
+        ];
+
+        for (i, (a, b, want_mul, want_sub)) in cases.iter().enumerate() {
+            let (av, bv) = (unhex(a), unhex(b));
+            let mut got = alloc::vec![0u8; 16];
+            submod(&av, &bv, &m, &mut got).unwrap();
+            assert_eq!(hex(&got), *want_sub, "submod case {i}");
+
+            mulmod(&av, &bv, &m, &mut got).unwrap();
+            assert_eq!(hex(&got), *want_mul, "mulmod case {i}");
+        }
+    }
+
+    /// The two must agree with repeated addition and with modpow, which is the property
+    /// that does not depend on any table being right.
+    #[test]
+    fn modular_multiply_agrees_with_squaring_through_modpow() {
+        let n = unhex("7fffffffffffffffffffffffffffffff");
+        let m = Modulus::new(&n).unwrap();
+        let mut s = 0x1234_5678_9abc_def1u64;
+        for _ in 0..64 {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            let mut a = [0u8; 16];
+            a[8..].copy_from_slice(&s.to_be_bytes());
+
+            // a * a mod n, two ways.
+            let mut by_mul = [0u8; 16];
+            mulmod(&a, &a, &m, &mut by_mul).unwrap();
+            let mut by_pow = [0u8; 16];
+            modpow(&a, &[2], &m, &mut by_pow).unwrap();
+            assert_eq!(hex(&by_mul), hex(&by_pow), "a = {}", hex(&a));
+        }
+    }
+
+    /// Subtraction must land in [0, n) whichever way round the operands are.
+    #[test]
+    fn subtraction_never_wraps() {
+        let n = unhex("7fffffffffffffffffffffffffffffff");
+        let m = Modulus::new(&n).unwrap();
+        let mut s = 0xdead_beef_cafe_babeu64;
+        for _ in 0..64 {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            let mut a = [0u8; 16];
+            a[8..].copy_from_slice(&s.to_be_bytes());
+            let mut b = [0u8; 16];
+            b[8..].copy_from_slice(&s.rotate_left(31).to_be_bytes());
+
+            let mut d = [0u8; 16];
+            submod(&a, &b, &m, &mut d).unwrap();
+            // d < n, and d + b == a (mod n).
+            assert!(d[..] < n[..], "result {} is not below the modulus", hex(&d));
+            let mut back = [0u8; 16];
+            // (a - b) + b == a
+            let mut sum = [0u8; 16];
+            submod(&d, &n, &m, &mut back).unwrap(); // d - n mod n == d
+            assert_eq!(hex(&back), hex(&d));
+            let neg_b = {
+                let mut z = [0u8; 16];
+                submod(&[0], &b, &m, &mut z).unwrap();
+                z
+            };
+            submod(&d, &neg_b, &m, &mut sum).unwrap(); // d - (-b) == d + b == a
+            let mut a_red = [0u8; 16];
+            submod(&a, &[0], &m, &mut a_red).unwrap();
+            assert_eq!(hex(&sum), hex(&a_red));
+        }
+    }
+
     use super::*;
     use alloc::vec;
     use alloc::vec::Vec;
