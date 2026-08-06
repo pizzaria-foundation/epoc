@@ -203,6 +203,23 @@ int32_t shim_probe_pixel_layout(uint32_t* out_word);
  * import library the linker sees. */
 int32_t shim_dll_present(const uint16_t* name, int32_t len);
 
+/* Fill `out` with entropy — NOT with random numbers.
+ *
+ * The distinction matters enough to be in the name of the thing. What comes back is a
+ * mixture of Math::Random, a high-resolution counter sampled inside the loop so it catches
+ * scheduling jitter, uptime, the wall clock, a stack address and the heap's free space.
+ * It is not uniform and no single source in it is known to be unpredictable.
+ *
+ * Whitening happens in Rust, where the tested SHA-256 lives: see `symbian::random`, which
+ * runs a DRBG over this and is the thing callers should actually use. Using this directly
+ * as key material would be a mistake.
+ *
+ * Deliberately not random.dll's CSystemRandom, which is the platform's real CSPRNG: a new
+ * DLL dependency is a deployment risk that cannot be tested for from the host, and this
+ * runs on every launch. `examples/selftest` probes random.dll so that decision can be
+ * revisited against an answer rather than a guess. */
+int32_t shim_entropy(uint8_t* out, int32_t len);
+
 /* -------------------------------------------------------------------- text --
  * Text is drawn by Symbian into the same buffer Rust owns pixels of. That gets
  * real hinted glyphs and full UCS-2 coverage for nothing, and avoids decoding

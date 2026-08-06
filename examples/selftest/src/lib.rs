@@ -247,6 +247,7 @@ enum Phase {
     Storage,
     Hashes,
     Ciphers,
+    Random,
     Bignum,
     Inflate,
     Timings,
@@ -461,6 +462,11 @@ impl SelfTest {
             Phase::Ciphers => {
                 self.do_ciphers();
                 self.report.flush(&mut self.fs);
+                self.next(Phase::Random);
+            }
+            Phase::Random => {
+                self.do_random();
+                self.report.flush(&mut self.fs);
                 self.next(Phase::Bignum);
             }
             Phase::Bignum => {
@@ -627,6 +633,13 @@ impl SelfTest {
             ("avkon.dll", "control: must be present"),
             ("esock.dll", "sockets"),
             ("insock.dll", "IPv4"),
+            /* Asked because the shim deliberately does not link it. CSystemRandom in here
+             * is the platform's real CSPRNG and would be a better entropy source than
+             * Math::Random -- but a new DLL dependency can stop the image loading, and that
+             * failure produces no report at all. This turns "can we upgrade the RNG" from a
+             * guess into a value. */
+            ("random.dll", "CSystemRandom, a real CSPRNG"),
+            ("cryptography.dll", "platform crypto"),
         ];
         for (name, what) in libs {
             let mut buf = [0u16; 32];
@@ -874,6 +887,63 @@ impl SelfTest {
         } else {
             self.report.check("AES-IGE", false);
         }
+    }
+
+    /// Does the entropy source actually vary, and does the DRBG turn it into bytes?
+    ///
+    /// The host cannot answer the first question: `shim_entropy` is a counter there. This
+    /// is the only place the real pool is ever seen, and a pool that returns the same bytes
+    /// every call would produce a DRBG that is deterministic across launches -- which for
+    /// a Diffie-Hellman secret means every session on every handset shares a key. That
+    /// failure is silent, total, and invisible to every test that can run without a phone.
+    fn do_random(&mut self) {
+        self.report.head("randomness (the only place the real pool is visible)");
+
+        let mut a = [0u8; 64];
+        let mut b = [0u8; 64];
+        let ra = unsafe { sys::shim_entropy(a.as_mut_ptr(), 64) };
+        // Deliberately back to back, with nothing between: the pool leans on jitter, and
+        // two calls a microsecond apart is the hardest case for it, not the easiest.
+        let rb = unsafe { sys::shim_entropy(b.as_mut_ptr(), 64) };
+        self.report.check("entropy call succeeds", ra == sys::SHIM_OK && rb == sys::SHIM_OK);
+        self.report.check("two back-to-back pools differ", a != b);
+        self.report.check("the pool is not all zero", a != [0u8; 64]);
+
+        // How many bytes actually differ between the two pools. A pool driven only by a
+        // millisecond clock would move in one or two bytes; the number is reported rather
+        // than asserted on because what counts as enough is a judgement, and a judgement
+        // belongs to whoever reads the report.
+        let differing = a.iter().zip(b.iter()).filter(|(x, y)| x != y).count();
+        self.report.num("bytes differing between two pools (of 64)", differing as i64);
+
+        let mut rng = match symbian::random::Random::new() {
+            Ok(r) => {
+                self.report.check("Random::new", true);
+                r
+            }
+            Err(e) => {
+                self.report.check_note("Random::new", false, err_name(e));
+                return;
+            }
+        };
+
+        let mut buf = [0u8; 1024];
+        rng.fill(&mut buf);
+        let ones: u32 = buf.iter().map(|x| x.count_ones()).sum();
+        self.report.num("set bits in 1024 DRBG bytes (expect near 4096)", ones as i64);
+        self.report.check("bit balance is plausible", ones > 3800 && ones < 4400);
+
+        let mut seen = [false; 256];
+        for &x in buf.iter() {
+            seen[x as usize] = true;
+        }
+        let missing = seen.iter().filter(|s| !**s).count();
+        self.report.num("byte values never seen in 1024 (expect a handful)", missing as i64);
+
+        let t = now_us();
+        let mut big = [0u8; 8192];
+        rng.fill(&mut big);
+        self.report.num("DRBG 8 KB (us)", (now_us() - t) as i64);
     }
 
     fn do_bignum(&mut self) {
@@ -1456,6 +1526,7 @@ fn phase_name(p: Phase) -> &'static str {
         Phase::Storage => "storage",
         Phase::Hashes => "hashes",
         Phase::Ciphers => "ciphers",
+        Phase::Random => "randomness",
         Phase::Bignum => "bignum",
         Phase::Inflate => "inflate",
         Phase::Timings => "timings",
@@ -1663,15 +1734,24 @@ mod tests {
     fn every_phase_has_a_name() {
         // The name is what a timeout reports, so a phase without one would time out
         // saying nothing.
-        for p in [
+        //
+        // The list is hand-maintained and therefore cannot enforce completeness — adding
+        // Phase::Random did not make this fail. What actually guarantees coverage is that
+        // `phase_name` matches without a `_` arm, so a new variant is a compile error until
+        // it is named. This test is the weaker half of that pair and the count below is
+        // what keeps it honest: it fails when the enum grows, which is the reminder to add
+        // the variant here too.
+        let all = [
             Phase::Platform, Phase::Libraries, Phase::Storage, Phase::Hashes,
-            Phase::Ciphers, Phase::Bignum, Phase::Inflate, Phase::Timings,
+            Phase::Ciphers, Phase::Random, Phase::Bignum, Phase::Inflate, Phase::Timings,
             Phase::Graphics, Phase::WorkerStart, Phase::WorkerWait, Phase::BearerSweep,
             Phase::BearerWait, Phase::Dns, Phase::DnsWait, Phase::Tcp, Phase::TcpWait,
             Phase::Http, Phase::HttpWait, Phase::Done,
-        ] {
+        ];
+        for p in all {
             assert!(!phase_name(p).is_empty(), "{p:?}");
         }
+        assert_eq!(all.len(), Phase::Done as usize + 1, "a phase is missing from this list");
     }
 
     #[test]

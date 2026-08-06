@@ -22,6 +22,7 @@ extern crate alloc;
 pub mod error;
 pub mod fs;
 pub mod net;
+pub mod random;
 
 pub use error::{Error, Result};
 pub use fs::{File, Fs, OpenMode, ShimFs};

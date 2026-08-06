@@ -197,6 +197,7 @@ extern "C" {
     /// `SHIM_OK` if the named DLL loads on this device, else the Symbian error
     /// (`KErrNotFound` is -1). `name` is UTF-16, e.g. `libcrypto.dll`.
     pub fn shim_dll_present(name: *const u16, len: i32) -> i32;
+    pub fn shim_entropy(out: *mut u8, len: i32) -> i32;
 
     // files
     pub fn shim_private_path(buf: *mut u16, cap: i32, len: *mut i32) -> i32;
@@ -294,6 +295,19 @@ mod host_stubs {
     }
     pub unsafe fn shim_dll_present(_name: *const u16, _len: i32) -> i32 {
         SHIM_ERR_NOT_READY
+    }
+    pub unsafe fn shim_entropy(out: *mut u8, len: i32) -> i32 {
+        /* The host stub is the one place a fake entropy source is defensible, and it is
+         * still worth being loud about: this is a counter, not entropy. Host tests must
+         * exercise the DRBG's *shape* -- that it advances, that it never repeats a block --
+         * and never its unpredictability, which cannot be tested here anyway. */
+        if out.is_null() || len <= 0 {
+            return SHIM_ERR_ARGUMENT;
+        }
+        for i in 0..len {
+            core::ptr::write(out.add(i as usize), (i as u8).wrapping_mul(31).wrapping_add(7));
+        }
+        SHIM_OK
     }
     pub unsafe fn shim_private_path(_b: *mut u16, _c: i32, _l: *mut i32) -> i32 {
         SHIM_ERR_NOT_READY

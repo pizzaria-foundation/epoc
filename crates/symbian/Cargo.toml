@@ -8,6 +8,7 @@ rust-version.workspace = true
 
 [dependencies]
 symbian-sys = { workspace = true }
+symbian-crypto = { workspace = true }
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_vendor, values("symbian"))'] }

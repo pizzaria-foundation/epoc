@@ -44,6 +44,7 @@ extern crate alloc;
 
 pub mod aes;
 pub mod bignum;
+pub mod drbg;
 pub mod hmac;
 pub mod inflate;
 pub mod ige;
@@ -53,6 +54,7 @@ pub mod sha512;
 
 pub use aes::Aes;
 pub use bignum::{modpow, Modulus};
+pub use drbg::Drbg;
 pub use inflate::{inflate, inflate_any, inflate_gzip, inflate_zlib};
 pub use sha1::Sha1;
 pub use sha256::Sha256;
