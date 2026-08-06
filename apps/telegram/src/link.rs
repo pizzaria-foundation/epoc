@@ -28,6 +28,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use symbian::fs::ShimFs;
 use symbian::net::{Bearer, Ipv4, Progress as NetProgress, ShimNet, TcpStream};
 use symbian::random::Random;
 use symbian::work::{Job, ModPow};
@@ -38,13 +39,38 @@ use tg_proto::crypto::Rng;
 use tg_proto::handshake::AuthKey;
 use tg_proto::rpc::{self, Update};
 
+use crate::session_store;
+
 /// DC2, where a client with no stored configuration begins.
 ///
 /// A literal address rather than a name: DNS is another round trip, another failure mode
 /// and another dialog on some access points, and Telegram's DC addresses are stable enough
 /// that `help.getConfig` is the right way to learn the others.
-pub const DC2: Ipv4 = Ipv4::new(149, 154, 167, 51);
 pub const DC_PORT: u16 = 443;
+
+/// Telegram's production data centres, by number.
+///
+/// Hardcoded rather than read from `help.getConfig`: `config#cc1a241e` is a sixty-field
+/// constructor with sixteen flag-conditional members, and these five addresses have been
+/// stable for years. Parsing it to learn one address would be the largest structure in the
+/// crate, written to avoid a five-line table.
+///
+/// Index 0 is unused so `DC_ADDRESSES[n]` is data centre `n`.
+pub const DC_ADDRESSES: [Ipv4; 6] = [
+    Ipv4::new(149, 154, 167, 51), // 0: unused, aliased to DC2 so a bad index still connects
+    Ipv4::new(149, 154, 175, 53),
+    Ipv4::new(149, 154, 167, 51),
+    Ipv4::new(149, 154, 175, 100),
+    Ipv4::new(149, 154, 167, 91),
+    Ipv4::new(91, 108, 56, 130),
+];
+
+/// Where a client with no stored session begins.
+pub const DEFAULT_DC: u8 = 2;
+
+pub fn dc_address(dc: u8) -> Ipv4 {
+    DC_ADDRESSES[(dc as usize).min(DC_ADDRESSES.len() - 1)]
+}
 
 /// Receive buffer. A `Config` reply is about a kilobyte compressed and the transport
 /// reassembles across reads, so this only has to be larger than one socket delivery.
@@ -95,6 +121,7 @@ pub struct Link {
     rng: PlatformRng,
     job: Job,
     phase: Phase,
+    dc: u8,
     /// Steps the client produced that have not been carried out yet.
     ///
     /// A queue because one event can produce several — a container of updates, or a send
@@ -106,21 +133,38 @@ pub struct Link {
 }
 
 impl Link {
-    /// Open a connection and begin a handshake.
+    /// Open a connection, resuming a stored session if there is one.
     ///
-    /// `saved` skips it. The key is worth persisting: redoing the handshake costs two
-    /// exponentiations and four round trips, which on this hardware is most of a login.
-    pub fn start(saved: Option<(AuthKey, i32)>) -> symbian::Result<Self> {
+    /// This is what "staying logged in" is. Being signed in to Telegram is not a token the
+    /// client holds — it is a property the server attaches to an auth key — so a key read
+    /// back from disk *is* the session, and the handshake is skipped entirely.
+    ///
+    /// It is also most of a login by cost: two exponentiations at 815 ms each and four round
+    /// trips, against one file read.
+    pub fn start() -> symbian::Result<Self> {
+        let mut fs = ShimFs;
+        let saved = session_store::load(&mut fs);
+        let dc = saved.as_ref().map(|s| s.dc).unwrap_or(DEFAULT_DC);
+        Self::open(dc, saved)
+    }
+
+    /// Connect to `dc`, using `saved` if it belongs there.
+    ///
+    /// A key belongs to one data centre. Carrying one to another answers `-404`, so a
+    /// mismatch discards it and handshakes afresh rather than spending a round trip finding
+    /// out — which is also what happens on `PHONE_MIGRATE_n`.
+    pub fn open(dc: u8, saved: Option<session_store::Stored>) -> symbian::Result<Self> {
         let mut net = ShimNet;
         let mut rng = PlatformRng(Random::new()?);
 
         // No RConnection: see the module docs.
         let bearer = Bearer::none();
         let mut sock = TcpStream::open(&mut net, &bearer, RX, TX)?;
-        sock.connect(&mut net, DC2, DC_PORT)?;
+        sock.connect(&mut net, dc_address(dc), DC_PORT)?;
 
-        let (client, first) = match saved {
-            Some((auth, offset)) => (Client::resume(auth, offset, &mut rng), None),
+        let usable = saved.filter(|s| s.dc == dc);
+        let (client, first) = match usable {
+            Some(s) => (Client::resume(s.auth, s.time_offset, &mut rng), None),
             None => {
                 let (c, step) = Client::connect(&mut rng);
                 (c, Some(step))
@@ -135,9 +179,41 @@ impl Link {
             rng,
             job: Job::new(),
             phase: Phase::Connecting,
+            dc,
             todo: first.into_iter().collect(),
             buf: [0u8; RX],
         })
+    }
+
+    /// Which data centre this link is talking to.
+    pub fn dc(&self) -> u8 {
+        self.dc
+    }
+
+    /// Write the negotiated session to disk.
+    ///
+    /// Called on [`Progress::Authenticated`]. Failing to save is not failing to connect —
+    /// the session works for this run either way — so the error is returned rather than
+    /// killing the link, and a caller that ignores it gets a client that logs in every
+    /// launch instead of one that does not work.
+    pub fn persist(&self) -> symbian::Result<()> {
+        let auth = self.client.auth_key().ok_or(symbian::Error::NotFound)?;
+        let mut fs = ShimFs;
+        session_store::save(
+            &mut fs,
+            &session_store::Stored {
+                dc: self.dc,
+                auth: auth.clone(),
+                salt: auth.salt,
+                time_offset: self.client.time_offset().unwrap_or(0),
+            },
+        )
+    }
+
+    /// Throw the stored session away.
+    pub fn forget(why: session_store::Invalidate) -> symbian::Result<()> {
+        let mut fs = ShimFs;
+        session_store::clear(&mut fs, why)
     }
 
     pub fn is_ready(&self) -> bool {
@@ -213,8 +289,10 @@ impl Link {
                         self.drain(unix_time).unwrap_or(Progress::None)
                     }
                     Err(tg_proto::client::Error::Server(-404)) => {
-                        // The server has forgotten our key. Not recoverable in place: the
-                        // stored key is worthless and the handshake must be redone.
+                        // The server has forgotten the key. Not recoverable in place, and
+                        // the stored copy is worthless -- keeping it means every launch
+                        // spends a round trip rediscovering that.
+                        let _ = Self::forget(session_store::Invalidate::UnknownKey);
                         self.die("the server no longer knows this auth key")
                     }
                     Err(_) => self.die("the server sent something unreadable"),
@@ -269,6 +347,13 @@ impl Link {
                 Some(Progress::Reply { tag, body })
             }
             Update::RpcError { req_msg_id, code, text } => {
+                // Some errors mean the key itself is dead: the user ended the session from
+                // another device, or the account was deactivated. Those have to reach the
+                // stored copy, or the next launch resumes a session the server has already
+                // thrown away and the client retries forever.
+                if let Some(why) = session_store::invalidating(&text) {
+                    let _ = Self::forget(why);
+                }
                 let tag = self.client.tag_of(req_msg_id).unwrap_or(0);
                 Some(Progress::Failed { tag, code, text })
             }
@@ -347,75 +432,9 @@ pub fn hello() -> Vec<u8> {
     )
 }
 
-/// Bytes for storing an auth key, and the offset that goes with it.
-///
-/// A fixed 280-byte record rather than anything parsed: this is written with
-/// `symbian::fs::write_atomic` and read back on the next launch, and a format with a parser
-/// is a format that can half-load. The magic distinguishes a real record from a truncated
-/// or foreign file, which on a phone is the difference between "log in again" and a panic.
-pub const STORE_MAGIC: u32 = 0x7467_4b31; // "tgK1"
-
-pub fn encode_key(auth: &AuthKey, offset: i32) -> Vec<u8> {
-    let mut v = Vec::with_capacity(268);
-    v.extend_from_slice(&STORE_MAGIC.to_be_bytes());
-    v.extend_from_slice(&auth.key);
-    v.extend_from_slice(&auth.id.to_be_bytes());
-    v.extend_from_slice(&auth.salt);
-    v.extend_from_slice(&offset.to_be_bytes());
-    v
-}
-
-pub fn decode_key(bytes: &[u8]) -> Option<(AuthKey, i32)> {
-    if bytes.len() != 280 || u32::from_be_bytes(bytes[0..4].try_into().ok()?) != STORE_MAGIC {
-        return None;
-    }
-    let mut key = [0u8; 256];
-    key.copy_from_slice(&bytes[4..260]);
-    let id = u64::from_be_bytes(bytes[260..268].try_into().ok()?);
-    let mut salt = [0u8; 8];
-    salt.copy_from_slice(&bytes[268..276]);
-    let offset = i32::from_be_bytes(bytes[276..280].try_into().ok()?);
-    // server_time is deliberately not stored. It exists only so the offset can be computed
-    // once, and an absolute time from a previous launch is wrong by however long the phone
-    // has been off -- keeping it would invite someone to use it.
-    Some((AuthKey { key, id, salt, server_time: 0 }, offset))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn a_key() -> AuthKey {
-        let mut k = [0u8; 256];
-        for (i, b) in k.iter_mut().enumerate() {
-            *b = (i as u8).wrapping_mul(3);
-        }
-        AuthKey { key: k, id: 0xfeed_face_dead_beef, salt: [7; 8], server_time: 123 }
-    }
-
-    #[test]
-    fn a_stored_key_round_trips() {
-        let bytes = encode_key(&a_key(), -42);
-        assert_eq!(bytes.len(), 280, "the record is a fixed width and decode checks it");
-        let (back, offset) = decode_key(&bytes).expect("decode rejected what encode produced");
-        assert_eq!(back.key, a_key().key);
-        assert_eq!(back.id, a_key().id);
-        assert_eq!(back.salt, a_key().salt);
-        assert_eq!(offset, -42);
-    }
-
-    #[test]
-    fn a_foreign_or_truncated_record_is_refused() {
-        // The failure this prevents: reading half a key and using it. The handshake would
-        // then "succeed" and every message afterwards would be rejected, which looks like
-        // the network rather than like storage.
-        let good = encode_key(&a_key(), 0);
-        assert!(decode_key(&good[..good.len() - 1]).is_none());
-        assert!(decode_key(&[]).is_none());
-        let mut wrong = good.clone();
-        wrong[0] ^= 0xff;
-        assert!(decode_key(&wrong).is_none());
-    }
 
     #[test]
     fn the_first_call_is_init_connection() {

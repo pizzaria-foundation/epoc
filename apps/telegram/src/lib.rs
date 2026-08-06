@@ -11,6 +11,7 @@
 extern crate alloc;
 
 pub mod link;
+pub mod session_store;
 pub mod chats;
 pub mod conv;
 pub mod model;
