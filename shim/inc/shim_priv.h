@@ -101,6 +101,16 @@ void ShimFilesCleanup();
 #ifdef SHIM_USE_NET
 void ShimNetCleanup();
 
+/* The FEP-aware editor, or NULL when the scan-code path is selected.
+ *
+ * Returned from CShimControl::InputCapabilities, which the framework calls during its own
+ * traversal and cannot allocate from -- so the editor is created by ShimFepInit when the
+ * control is constructed. */
+class MCoeFepAwareTextEditor;
+MCoeFepAwareTextEditor* ShimFepEditor();
+void ShimFepInit();
+void ShimFepCleanup();
+
 /* Wait for any running job and close the worker thread. Waiting is the point: the job
  * holds pointers into buffers the caller is about to free. */
 void ShimWorkCleanup();

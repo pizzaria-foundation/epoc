@@ -220,6 +220,31 @@ int32_t shim_dll_present(const uint16_t* name, int32_t len);
  * revisited against an answer rather than a guess. */
 int32_t shim_entropy(uint8_t* out, int32_t len);
 
+/* ---------------------------------------------------------------- keyboard --
+ *
+ * Which mechanism turns a physical key into a character.
+ *
+ * Both ship in every binary and either can be selected at run time, because only the
+ * handset can say which works and six rounds went into the bearer testing one guess per
+ * build. It also means a FEP that does not fire leaves a working keyboard rather than
+ * none. */
+
+/* The shim's own scan-code table. Tested on hardware: letters, digits and the twelve
+ * overlay keys. Does not produce the Fn symbol layer -- Fn+Q gives 'q'. */
+#define SHIM_KEYBOARD_SCAN 0
+
+/* Symbian's front-end processor. Advertises a MCoeFepAwareTextEditor through
+ * CCoeControl::InputCapabilities, which is what makes CAknFepManager involve itself at
+ * all -- declaring EAllText with a null editor was tried on device and changed nothing.
+ *
+ * If it works it gives the whole Fn layer, which is what a two-factor password needs. */
+#define SHIM_KEYBOARD_FEP  1
+
+/* Select one. SHIM_ERR_NOT_READY if the FEP editor has not been created yet, which means
+ * before the control exists. */
+int32_t shim_keyboard_mode(int32_t mode);
+int32_t shim_keyboard_mode_get(void);
+
 /* -------------------------------------------------------------------- text --
  * Text is drawn by Symbian into the same buffer Rust owns pixels of. That gets
  * real hinted glyphs and full UCS-2 coverage for nothing, and avoids decoding

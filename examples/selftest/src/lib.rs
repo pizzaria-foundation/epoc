@@ -639,6 +639,12 @@ impl SelfTest {
              * failure produces no report at all. This turns "can we upgrade the RNG" from a
              * guess into a value. */
             ("random.dll", "CSystemRandom, a real CSPRNG"),
+            /* Asked because the keyboard's Fn layer needs it and this binary deliberately
+             * does NOT link it. MCoeFepAwareTextEditor's own virtuals are IMPORT_C and live
+             * here, not in cone -- so a class deriving from it imports fepbase, and a
+             * handset without fepbase would not load the image at all. Probing from a build
+             * that does not import it is the only way to get an answer instead of silence. */
+            ("fepbase.dll", "the front-end processor base, for the Fn layer"),
             ("cryptography.dll", "platform crypto"),
         ];
         for (name, what) in libs {

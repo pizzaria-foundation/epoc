@@ -67,6 +67,20 @@ source "$APP/app.conf"
 # framework; ws32 the window server; fbscli/bitgdi/gdi/fntstr the bitmap and
 # graphics context the shim blits through; efsrv/estor the file server, which
 # Avkon's resource loading needs whether or not we open a file ourselves.
+# fepbase carries the default implementations of MCoeFepAwareTextEditor's own virtuals.
+# They are IMPORT_C, so a class deriving from it puts their addresses in its vtable and the
+# link fails without them -- and cone.dso, which exports TCoeInputCapabilities including the
+# constructor that *takes* one of these editors, exports none of the class itself.
+#
+# Opt-in, and that is the commdb lesson applied rather than restated: this adds a DLL to the
+# import table, and a DLL the handset does not have stops the image loading with no error,
+# no log and no report file. examples/selftest deliberately does NOT set this, so it can
+# probe for fepbase.dll and still produce a report if the answer is no.
+FEP_LIBS=""
+if [ "${USE_FEP:-0}" = 1 ]; then
+  FEP_LIBS="fepbase"
+fi
+
 if [ "${USE_SHIM:-0}" = 1 ]; then
   NET_LIBS=""
   if [ "${USE_NET:-0}" = 1 ]; then
@@ -75,7 +89,7 @@ if [ "${USE_SHIM:-0}" = 1 ]; then
     # underneath it.
     NET_LIBS="esock insock commdb netmeta"
   fi
-  : "${SYMBIAN_LIBS:=euser apparc cone eikcore avkon ws32 fbscli bitgdi gdi fntstr efsrv estor hal $NET_LIBS}"
+  : "${SYMBIAN_LIBS:=euser apparc cone eikcore avkon ws32 fbscli bitgdi gdi fntstr efsrv estor hal $NET_LIBS $FEP_LIBS}"
 fi
 
 BUILD="$APP/build"
@@ -142,6 +156,20 @@ fi
 # drives Rust through the shim therefore lists no C++ of its own at all.
 SRCS=()
 for src in $CXX_SOURCES; do SRCS+=("$APP/$src"); done
+# fepbase carries the default implementations of MCoeFepAwareTextEditor's own virtuals.
+# They are IMPORT_C, so a class deriving from it puts their addresses in its vtable and the
+# link fails without them -- and cone.dso, which exports TCoeInputCapabilities including the
+# constructor that *takes* one of these editors, exports none of the class itself.
+#
+# Opt-in, and that is the commdb lesson applied rather than restated: this adds a DLL to the
+# import table, and a DLL the handset does not have stops the image loading with no error,
+# no log and no report file. examples/selftest deliberately does NOT set this, so it can
+# probe for fepbase.dll and still produce a report if the answer is no.
+FEP_LIBS=""
+if [ "${USE_FEP:-0}" = 1 ]; then
+  FEP_LIBS="fepbase"
+fi
+
 if [ "${USE_SHIM:-0}" = 1 ]; then
   for src in "$SDK"/shim/src/*.cpp; do
     case "$(basename "$src")" in
@@ -151,6 +179,9 @@ if [ "${USE_SHIM:-0}" = 1 ]; then
       # to sweep them, so the libraries have to be there or the file has to be out.
       shim_net.cpp|shim_work.cpp)
         [ "${USE_NET:-0}" = 1 ] || continue
+        ;;
+      shim_fep.cpp)
+        [ "${USE_FEP:-0}" = 1 ] || continue
         ;;
     esac
     SRCS+=("$src")
@@ -197,6 +228,7 @@ if [ ${#SRCS[@]} -gt 0 ]; then
       -D__PRODUCT_INCLUDE__="<variant/${VARIANT_HRH:-symbian_os_v9.3.hrh}>" \
       -DSHIM_APP_UID3="$UID3" \
       ${USE_NET:+$([ "$USE_NET" = 1 ] && echo -DSHIM_USE_NET)} \
+      ${USE_FEP:+$([ "$USE_FEP" = 1 ] && echo -DSHIM_USE_FEP)} \
       -fexceptions -fno-rtti \
       -Wall -Wno-narrowing -Wno-ctor-dtor-privacy -Wno-unknown-pragmas \
       -Wno-attributes \

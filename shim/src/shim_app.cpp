@@ -297,6 +297,11 @@ CShimControl* CShimControl::NewL(const TRect& aRect)
 
 void CShimControl::ConstructL(const TRect& aRect)
     {
+#ifdef SHIM_USE_FEP
+    /* Before CreateWindowL, so the editor exists by the time the framework first asks for
+     * this control's input capabilities. */
+    ShimFepInit();
+#endif
     CreateWindowL();
     SetRect(aRect);
 
@@ -374,7 +379,20 @@ void CShimControl::SizeChanged()
  */
 TCoeInputCapabilities CShimControl::InputCapabilities() const
     {
+    /* The editor pointer is the whole difference. EAllText with NULL was tried on device
+     * and changed nothing: the capability says what kind of input this control accepts,
+     * and the editor is what the FEP actually talks to.
+     *
+     * NULL here when the scan-code path is selected, which puts the control back exactly
+     * where it was -- so switching modes at run time really does compare the two. */
+#ifdef SHIM_USE_FEP
+    return TCoeInputCapabilities(TCoeInputCapabilities::EAllText, ShimFepEditor(), NULL);
+#else
+    /* Built without the FEP. EAllText alone was tried on device and changed nothing, so
+     * this is the pre-FEP behaviour exactly -- which is what makes a build with USE_FEP=0
+     * a clean control rather than a half-configured one. */
     return TCoeInputCapabilities(TCoeInputCapabilities::EAllText, NULL, NULL);
+#endif
     }
 
 TKeyResponse CShimControl::OfferKeyEventL(const TKeyEvent& aKeyEvent, TEventCode aType)
@@ -513,6 +531,9 @@ CShimAppUi::~CShimAppUi()
 #ifdef SHIM_USE_NET
     /* Compiled in only when the app opted into networking, because shim_net.cpp is
      * only compiled then — see the source selection in tools/symbuild. */
+#ifdef SHIM_USE_FEP
+    ShimFepCleanup();
+#endif
     ShimNetCleanup();
     ShimWorkCleanup();
 #endif
