@@ -31,14 +31,27 @@
 
 use crate::sha512::{self, Sha512};
 
-/// HMAC-SHA-512 with the key expansion done once.
+/// HMAC-SHA-512 with the key expansion done once, carried as two 64-byte states.
 ///
-/// Clone-and-finish per message rather than re-keying, which is the whole point.
+/// **Not two `Sha512` values.** That was the first version and it was the slower half of
+/// this file: `Sha512` is 208 bytes — 64 of state and a 128-byte block buffer that is empty
+/// after the pad is absorbed — so cloning both twice per iteration copies 41 MB across
+/// Telegram's hundred thousand rounds, against 25 MB of actual hashing. More than half of
+/// every copy was a buffer holding nothing.
+///
+/// Carrying the eight words and building the single block by hand removes all of it.
 #[derive(Clone)]
 struct Primed {
-    inner: Sha512,
-    outer: Sha512,
+    inner: [u64; 8],
+    outer: [u64; 8],
 }
+
+/// Bit length of one HMAC half: a 128-byte pad block plus a 64-byte message.
+///
+/// Both halves hash exactly that — the inner over `ipad ++ U`, the outer over `opad ++
+/// digest` — so one block layout serves both, and the length field is a constant rather
+/// than something to track.
+const HALF_BITS: u64 = (sha512::BLOCK_LEN as u64 + 64) * 8;
 
 impl Primed {
     fn new(key: &[u8]) -> Self {
@@ -60,23 +73,46 @@ impl Primed {
             opad[i] = k[i] ^ 0x5c;
         }
 
-        let mut inner = Sha512::new();
-        inner.update(&ipad);
-        let mut outer = Sha512::new();
-        outer.update(&opad);
+        // One compression each: the pads are exactly one block, so absorbing them leaves a
+        // state and an empty buffer, and only the state is worth keeping.
+        let mut inner = sha512::H0_PUB;
+        sha512::compress_into(&mut inner, &ipad);
+        let mut outer = sha512::H0_PUB;
+        sha512::compress_into(&mut outer, &opad);
 
         Primed { inner, outer }
     }
 
-    /// One HMAC over `data`, from the primed states.
-    fn mac(&self, data: &[u8]) -> [u8; sha512::DIGEST_LEN] {
-        let mut inner = self.inner.clone();
-        inner.update(data);
-        let d = inner.finish();
+    /// One HMAC over a 64-byte message, from the primed states.
+    ///
+    /// Both halves are a single block of `message ++ 0x80 ++ zeros ++ length`, which is
+    /// what lets this skip the streaming interface entirely. 64 bytes of message plus one
+    /// terminator plus the 16-byte length is 81, comfortably inside the block, so the
+    /// message never spills into a second one — the case that would make this wrong is
+    /// impossible for the only caller.
+    fn mac(&self, message: &[u8; 64]) -> [u8; sha512::DIGEST_LEN] {
+        let mut block = [0u8; sha512::BLOCK_LEN];
+        block[..64].copy_from_slice(message);
+        block[64] = 0x80;
+        block[sha512::BLOCK_LEN - 8..].copy_from_slice(&HALF_BITS.to_be_bytes());
 
-        let mut outer = self.outer.clone();
-        outer.update(&d);
-        outer.finish()
+        let mut h = self.inner;
+        sha512::compress_into(&mut h, &block);
+
+        let mut digest = [0u8; sha512::DIGEST_LEN];
+        for (i, word) in h.iter().enumerate() {
+            digest[i * 8..i * 8 + 8].copy_from_slice(&word.to_be_bytes());
+        }
+
+        block[..64].copy_from_slice(&digest);
+        let mut h = self.outer;
+        sha512::compress_into(&mut h, &block);
+
+        let mut out = [0u8; sha512::DIGEST_LEN];
+        for (i, word) in h.iter().enumerate() {
+            out[i * 8..i * 8 + 8].copy_from_slice(&word.to_be_bytes());
+        }
+        out
     }
 }
 
@@ -92,11 +128,35 @@ pub fn pbkdf2_hmac_sha512(password: &[u8], salt: &[u8], iterations: u32, out: &m
         // different derived key that no other implementation agrees with, and for a
         // single-block output — which is Telegram's case — it is the only difference.
         let index = (block as u32 + 1).to_be_bytes();
-        let mut msg = alloc::vec::Vec::with_capacity(salt.len() + 4);
-        msg.extend_from_slice(salt);
-        msg.extend_from_slice(&index);
+        // U1's message is the salt, which is not 64 bytes, so it goes through the streaming
+        // interface once. Every iteration after it hashes a 64-byte digest and takes the
+        // fast path -- which is 99,999 of the hundred thousand.
+        let u1 = {
+            let mut m = Sha512::new();
+            let mut k = [0u8; sha512::BLOCK_LEN];
+            if password.len() > sha512::BLOCK_LEN {
+                k[..sha512::DIGEST_LEN].copy_from_slice(&sha512::sha512(password));
+            } else {
+                k[..password.len()].copy_from_slice(password);
+            }
+            for b in k.iter_mut() {
+                *b ^= 0x36;
+            }
+            m.update(&k);
+            m.update(salt);
+            m.update(&index);
+            let inner = m.finish();
 
-        let mut u = primed.mac(&msg);
+            for b in k.iter_mut() {
+                *b ^= 0x36 ^ 0x5c;
+            }
+            let mut o = Sha512::new();
+            o.update(&k);
+            o.update(&inner);
+            o.finish()
+        };
+
+        let mut u = u1;
         let mut t = u;
         for _ in 1..iterations {
             u = primed.mac(&u);
