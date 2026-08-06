@@ -143,3 +143,35 @@ items land in the final staticlib while the code behind them lives in one place.
 
 Before it existed, each app carried its own copy: about 120 lines of `unsafe`, duplicated
 across three apps. Three copies is where copies start drifting.
+
+## The worker thread
+
+`rust_step` runs from a `CIdle` on the GUI thread and must return in milliseconds. A long
+one starves the window server, which freezes the whole phone rather than just the
+application, and nothing recovers from it.
+
+A 2048-bit modular exponentiation measures **815 ms** on the E72, and an MTProto login needs
+two. So the shim carries a worker: one thread per job, created on submit and gone when the
+job ends. Completion comes back through `RThread::RequestComplete` into a `CActive` on the
+GUI thread, so it lands in the scheduler like a timer and nothing polls.
+
+Measured on the handset: the same exponentiation took **1933 ms** of wall time on the
+worker, with **27 GUI ticks served** through it. Slower — one core, shared with an interface
+that keeps redrawing. **The worker buys responsiveness, not speed**, and a design that
+assumes background work is free is wrong on this device.
+
+### The one way to break it
+
+The worker gets its own heap, because a default `RHeap` is not thread-safe. So an allocation
+made on the worker and freed on the GUI thread is a cross-heap free: silent corruption
+rather than a clean failure.
+
+The contract is therefore not "the job must not allocate" — it is that nothing the job
+allocates may outlive it. `symbian::work::Job` enforces the shape by owning both buffers as
+`Box<[u8]>` and holding them for the whole request; the job only ever writes into the
+caller's output.
+
+The crash that established this: `RHandleBase::Duplicate` takes the handle to copy from
+`this->iHandle`, not from its argument. A default-constructed `RThread` therefore asked the
+kernel to duplicate handle 0 — `KERN-EXEC 0`, on the GUI thread, which closes the
+application. `RThread::Open(TThreadId)` has no such reading.

@@ -1,14 +1,20 @@
 # tg — the Telegram client
 
-The reference app, and the reason the SDK exists. Currently a **mock chat**: the UI is
-real and runs on the E72, the protocol is not written yet.
+The reference app, and the reason the SDK exists. The UI is real and runs on the E72; the
+protocol is real and talks to Telegram. They are not joined up yet — `App::mock()` still
+backs the screens.
 
-## Two crates, on purpose
+## Three crates, on purpose
 
 ```
-apps/telegram/          tg          rlib,      host-testable, no runtime items
-apps/telegram/device/   tg-device   staticlib, the three entry points the shim calls
+apps/telegram/proto/    tg-proto    rlib,      MTProto. No I/O at all
+apps/telegram/          tg          rlib,      the UI, and the seam in link.rs
+apps/telegram/device/   tg-device   staticlib, the entry points the shim calls
 ```
+
+`tg-proto` is the protocol and touches no platform — see its own README, which leads with
+the live run against Telegram's servers. `tg::link` is where it meets `symbian`: a socket,
+a worker thread, a random source and a `Client`, turning raw shim events into `Progress`.
 
 `tg` is a plain rlib with no `#[global_allocator]` and no `#[panic_handler]`, which is
 what lets `cargo test` run the chat logic on the host. Every decision the app makes —

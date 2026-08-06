@@ -196,6 +196,64 @@ follow:
   whole application down with it. If a facility might not resolve, it belongs in its own
   binary, where failing to load costs a probe rather than the report.
 
+## Getting a socket open: six rounds, and none of them the socket
+
+The transport worked from the first build. Everything that failed was above it, and each
+failure looked exactly like the one below it.
+
+**Round 1 — the deadline.** `RConnection::Start` was given 12 s. Two strategies timed out.
+Read as "the network is broken".
+
+**Round 2 — the same, longer.** 30 s. Same result, read the same way.
+
+**Round 3 — the report that was actually an answer.** Two lines:
+
+```
+  .    IAP 1: err -1
+  FAIL timed out  bearer      <- IAP 2
+```
+
+An access point that does not exist answers `KErrNotFound` in milliseconds. One that
+*times out* was accepted and was still coming up when the deadline fired. So IAP 2 existed
+and was working, and the sweep killed it. `err <n>` only ever prints from the async branch,
+which means `RConnection::Start` had been completing correctly the whole time. Misread as
+another bad guess.
+
+**Round 4 — the guess that stopped the image loading.** Reading that timeout as a bad id led
+to reading the comms database instead: six `CCommsDatabase` calls, six new ordinals from an
+already-imported `commdb.dll`, and the application stopped starting. No panic, no log, **no
+report file** — which is itself the diagnosis, since the report flushes from the first phase.
+A crash in application code leaves a partial file; a loader failure leaves nothing.
+
+**Round 5 — the timeout that was a person.** One access point timed out at **35013 ms** in
+two separate runs, to the millisecond. A radio failing to associate does not do that; a
+countdown does. Every attempt can raise a dialog and wait for a human, not only the one
+named "prompt". Three rounds of tuning that number were all sized for a network.
+
+**Round 6 — the thing that was there all along.** `RSocket::Open` and `RHostResolver::Open`
+have overloads taking no `RConnection`, and `shim_net.cpp` had always called them when the
+handle resolved to nothing. The stack then uses whatever route is already up — and on a
+handset whose browser works, one is.
+
+```
+  ok   no bearer: socket on the existing route  no RConnection, no dialog
+```
+
+No dialog, no negotiation, nothing that can time out. It is `Bearer::none()` now.
+
+Two things worth keeping from that:
+
+- **A timeout is a measurement of your deadline, not of the system.** Print the elapsed
+  time next to every one. "Answered instantly" and "spent the whole budget" were printing
+  the same line for three rounds, and that one missing number is what hid the answer.
+- **A phase that can be slow must narrate itself.** The sweep wrote nothing for two and a
+  half minutes, so a run in progress and a hung app were indistinguishable from the file.
+
+Also settled: **the handset had no SIM.** Three access points answered `-4180`, which is
+`KErrEtelGsmBase` (-4000) territory — cellular access points correctly reporting no
+cellular network. Only the Wi-Fi one was ever going to work, and none of the sweep logic
+could have known that.
+
 ## Measured on the handset, not estimated
 
 From the device self test, after the clock was fixed. These replace the scaled-from-host
