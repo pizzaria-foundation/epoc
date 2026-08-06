@@ -1009,6 +1009,16 @@ impl SelfTest {
             sys::SHIM_IAP_DEFAULT => Iap::Default,
             id => Iap::Id(id as u32),
         };
+        /* Announced and flushed before the attempt, not after it.
+         *
+         * The sweep is up to ten strategies, one of which waits 40 s on a human, so a
+         * run can spend two and a half minutes here writing nothing. The first report
+         * off this handset ended at "-- entering bearer" and read like a freeze; it was
+         * a sweep in progress. A phase that can be slow has to narrate itself, or the
+         * only observable difference between working and hung is patience. */
+        self.report.info("trying", sweep_label(iap));
+        self.report.flush(&mut self.fs);
+
         match self.net.net_start(strategy) {
             Ok(h) => {
                 self.sweep_handle = h;
@@ -1019,6 +1029,7 @@ impl SelfTest {
             }
             Err(e) => {
                 self.report.info(sweep_label(iap), err_name(e));
+                self.report.flush(&mut self.fs);
                 self.sweep_at += 1;
             }
         }
@@ -1143,6 +1154,7 @@ impl SelfTest {
                     let mut note = String::from("err ");
                     push_i64(&mut note, ev.status as i64);
                     self.report.info(sweep_label(iap), &note);
+                    self.report.flush(&mut self.fs);
                     self.sweep_at += 1;
                     self.phase = Phase::BearerSweep;
                 }
@@ -1361,6 +1373,7 @@ impl App for SelfTest {
             if Some(ev.handle) == self.deadline {
                 self.cancel_deadline();
                 self.report.check_note("timed out", false, phase_name(self.phase));
+                self.report.flush(&mut self.fs);
                 // A timeout is an answer about this phase, not the end of the run.
                 match self.phase {
                     Phase::WorkerWait => self.next(Phase::BearerSweep),

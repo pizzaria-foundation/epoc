@@ -172,6 +172,41 @@ icon doing nothing. `examples/libprobe` asks with `RLibrary::Load` instead, whic
 stronger test than checking the filesystem — a DLL can be present and still fail to load
 through a wrong UID, its own unsatisfied imports, or a capability we do not hold.
 
+## Measured on the handset, not estimated
+
+From the device self test, after the clock was fixed. These replace the scaled-from-host
+guesses the docs carried:
+
+| | E72 |
+|---|---|
+| SHA-256 | 8 MB/s |
+| AES-256 | **169 KB/s** |
+| 2048-bit modpow, GUI thread | 815 ms |
+| 2048-bit modpow, worker thread | 1933 ms wall |
+| full-screen fill (320x240) | 0.6 ms |
+| present (RGB565 -> XRGB8888 + BitBlt) | **15.1 ms** |
+| frame total | 15.7 ms, so 63 fps |
+| 64 KB file write | 46 ms |
+| 64 KB file read | 5 ms |
+
+Three of these change decisions.
+
+**Present costs 96% of the frame.** The fill is 0.6 ms and the present is 15.1 ms, so
+drawing less does almost nothing for frame rate — the cost is the RGB565-to-XRGB8888
+expansion and the BitBlt, both proportional to screen area and paid whatever the frame
+contains. The optimisation that would pay is a dirty-rectangle present; drawing fewer
+pixels is not.
+
+**AES is the slow primitive**, at 169 KB/s against SHA-256's 8 MB/s — a 48x gap where the
+algorithms differ by maybe 3x in work. That is the byte-at-a-time implementation with no
+T-tables, and it is the thing to optimise if a real protocol ever runs here.
+
+**The worker thread does not make a job faster; it makes it not block.** The same modpow
+is 815 ms on the GUI thread and 1933 ms on the worker, because this is a single core and
+the worker is sharing it with a GUI that keeps redrawing. Wall time went up 2.4x and the
+interface stayed alive for all 26 ticks of it. That is the trade, and it is the right one
+— but a design that assumes background work is free is wrong on this hardware.
+
 ## Two units and one precedence, found by the device self test
 
 **`HALData::ENanoTickPeriod` is in microseconds.** The name says nanoseconds; `hal_data.h`
