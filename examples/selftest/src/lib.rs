@@ -253,7 +253,6 @@ enum Phase {
     Graphics,
     WorkerStart,
     WorkerWait,
-    Iaps,
     BearerSweep,
     BearerWait,
     Dns,
@@ -312,9 +311,17 @@ pub struct SelfTest {
     status: String,
 }
 
-/* The two strategies that need no id. Real access-point ids are appended to these once
- * the comms database has been read; the previous version hardcoded 1..8 and spent two
- * minutes discovering that this handset does not number them that way. */
+/* Both strategies that need no access-point id, and nothing else.
+ *
+ * An earlier version swept ids 1..8 and spent two minutes learning that this handset does
+ * not number access points that way -- the ids are whatever the comms database assigned.
+ * The obvious next move was to read that database, and CCommsDatabase turned out to pull
+ * ordinals from commdb.dll that this E72 does not export: the image stopped loading at
+ * all, which is a worse failure than a bad guess because it produces no report to read.
+ *
+ * So neither. The browser works on this handset, which means a default connection exists,
+ * and SHIM_IAP_DEFAULT is exactly the "use the configured default" path the browser takes.
+ * Two attempts, no new imports, and the deadline is the thing that was actually wrong. */
 const SWEEP_HEAD: [i32; 2] = [sys::SHIM_IAP_DEFAULT, sys::SHIM_IAP_PROMPT];
 
 impl Default for SelfTest {
@@ -342,7 +349,7 @@ impl SelfTest {
             sweep_handle: -1,
             bearer_handle: -1,
             bearer_iap: -1,
-            sweep: Vec::new(),
+            sweep: SWEEP_HEAD.to_vec(),
             iap_names: Vec::new(),
             dns_handle: -1,
             tcp_handle: -1,
@@ -439,11 +446,6 @@ impl SelfTest {
             }
             Phase::WorkerStart => {
                 self.do_worker_start();
-            }
-            Phase::Iaps => {
-                self.do_iaps();
-                self.report.flush(&mut self.fs);
-                self.next(Phase::BearerSweep);
             }
             Phase::BearerSweep => {
                 self.do_sweep_step();
@@ -1009,69 +1011,11 @@ impl SelfTest {
             self.phase = Phase::WorkerWait;
             self.expect(30);
         } else {
-            self.next(Phase::Iaps);
+            self.next(Phase::BearerSweep);
         }
     }
 
     // ---- network phases ----
-
-    /// Ask the comms database what access points exist, and build the sweep from the
-    /// answer. A name and a service type turn "IAP 6 worked" into "the Wi-Fi one worked".
-    fn do_iaps(&mut self) {
-        self.report.head("access points (from the comms database)");
-
-        self.sweep.clear();
-        self.sweep.extend_from_slice(&SWEEP_HEAD);
-        self.iap_names.clear();
-
-        let count = unsafe { sys::shim_net_iap_count() };
-        if count < 0 {
-            self.report.check_note("comms database readable", false, err_name(symbian::Error::from_code(count)));
-            return;
-        }
-        self.report.check("comms database readable", true);
-        self.report.num("access points configured", count as i64);
-        if count == 0 {
-            // Worth stating rather than leaving as an empty list: with no access point
-            // there is nothing for any strategy to connect to and nothing for the prompt
-            // to offer, which is why the dialog never appeared.
-            self.report.info("note", "no access points, so nothing can connect");
-        }
-
-        for i in 0..count {
-            let mut id = 0i32;
-            let mut name = [0u16; 64];
-            let mut name_len = 0i32;
-            let mut service = [0u16; 64];
-            let mut service_len = 0i32;
-            let rc = unsafe {
-                sys::shim_net_iap_info(i, &mut id, name.as_mut_ptr(), 64, &mut name_len,
-                                       service.as_mut_ptr(), 64, &mut service_len)
-            };
-            if rc != sys::SHIM_OK {
-                continue;
-            }
-            let mut label = String::new();
-            push_i64(&mut label, id as i64);
-            label.push_str(": ");
-            for &u in &name[..name_len.max(0) as usize] {
-                if let Some(c) = char::from_u32(u as u32) {
-                    label.push(c);
-                }
-            }
-            label.push_str("  [");
-            for &u in &service[..service_len.max(0) as usize] {
-                if let Some(c) = char::from_u32(u as u32) {
-                    label.push(c);
-                }
-            }
-            label.push(']');
-            self.report.info("iap", &label);
-
-            self.sweep.push(id);
-            self.iap_names.push(label);
-        }
-    }
 
     /// What to call the strategy at `sweep_at` in the report. The id-less ones have fixed
     /// names; a real access point reports the name and service type the database gave it,
@@ -1438,7 +1382,6 @@ fn phase_name(p: Phase) -> &'static str {
         Phase::Timings => "timings",
         Phase::Graphics => "graphics",
         Phase::WorkerStart | Phase::WorkerWait => "worker thread",
-        Phase::Iaps => "access points",
         Phase::BearerSweep | Phase::BearerWait => "bearer",
         Phase::Dns | Phase::DnsWait => "dns",
         Phase::Tcp | Phase::TcpWait => "tcp echo",
@@ -1473,7 +1416,7 @@ impl App for SelfTest {
                 self.report.flush(&mut self.fs);
                 // A timeout is an answer about this phase, not the end of the run.
                 match self.phase {
-                    Phase::WorkerWait => self.next(Phase::Iaps),
+                    Phase::WorkerWait => self.next(Phase::BearerSweep),
                     Phase::BearerWait => {
                         self.sweep_at += 1;
                         self.phase = Phase::BearerSweep;
@@ -1509,7 +1452,7 @@ impl App for SelfTest {
                 "the GUI thread kept running during the job (ticks > 0)",
                 self.work_ticks > 0,
             );
-            self.next(Phase::Iaps);
+            self.next(Phase::BearerSweep);
             return Handled::Consumed;
         }
 

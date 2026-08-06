@@ -172,6 +172,30 @@ icon doing nothing. `examples/libprobe` asks with `RLibrary::Load` instead, whic
 stronger test than checking the filesystem — a DLL can be present and still fail to load
 through a wrong UID, its own unsatisfied imports, or a capability we do not hold.
 
+## An import that does not resolve makes the app vanish
+
+Calling six methods on `CCommsDatabase` to enumerate access points added six ordinals to
+the import table from `commdb.dll` — a DLL the binary already imported, so the DLL *set*
+did not change and nothing in the build complained. On the handset the application stopped
+starting. No panic dialog, no log, and — the part that matters — **no report file**, even
+though the report flushes from the first phase onward.
+
+That absence is the diagnosis. A crash in application code leaves a partial file; a loader
+failure leaves nothing, because no application code ever ran. So "the file did not appear
+at all" and "the file stops somewhere" are different findings, and worth asking about
+separately.
+
+The E72 runs Symbian 9.3 against an SDK whose `commdb.dso` is not necessarily the same
+build, and an ordinal that is absent means the loader refuses the image outright. Two rules
+follow:
+
+- **New imports are a deployment risk, not just a link-time question.** `e32dump` reports
+  the count; comparing it before and after a change tells you what you added. Six calls,
+  six imports, and removing them took the count from 353 back to 347.
+- **Keep diagnostics off the critical path.** This was an optional probe that took the
+  whole application down with it. If a facility might not resolve, it belongs in its own
+  binary, where failing to load costs a probe rather than the report.
+
 ## Measured on the handset, not estimated
 
 From the device self test, after the clock was fixed. These replace the scaled-from-host
