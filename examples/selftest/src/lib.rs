@@ -246,6 +246,7 @@ enum Phase {
     Graphics,
     WorkerStart,
     WorkerWait,
+    Iaps,
     BearerSweep,
     BearerWait,
     Dns,
@@ -283,6 +284,11 @@ pub struct SelfTest {
     sweep_handle: i32,
     bearer_handle: i32,
     bearer_iap: i32,
+    /// What to try, in order: the two id-less strategies then every access point the
+    /// handset actually has.
+    sweep: Vec<i32>,
+    /// Names for the report, parallel to the tail of `sweep`.
+    iap_names: Vec<String>,
     dns_handle: i32,
     tcp_handle: i32,
     resolved: Option<Ipv4>,
@@ -299,8 +305,10 @@ pub struct SelfTest {
     status: String,
 }
 
-const SWEEP: [i32; 10] =
-    [sys::SHIM_IAP_DEFAULT, sys::SHIM_IAP_PROMPT, 1, 2, 3, 4, 5, 6, 7, 8];
+/* The two strategies that need no id. Real access-point ids are appended to these once
+ * the comms database has been read; the previous version hardcoded 1..8 and spent two
+ * minutes discovering that this handset does not number them that way. */
+const SWEEP_HEAD: [i32; 2] = [sys::SHIM_IAP_DEFAULT, sys::SHIM_IAP_PROMPT];
 
 impl Default for SelfTest {
     fn default() -> Self {
@@ -327,6 +335,8 @@ impl SelfTest {
             sweep_handle: -1,
             bearer_handle: -1,
             bearer_iap: -1,
+            sweep: Vec::new(),
+            iap_names: Vec::new(),
             dns_handle: -1,
             tcp_handle: -1,
             resolved: None,
@@ -422,6 +432,11 @@ impl SelfTest {
             }
             Phase::WorkerStart => {
                 self.do_worker_start();
+            }
+            Phase::Iaps => {
+                self.do_iaps();
+                self.report.flush(&mut self.fs);
+                self.next(Phase::BearerSweep);
             }
             Phase::BearerSweep => {
                 self.do_sweep_step();
@@ -987,23 +1002,96 @@ impl SelfTest {
             self.phase = Phase::WorkerWait;
             self.expect(30);
         } else {
-            self.next(Phase::BearerSweep);
+            self.next(Phase::Iaps);
         }
     }
 
     // ---- network phases ----
+
+    /// Ask the comms database what access points exist, and build the sweep from the
+    /// answer. A name and a service type turn "IAP 6 worked" into "the Wi-Fi one worked".
+    fn do_iaps(&mut self) {
+        self.report.head("access points (from the comms database)");
+
+        self.sweep.clear();
+        self.sweep.extend_from_slice(&SWEEP_HEAD);
+        self.iap_names.clear();
+
+        let count = unsafe { sys::shim_net_iap_count() };
+        if count < 0 {
+            self.report.check_note("comms database readable", false, err_name(symbian::Error::from_code(count)));
+            return;
+        }
+        self.report.check("comms database readable", true);
+        self.report.num("access points configured", count as i64);
+        if count == 0 {
+            // Worth stating rather than leaving as an empty list: with no access point
+            // there is nothing for any strategy to connect to and nothing for the prompt
+            // to offer, which is why the dialog never appeared.
+            self.report.info("note", "no access points, so nothing can connect");
+        }
+
+        for i in 0..count {
+            let mut id = 0i32;
+            let mut name = [0u16; 64];
+            let mut name_len = 0i32;
+            let mut service = [0u16; 64];
+            let mut service_len = 0i32;
+            let rc = unsafe {
+                sys::shim_net_iap_info(i, &mut id, name.as_mut_ptr(), 64, &mut name_len,
+                                       service.as_mut_ptr(), 64, &mut service_len)
+            };
+            if rc != sys::SHIM_OK {
+                continue;
+            }
+            let mut label = String::new();
+            push_i64(&mut label, id as i64);
+            label.push_str(": ");
+            for &u in &name[..name_len.max(0) as usize] {
+                if let Some(c) = char::from_u32(u as u32) {
+                    label.push(c);
+                }
+            }
+            label.push_str("  [");
+            for &u in &service[..service_len.max(0) as usize] {
+                if let Some(c) = char::from_u32(u as u32) {
+                    label.push(c);
+                }
+            }
+            label.push(']');
+            self.report.info("iap", &label);
+
+            self.sweep.push(id);
+            self.iap_names.push(label);
+        }
+    }
+
+    /// What to call the strategy at `sweep_at` in the report. The id-less ones have fixed
+    /// names; a real access point reports the name and service type the database gave it,
+    /// because "IAP 6 worked" is not an answer anyone can act on.
+    fn sweep_name(&self) -> String {
+        let iap = self.sweep[self.sweep_at];
+        if iap == sys::SHIM_IAP_DEFAULT || iap == sys::SHIM_IAP_PROMPT {
+            return String::from(sweep_label(iap));
+        }
+        let head = SWEEP_HEAD.len();
+        match self.iap_names.get(self.sweep_at - head) {
+            Some(n) => n.clone(),
+            None => String::from("access point"),
+        }
+    }
 
     fn do_sweep_step(&mut self) {
         if self.sweep_handle >= 0 {
             self.net.net_stop(self.sweep_handle);
             self.sweep_handle = -1;
         }
-        if self.sweep_at >= SWEEP.len() {
+        if self.sweep_at >= self.sweep.len() {
             self.report.check("some bearer strategy worked", false);
             self.next(Phase::Done);
             return;
         }
-        let iap = SWEEP[self.sweep_at];
+        let iap = self.sweep[self.sweep_at];
         let strategy = match iap {
             sys::SHIM_IAP_PROMPT => Iap::Prompt,
             sys::SHIM_IAP_DEFAULT => Iap::Default,
@@ -1016,7 +1104,8 @@ impl SelfTest {
          * off this handset ended at "-- entering bearer" and read like a freeze; it was
          * a sweep in progress. A phase that can be slow has to narrate itself, or the
          * only observable difference between working and hung is patience. */
-        self.report.info("trying", sweep_label(iap));
+        let label = self.sweep_name();
+        self.report.info("trying", &label);
         self.report.flush(&mut self.fs);
 
         match self.net.net_start(strategy) {
@@ -1025,10 +1114,10 @@ impl SelfTest {
                 self.phase = Phase::BearerWait;
                 // The prompt waits on a person and gets longer, but not so long that an
                 // unattended run stalls for minutes on a dialog nobody is there to answer.
-                self.expect(if iap == sys::SHIM_IAP_PROMPT { 40 } else { 12 });
+                self.expect(if iap == sys::SHIM_IAP_PROMPT { 40 } else { 30 });
             }
             Err(e) => {
-                self.report.info(sweep_label(iap), err_name(e));
+                self.report.info(&label, err_name(e));
                 self.report.flush(&mut self.fs);
                 self.sweep_at += 1;
             }
@@ -1140,11 +1229,11 @@ impl SelfTest {
                     return false;
                 }
                 self.cancel_deadline();
-                let iap = SWEEP[self.sweep_at];
                 if ev.status == 0 {
                     let mut note = String::from("IAP ");
                     push_i64(&mut note, ev.a as i64);
-                    self.report.check_note(sweep_label(iap), true, &note);
+                    let label = self.sweep_name();
+                    self.report.check_note(&label, true, &note);
                     self.bearer_handle = self.sweep_handle;
                     self.bearer_iap = ev.a;
                     // Keep it: everything after this uses it.
@@ -1153,7 +1242,8 @@ impl SelfTest {
                 } else {
                     let mut note = String::from("err ");
                     push_i64(&mut note, ev.status as i64);
-                    self.report.info(sweep_label(iap), &note);
+                    let label = self.sweep_name();
+                    self.report.info(&label, &note);
                     self.report.flush(&mut self.fs);
                     self.sweep_at += 1;
                     self.phase = Phase::BearerSweep;
@@ -1302,14 +1392,7 @@ fn sweep_label(iap: i32) -> &'static str {
     match iap {
         sys::SHIM_IAP_DEFAULT => "system default",
         sys::SHIM_IAP_PROMPT => "prompt",
-        1 => "IAP 1",
-        2 => "IAP 2",
-        3 => "IAP 3",
-        4 => "IAP 4",
-        5 => "IAP 5",
-        6 => "IAP 6",
-        7 => "IAP 7",
-        _ => "IAP 8",
+        _ => "access point",
     }
 }
 
@@ -1342,6 +1425,7 @@ fn phase_name(p: Phase) -> &'static str {
         Phase::Timings => "timings",
         Phase::Graphics => "graphics",
         Phase::WorkerStart | Phase::WorkerWait => "worker thread",
+        Phase::Iaps => "access points",
         Phase::BearerSweep | Phase::BearerWait => "bearer",
         Phase::Dns | Phase::DnsWait => "dns",
         Phase::Tcp | Phase::TcpWait => "tcp echo",
@@ -1376,7 +1460,7 @@ impl App for SelfTest {
                 self.report.flush(&mut self.fs);
                 // A timeout is an answer about this phase, not the end of the run.
                 match self.phase {
-                    Phase::WorkerWait => self.next(Phase::BearerSweep),
+                    Phase::WorkerWait => self.next(Phase::Iaps),
                     Phase::BearerWait => {
                         self.sweep_at += 1;
                         self.phase = Phase::BearerSweep;
@@ -1412,7 +1496,7 @@ impl App for SelfTest {
                 "the GUI thread kept running during the job (ticks > 0)",
                 self.work_ticks > 0,
             );
-            self.next(Phase::BearerSweep);
+            self.next(Phase::Iaps);
             return Handled::Consumed;
         }
 

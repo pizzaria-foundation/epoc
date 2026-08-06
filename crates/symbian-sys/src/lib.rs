@@ -210,6 +210,10 @@ extern "C" {
     pub fn shim_file_close(handle: i32);
 
     // network
+    pub fn shim_net_iap_count() -> i32;
+    pub fn shim_net_iap_info(index: i32, id: *mut i32,
+                             name: *mut u16, name_cap: i32, name_len: *mut i32,
+                             service: *mut u16, service_cap: i32, service_len: *mut i32) -> i32;
     pub fn shim_net_start(iap: i32, handle: *mut i32) -> i32;
     pub fn shim_net_stop(handle: i32);
     pub fn shim_dns_resolve(conn: i32, host: *const u16, len: i32, handle: *mut i32) -> i32;
@@ -325,6 +329,23 @@ mod host_stubs {
         SHIM_ERR_NOT_READY
     }
     pub unsafe fn shim_file_close(_h: i32) {}
+    pub unsafe fn shim_net_iap_count() -> i32 {
+        // No comms database off-device, so "zero access points" rather than an error:
+        // the caller's empty-list path is the one worth exercising in the simulator.
+        0
+    }
+    pub unsafe fn shim_net_iap_info(
+        _i: i32,
+        _id: *mut i32,
+        _name: *mut u16,
+        _name_cap: i32,
+        _name_len: *mut i32,
+        _svc: *mut u16,
+        _svc_cap: i32,
+        _svc_len: *mut i32,
+    ) -> i32 {
+        SHIM_ERR_ARGUMENT
+    }
     pub unsafe fn shim_net_start(_iap: i32, _h: *mut i32) -> i32 {
         SHIM_ERR_NOT_READY
     }

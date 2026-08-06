@@ -46,6 +46,8 @@
 #include <es_sock.h>
 #include <in_sock.h>
 #include <commdbconnpref.h>
+#include <commdb.h>
+#include <cdbcols.h>
 
 namespace {
 
@@ -630,6 +632,97 @@ void ShimNetCleanup()
     }
 
 extern "C" {
+
+/* Enumerate the access points this handset actually has.
+ *
+ * Written because the self test was sweeping IAP ids 1 through 8 and hoping. The report
+ * that came back said "IAP 1: err -1" -- KErrNotFound, arriving as a *completion*, which
+ * was the proof that RConnection::Start works fine and that the ids were the problem.
+ * Guessing an id is guessing; the comms database knows.
+ *
+ * Snapshotted into a fixed array on the first call rather than held open, because the
+ * caller wants a count before it wants any names, and reopening the database per row
+ * would be three table scans to print four lines.
+ */
+namespace {
+
+struct TIapInfo
+    {
+    TUint32 iId;
+    TBuf<KCommsDbSvrMaxFieldLength> iName;
+    TBuf<KCommsDbSvrMaxFieldLength> iService;
+    };
+
+const TInt KMaxIaps = 16;
+TIapInfo gIaps[KMaxIaps];
+TInt gIapCount = -1;   /* -1 means "not looked yet" */
+
+void SnapshotIapsL()
+    {
+    CCommsDatabase* db = CCommsDatabase::NewL();
+    CleanupStack::PushL(db);
+    CCommsDbTableView* view = db->OpenTableLC(TPtrC(IAP));
+
+    TInt n = 0;
+    TInt err = view->GotoFirstRecord();
+    while (err == KErrNone && n < KMaxIaps)
+        {
+        view->ReadUintL(TPtrC(COMMDB_ID), gIaps[n].iId);
+        view->ReadTextL(TPtrC(COMMDB_NAME), gIaps[n].iName);
+        /* The service type distinguishes Wi-Fi from packet data, which is the difference
+         * between "this will work on my desk" and "this costs money". */
+        view->ReadTextL(TPtrC(IAP_SERVICE_TYPE), gIaps[n].iService);
+        n++;
+        err = view->GotoNextRecord();
+        }
+
+    CleanupStack::PopAndDestroy(2);   /* view, db */
+    gIapCount = n;
+    }
+
+TInt CopyOut(const TDesC& aFrom, uint16_t* aOut, int32_t aCap)
+    {
+    const TInt n = aFrom.Length() < aCap ? aFrom.Length() : aCap;
+    for (TInt i = 0; i < n; i++)
+        aOut[i] = static_cast<uint16_t>(aFrom[i]);
+    return n;
+    }
+
+} /* namespace */
+
+int32_t shim_net_iap_count(void)
+    {
+    if (gIapCount < 0)
+        {
+        TInt err = KErrNone;
+        TRAP(err, SnapshotIapsL());
+        if (err != KErrNone)
+            {
+            gIapCount = -1;
+            return err;
+            }
+        }
+    return gIapCount;
+    }
+
+int32_t shim_net_iap_info(int32_t index, int32_t* id, uint16_t* name, int32_t name_cap,
+                          int32_t* name_len, uint16_t* service, int32_t service_cap,
+                          int32_t* service_len)
+    {
+    const int32_t count = shim_net_iap_count();
+    if (count < 0)
+        return count;
+    if (index < 0 || index >= count)
+        return SHIM_ERR_ARGUMENT;
+
+    if (id)
+        *id = static_cast<int32_t>(gIaps[index].iId);
+    if (name && name_cap > 0 && name_len)
+        *name_len = CopyOut(gIaps[index].iName, name, name_cap);
+    if (service && service_cap > 0 && service_len)
+        *service_len = CopyOut(gIaps[index].iService, service, service_cap);
+    return SHIM_OK;
+    }
 
 int32_t shim_net_start(int32_t iap, int32_t* handle)
     {

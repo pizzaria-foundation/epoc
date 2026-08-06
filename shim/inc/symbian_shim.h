@@ -270,6 +270,18 @@ int64_t shim_unix_time(void);
  * configured default, or a positive id from a previous SHIM_EV_NET_READY. The
  * intended shape is: prompt on first run, remember the answer, connect silently
  * afterwards, and fall back to prompting if the saved id has gone away. */
+/* How many access points this handset has configured, or a negative error.
+ * Snapshotted on the first call. Guessing IAP ids does not work: the ids are whatever
+ * the comms database assigned, not 1..n. */
+int32_t shim_net_iap_count(void);
+
+/* Details of access point `index`, 0-based, in the order the database lists them.
+ * `name` and `service` are UTF-16, not NUL-terminated; the lengths come back through
+ * `name_len` and `service_len`. Any output pointer may be NULL to skip that field. */
+int32_t shim_net_iap_info(int32_t index, int32_t* id,
+                          uint16_t* name, int32_t name_cap, int32_t* name_len,
+                          uint16_t* service, int32_t service_cap, int32_t* service_len);
+
 int32_t shim_net_start(int32_t iap, int32_t* handle);
 
 /* Releases our handle. Deliberately not RConnection::Stop(): Stop tears down the
