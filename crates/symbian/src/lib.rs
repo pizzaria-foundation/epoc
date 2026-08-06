@@ -23,6 +23,7 @@ pub mod error;
 pub mod fs;
 pub mod net;
 pub mod random;
+pub mod work;
 
 pub use error::{Error, Result};
 pub use fs::{File, Fs, OpenMode, ShimFs};

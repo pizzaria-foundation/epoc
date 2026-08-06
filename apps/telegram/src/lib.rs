@@ -10,6 +10,7 @@
 
 extern crate alloc;
 
+pub mod link;
 pub mod chats;
 pub mod conv;
 pub mod model;

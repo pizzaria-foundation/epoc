@@ -13,13 +13,13 @@
 
 extern crate alloc;
 
-/// A compile check that the protocol builds for the device.
+/// The worker thread's entry point.
 ///
-/// `tg-proto` is a `no_std` rlib and `cargo test` only ever builds it for the host, where
-/// `std` is in scope and every allocation is free. This reference keeps it in the ARM link
-/// so a `BTreeMap` or a `div_ceil` that does not exist on the target fails here rather
-/// than the first time someone tries to log in.
-#[used]
-static _PROTO_LINKS: fn(&tg_proto::client::Client) -> bool = tg_proto::client::Client::is_ready;
+/// Runs on a second thread with its own heap, so nothing it allocates may outlive the job —
+/// see `symbian::work`. Its only caller is `shim_work_submit`, and its only job today is the
+/// 2048-bit modular exponentiation the MTProto handshake needs twice.
+fn worker(opcode: i32, input: &[u8], out: &mut [u8]) -> i32 {
+    tg::link::work(opcode, input, out)
+}
 
-symbian_app::entry!(tg::App::mock());
+symbian_app::entry!(tg::App::mock(), work = worker);

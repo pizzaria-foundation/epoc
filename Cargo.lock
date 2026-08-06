@@ -622,7 +622,11 @@ dependencies = [
 name = "tg"
 version = "0.1.0"
 dependencies = [
+ "symbian",
+ "symbian-crypto",
+ "symbian-sys",
  "symbian-ui",
+ "tg-proto",
 ]
 
 [[package]]

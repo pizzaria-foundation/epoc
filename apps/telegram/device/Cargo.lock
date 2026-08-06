@@ -3,6 +3,14 @@
 version = 4
 
 [[package]]
+name = "symbian"
+version = "0.1.0"
+dependencies = [
+ "symbian-crypto",
+ "symbian-sys",
+]
+
+[[package]]
 name = "symbian-app"
 version = "0.1.0"
 dependencies = [
@@ -35,7 +43,11 @@ dependencies = [
 name = "tg"
 version = "0.1.0"
 dependencies = [
+ "symbian",
+ "symbian-crypto",
+ "symbian-sys",
  "symbian-ui",
+ "tg-proto",
 ]
 
 [[package]]

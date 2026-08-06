@@ -18,3 +18,7 @@ std = ["symbian-ui/std"]
 
 [dependencies]
 symbian-ui = { workspace = true }
+symbian = { workspace = true }
+symbian-sys = { workspace = true }
+symbian-crypto = { workspace = true }
+tg-proto = { workspace = true }

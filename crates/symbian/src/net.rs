@@ -205,6 +205,30 @@ pub struct Bearer {
 }
 
 impl Bearer {
+    /// No bearer at all: open sockets on whatever route is already up.
+    ///
+    /// `RSocket::Open` and `RHostResolver::Open` both have overloads that take no
+    /// `RConnection`, and the shim calls them when the handle resolves to nothing. The stack
+    /// then uses the existing default route.
+    ///
+    /// **This is the path that works on the E72**, and finding that out cost six rounds of
+    /// device testing. Every attempt to bring a bearer up hit one of three walls: a dialog
+    /// that waits on a person, a deadline sized for a network rather than for a human, or —
+    /// after reading the comms database to stop guessing access-point ids — six new
+    /// `commdb` ordinals the handset does not export, which stopped the image loading
+    /// altogether. `docs/device-notes.md` has the whole account.
+    ///
+    /// This has none of those failure modes. It cannot raise a dialog, cannot negotiate and
+    /// cannot time out. If no route is up, the connect fails immediately and says so, which
+    /// is a better answer than a two-minute sweep that ends the same way.
+    ///
+    /// What it gives up is the *choice* of route. On a handset with both Wi-Fi and packet
+    /// data up, the stack picks — which for a metered connection is a real consideration and
+    /// is the reason [`Bearer::start`] still exists.
+    pub fn none() -> Self {
+        Bearer { handle: -1, iap: None, retried: true, up: true }
+    }
+
     /// Bring up a bearer. Pass the id from a previous session if there is one.
     ///
     /// Returns as soon as the request is issued; feed events to [`Self::on_event`].
