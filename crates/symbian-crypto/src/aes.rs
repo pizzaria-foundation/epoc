@@ -6,13 +6,40 @@
 //! cover all three, and a key-schedule bug that only shows at one length is exactly the
 //! kind that survives a single-length test.
 //!
-//! # Size
+//! # Speed, and why this is table-driven
 //!
-//! The forward and inverse S-boxes are 256 bytes each and the round tables are computed on
-//! the fly rather than stored, so the whole thing is under 1 KB of `.rodata` against a
-//! 106 KB image. A table-driven implementation would be perhaps 30% faster and cost 8 KB;
-//! that trade would be worth revisiting only if AES ever turned out to be on a hot path,
-//! and on this device the network is four orders of magnitude slower than the cipher.
+//! This module used to say that a table-driven implementation "would be perhaps 30% faster
+//! and cost 8 KB", and that the trade was not worth making because "on this device the
+//! network is four orders of magnitude slower than the cipher". Both halves were wrong,
+//! and the device self test is what showed it: **169 KB/s** for AES-256 on the E72, against
+//! 8 MB/s for SHA-256 — a 48x gap between algorithms that differ by maybe 3x in real work.
+//! Wi-Fi on this handset is faster than that. The cipher was the bottleneck, not the wire.
+//!
+//! The byte-at-a-time version spent most of its time in `xmul`, which loops eight times per
+//! GF(2^8) multiply; `mix_columns` calls it eight times per column, four columns, fourteen
+//! rounds, so roughly 3,600 loop iterations per block for multiplication alone.
+//!
+//! So: T-tables, which fold SubBytes, ShiftRows and MixColumns into one indexed load and
+//! one XOR per byte.
+//!
+//! **One table per direction, not four.** The classic formulation uses four 1 KB tables
+//! whose entries are byte rotations of each other. Storing one and rotating at use costs
+//! nothing on ARM — the barrel shifter makes `eor r1, r1, r0, ror #8` a single instruction —
+//! and saves 6 KB of the 8 KB. So 2 KB of `.rodata` total.
+//!
+//! **Generated, not transcribed.** Both tables are built by a `const fn` from `SBOX` and the
+//! same `gf` used everywhere else, so they land in `.rodata` exactly as literals would with
+//! nothing to have typed wrong. Same reasoning as the SHA-512 constants, which are derived
+//! from the cube roots of the first eighty primes rather than copied.
+//!
+//! # Cache timing
+//!
+//! Table-driven AES leaks key material through cache access patterns to an attacker who can
+//! run code on the same core and measure. That is a real attack on shared servers and is
+//! accepted here deliberately: this is a single-core phone running one application, and
+//! there is no co-resident attacker to leak to. Stating it is better than implying a
+//! property the code does not have — see the crate docs, which say the same about the
+//! bignum code.
 
 /// FIPS 197 figure 7.
 const SBOX: [u8; 256] = [
@@ -67,11 +94,16 @@ const MAX_ROUND_KEYS: usize = 60;
 
 /// Multiply in GF(2^8) with the AES polynomial 0x11b.
 ///
-/// Branch-free on the reduction so the loop shape does not depend on the data, though see
-/// the crate docs on why constant time is not the goal here.
-fn xmul(mut a: u8, mut b: u8) -> u8 {
+/// `const` so the round tables below can be built from it at compile time. That is the
+/// whole reason this is a `while` loop rather than a `for`: `for` is not permitted in a
+/// `const fn` on stable Rust.
+///
+/// After the table rewrite this runs at compile time and during key expansion only — never
+/// per block, which is where it used to cost everything.
+const fn gf(mut a: u8, mut b: u8) -> u8 {
     let mut p = 0u8;
-    for _ in 0..8 {
+    let mut i = 0u8;
+    while i < 8 {
         if b & 1 != 0 {
             p ^= a;
         }
@@ -81,14 +113,74 @@ fn xmul(mut a: u8, mut b: u8) -> u8 {
             a ^= 0x1b;
         }
         b >>= 1;
+        i += 1;
     }
     p
+}
+
+/// The forward round table: SubBytes, ShiftRows and MixColumns for one byte, as the column
+/// contribution it makes.
+///
+/// Entry `x` holds `[2·S(x), S(x), S(x), 3·S(x)]` big-endian, byte 0 being row 0 — the first
+/// column of the MixColumns matrix applied to the substituted byte. The other three tables
+/// of the classic formulation are this one rotated right by 8, 16 and 24 bits, so they are
+/// not stored; see the module docs.
+const TE: [u32; 256] = {
+    let mut t = [0u32; 256];
+    let mut x = 0usize;
+    while x < 256 {
+        let s = SBOX[x];
+        t[x] = u32::from_be_bytes([gf(s, 2), s, s, gf(s, 3)]);
+        x += 1;
+    }
+    t
+};
+
+/// The inverse round table: `[14·S⁻¹(x), 9·S⁻¹(x), 13·S⁻¹(x), 11·S⁻¹(x)]`, the first column
+/// of the InvMixColumns matrix. Rotations give the other three, as above.
+const TD: [u32; 256] = {
+    let mut t = [0u32; 256];
+    let mut x = 0usize;
+    while x < 256 {
+        let s = INV_SBOX[x];
+        t[x] = u32::from_be_bytes([gf(s, 14), gf(s, 9), gf(s, 13), gf(s, 11)]);
+        x += 1;
+    }
+    t
+};
+
+/// Row `r` of the word `v`, the state being column-major with row 0 in the top byte.
+#[inline(always)]
+fn row(v: u32, r: u32) -> usize {
+    ((v >> (24 - 8 * r)) & 0xff) as usize
+}
+
+/// InvMixColumns on one column, used to build the decryption schedule.
+///
+/// The equivalent inverse cipher moves this off the block and onto the round keys, where it
+/// is paid once per key rather than once per block per round.
+fn inv_mix_word(v: u32) -> u32 {
+    let a = v.to_be_bytes();
+    u32::from_be_bytes([
+        gf(a[0], 14) ^ gf(a[1], 11) ^ gf(a[2], 13) ^ gf(a[3], 9),
+        gf(a[0], 9) ^ gf(a[1], 14) ^ gf(a[2], 11) ^ gf(a[3], 13),
+        gf(a[0], 13) ^ gf(a[1], 9) ^ gf(a[2], 14) ^ gf(a[3], 11),
+        gf(a[0], 11) ^ gf(a[1], 13) ^ gf(a[2], 9) ^ gf(a[3], 14),
+    ])
 }
 
 #[derive(Clone)]
 pub struct Aes {
     /// Expanded key, as 32-bit words in column order.
     w: [u32; MAX_ROUND_KEYS],
+    /// The same schedule reversed, with every middle round key passed through
+    /// InvMixColumns — what the equivalent inverse cipher needs so that decryption has the
+    /// same shape as encryption and can use the same kind of table.
+    ///
+    /// Built eagerly rather than on first use. It costs 240 bytes and a few microseconds
+    /// per key, and MTProto decrypts every message it receives, so a key that never
+    /// decrypts is not the case worth optimising for.
+    dw: [u32; MAX_ROUND_KEYS],
     rounds: usize,
 }
 
@@ -121,7 +213,7 @@ impl Aes {
             let mut t = w[i - 1];
             if i % nk == 0 {
                 t = sub_word(t.rotate_left(8)) ^ ((rcon as u32) << 24);
-                rcon = xmul(rcon, 2);
+                rcon = gf(rcon, 2);
             } else if nk > 6 && i % nk == 4 {
                 // AES-256 only: an extra SubWord with no rotation or round constant. It is
                 // the step most often left out, and leaving it out still produces a working
@@ -131,42 +223,106 @@ impl Aes {
             w[i] = w[i - nk] ^ t;
         }
 
-        Some(Aes { w, rounds })
+        // The decryption schedule: the same round keys in reverse, with the middle ones
+        // pushed through InvMixColumns. The first and last are used before and after any
+        // mixing happens and must stay as they are.
+        let mut dw = [0u32; MAX_ROUND_KEYS];
+        for i in 0..=rounds {
+            for c in 0..4 {
+                dw[i * 4 + c] = w[(rounds - i) * 4 + c];
+            }
+        }
+        for i in 1..rounds {
+            for c in 0..4 {
+                dw[i * 4 + c] = inv_mix_word(dw[i * 4 + c]);
+            }
+        }
+
+        Some(Aes { w, dw, rounds })
     }
 
     pub fn encrypt_block(&self, block: &mut [u8; BLOCK_LEN]) {
-        self.add_round_key(block, 0);
-        for round in 1..self.rounds {
-            sub_bytes(block);
-            shift_rows(block);
-            mix_columns(block);
-            self.add_round_key(block, round);
+        // The state is four column words, row 0 in the top byte — which is just the block
+        // read big-endian four bytes at a time, since it is already stored column-major.
+        let mut s = [0u32; 4];
+        for (c, word) in s.iter_mut().enumerate() {
+            *word = u32::from_be_bytes([
+                block[c * 4],
+                block[c * 4 + 1],
+                block[c * 4 + 2],
+                block[c * 4 + 3],
+            ]) ^ self.w[c];
         }
-        // The last round omits MixColumns, which is what makes decryption possible at all.
-        sub_bytes(block);
-        shift_rows(block);
-        self.add_round_key(block, self.rounds);
+
+        let mut t = [0u32; 4];
+        for round in 1..self.rounds {
+            // ShiftRows is not performed; it is the choice of which column each row is read
+            // from. Row r of the output column c comes from column (c + r) mod 4.
+            for c in 0..4 {
+                t[c] = TE[row(s[c], 0)]
+                    ^ TE[row(s[(c + 1) & 3], 1)].rotate_right(8)
+                    ^ TE[row(s[(c + 2) & 3], 2)].rotate_right(16)
+                    ^ TE[row(s[(c + 3) & 3], 3)].rotate_right(24)
+                    ^ self.w[round * 4 + c];
+            }
+            s = t;
+        }
+
+        // The last round omits MixColumns, which is what makes decryption possible at all —
+        // so it is a plain S-box substitution with the same shifted reads, and no table.
+        for c in 0..4 {
+            t[c] = u32::from_be_bytes([
+                SBOX[row(s[c], 0)],
+                SBOX[row(s[(c + 1) & 3], 1)],
+                SBOX[row(s[(c + 2) & 3], 2)],
+                SBOX[row(s[(c + 3) & 3], 3)],
+            ]) ^ self.w[self.rounds * 4 + c];
+        }
+
+        for c in 0..4 {
+            block[c * 4..c * 4 + 4].copy_from_slice(&t[c].to_be_bytes());
+        }
     }
 
     pub fn decrypt_block(&self, block: &mut [u8; BLOCK_LEN]) {
-        self.add_round_key(block, self.rounds);
-        for round in (1..self.rounds).rev() {
-            inv_shift_rows(block);
-            inv_sub_bytes(block);
-            self.add_round_key(block, round);
-            inv_mix_columns(block);
+        let mut s = [0u32; 4];
+        for (c, word) in s.iter_mut().enumerate() {
+            *word = u32::from_be_bytes([
+                block[c * 4],
+                block[c * 4 + 1],
+                block[c * 4 + 2],
+                block[c * 4 + 3],
+            ]) ^ self.dw[c];
         }
-        inv_shift_rows(block);
-        inv_sub_bytes(block);
-        self.add_round_key(block, 0);
-    }
 
-    fn add_round_key(&self, block: &mut [u8; BLOCK_LEN], round: usize) {
-        for col in 0..4 {
-            let k = self.w[round * 4 + col].to_be_bytes();
-            for row in 0..4 {
-                block[col * 4 + row] ^= k[row];
+        let mut t = [0u32; 4];
+        for round in 1..self.rounds {
+            // InvShiftRows rotates the other way, so row r of output column c comes from
+            // column (c - r) mod 4. That sign is the only difference from encryption, and
+            // getting it backwards produces a cipher that decrypts its own output and
+            // agrees with nothing else — which is why the FIPS vectors matter more than a
+            // round-trip test.
+            for c in 0..4 {
+                t[c] = TD[row(s[c], 0)]
+                    ^ TD[row(s[(c + 3) & 3], 1)].rotate_right(8)
+                    ^ TD[row(s[(c + 2) & 3], 2)].rotate_right(16)
+                    ^ TD[row(s[(c + 1) & 3], 3)].rotate_right(24)
+                    ^ self.dw[round * 4 + c];
             }
+            s = t;
+        }
+
+        for c in 0..4 {
+            t[c] = u32::from_be_bytes([
+                INV_SBOX[row(s[c], 0)],
+                INV_SBOX[row(s[(c + 3) & 3], 1)],
+                INV_SBOX[row(s[(c + 2) & 3], 2)],
+                INV_SBOX[row(s[(c + 1) & 3], 3)],
+            ]) ^ self.dw[self.rounds * 4 + c];
+        }
+
+        for c in 0..4 {
+            block[c * 4..c * 4 + 4].copy_from_slice(&t[c].to_be_bytes());
         }
     }
 }
@@ -181,12 +337,24 @@ fn sub_word(w: u32) -> u32 {
     ])
 }
 
+/* The byte-at-a-time round functions below are the original implementation, kept as a
+ * reference the table version is checked against rather than deleted.
+ *
+ * They are `#[cfg(test)]`, so they cost nothing in the image, and they are worth more as a
+ * test than they were as an implementation: `the_tables_agree_with_the_reference` runs both
+ * over hundreds of blocks and all three key lengths. A T-table transcription error is
+ * invisible on inspection and produces a cipher that is self-consistent — it encrypts and
+ * decrypts its own output perfectly and agrees with nothing in the world. The FIPS vectors
+ * would catch it, but only at one point each; this catches it everywhere. */
+
+#[cfg(test)]
 fn sub_bytes(b: &mut [u8; BLOCK_LEN]) {
     for x in b.iter_mut() {
         *x = SBOX[*x as usize];
     }
 }
 
+#[cfg(test)]
 fn inv_sub_bytes(b: &mut [u8; BLOCK_LEN]) {
     for x in b.iter_mut() {
         *x = INV_SBOX[*x as usize];
@@ -194,6 +362,7 @@ fn inv_sub_bytes(b: &mut [u8; BLOCK_LEN]) {
 }
 
 // The state is column-major: byte `col * 4 + row`. ShiftRows rotates row `r` left by `r`.
+#[cfg(test)]
 fn shift_rows(b: &mut [u8; BLOCK_LEN]) {
     for row in 1..4 {
         let mut tmp = [0u8; 4];
@@ -206,6 +375,7 @@ fn shift_rows(b: &mut [u8; BLOCK_LEN]) {
     }
 }
 
+#[cfg(test)]
 fn inv_shift_rows(b: &mut [u8; BLOCK_LEN]) {
     for row in 1..4 {
         let mut tmp = [0u8; 4];
@@ -218,23 +388,25 @@ fn inv_shift_rows(b: &mut [u8; BLOCK_LEN]) {
     }
 }
 
+#[cfg(test)]
 fn mix_columns(b: &mut [u8; BLOCK_LEN]) {
     for col in 0..4 {
         let c = [b[col * 4], b[col * 4 + 1], b[col * 4 + 2], b[col * 4 + 3]];
-        b[col * 4] = xmul(c[0], 2) ^ xmul(c[1], 3) ^ c[2] ^ c[3];
-        b[col * 4 + 1] = c[0] ^ xmul(c[1], 2) ^ xmul(c[2], 3) ^ c[3];
-        b[col * 4 + 2] = c[0] ^ c[1] ^ xmul(c[2], 2) ^ xmul(c[3], 3);
-        b[col * 4 + 3] = xmul(c[0], 3) ^ c[1] ^ c[2] ^ xmul(c[3], 2);
+        b[col * 4] = gf(c[0], 2) ^ gf(c[1], 3) ^ c[2] ^ c[3];
+        b[col * 4 + 1] = c[0] ^ gf(c[1], 2) ^ gf(c[2], 3) ^ c[3];
+        b[col * 4 + 2] = c[0] ^ c[1] ^ gf(c[2], 2) ^ gf(c[3], 3);
+        b[col * 4 + 3] = gf(c[0], 3) ^ c[1] ^ c[2] ^ gf(c[3], 2);
     }
 }
 
+#[cfg(test)]
 fn inv_mix_columns(b: &mut [u8; BLOCK_LEN]) {
     for col in 0..4 {
         let c = [b[col * 4], b[col * 4 + 1], b[col * 4 + 2], b[col * 4 + 3]];
-        b[col * 4] = xmul(c[0], 14) ^ xmul(c[1], 11) ^ xmul(c[2], 13) ^ xmul(c[3], 9);
-        b[col * 4 + 1] = xmul(c[0], 9) ^ xmul(c[1], 14) ^ xmul(c[2], 11) ^ xmul(c[3], 13);
-        b[col * 4 + 2] = xmul(c[0], 13) ^ xmul(c[1], 9) ^ xmul(c[2], 14) ^ xmul(c[3], 11);
-        b[col * 4 + 3] = xmul(c[0], 11) ^ xmul(c[1], 13) ^ xmul(c[2], 9) ^ xmul(c[3], 14);
+        b[col * 4] = gf(c[0], 14) ^ gf(c[1], 11) ^ gf(c[2], 13) ^ gf(c[3], 9);
+        b[col * 4 + 1] = gf(c[0], 9) ^ gf(c[1], 14) ^ gf(c[2], 11) ^ gf(c[3], 13);
+        b[col * 4 + 2] = gf(c[0], 13) ^ gf(c[1], 9) ^ gf(c[2], 14) ^ gf(c[3], 11);
+        b[col * 4 + 3] = gf(c[0], 11) ^ gf(c[1], 13) ^ gf(c[2], 9) ^ gf(c[3], 14);
     }
 }
 
@@ -257,6 +429,96 @@ mod tests {
             let _ = write!(s, "{x:02x}");
         }
         s
+    }
+
+    /// The original byte-at-a-time cipher, straight from FIPS 197 section 5, kept so the
+    /// table version has something to be wrong against.
+    fn add_round_key(aes: &Aes, block: &mut [u8; BLOCK_LEN], round: usize) {
+        for col in 0..4 {
+            let k = aes.w[round * 4 + col].to_be_bytes();
+            for r in 0..4 {
+                block[col * 4 + r] ^= k[r];
+            }
+        }
+    }
+
+    fn encrypt_ref(aes: &Aes, block: &mut [u8; BLOCK_LEN]) {
+        add_round_key(aes, block, 0);
+        for round in 1..aes.rounds {
+            sub_bytes(block);
+            shift_rows(block);
+            mix_columns(block);
+            add_round_key(aes, block, round);
+        }
+        sub_bytes(block);
+        shift_rows(block);
+        add_round_key(aes, block, aes.rounds);
+    }
+
+    fn decrypt_ref(aes: &Aes, block: &mut [u8; BLOCK_LEN]) {
+        add_round_key(aes, block, aes.rounds);
+        for round in (1..aes.rounds).rev() {
+            inv_shift_rows(block);
+            inv_sub_bytes(block);
+            add_round_key(aes, block, round);
+            inv_mix_columns(block);
+        }
+        inv_shift_rows(block);
+        inv_sub_bytes(block);
+        add_round_key(aes, block, 0);
+    }
+
+    /// The table cipher and the byte cipher must agree everywhere, not just on the vectors.
+    ///
+    /// This is the test the rewrite was worth keeping the old code for. A T-table with one
+    /// wrong entry, or a rotation applied in the wrong direction, produces a cipher that is
+    /// perfectly self-consistent — it round-trips its own output, it looks random, and it
+    /// agrees with nothing else on earth. `round_trip_over_many_random_looking_blocks` would
+    /// pass. The FIPS vectors would catch it, but at three points; this catches it at 3072.
+    #[test]
+    fn the_tables_agree_with_the_reference() {
+        let keys: [&[u8]; 3] = [&[0x2bu8; 16], &[0x7eu8; 24], &[0x15u8; 32]];
+        let mut state = 0xdeadbeefu32;
+        for key in keys {
+            let aes = Aes::new(key).unwrap();
+            for _ in 0..1024 {
+                let mut b = [0u8; 16];
+                for byte in b.iter_mut() {
+                    state ^= state << 13;
+                    state ^= state >> 17;
+                    state ^= state << 5;
+                    *byte = state as u8;
+                }
+
+                let (mut fast, mut slow) = (b, b);
+                aes.encrypt_block(&mut fast);
+                encrypt_ref(&aes, &mut slow);
+                assert_eq!(hex(&fast), hex(&slow), "encrypt differs, key len {}", key.len());
+
+                // And decryption from the same ciphertext, so the inverse table and the
+                // reversed schedule are checked independently of encryption being right.
+                let (mut fast_d, mut slow_d) = (fast, fast);
+                aes.decrypt_block(&mut fast_d);
+                decrypt_ref(&aes, &mut slow_d);
+                assert_eq!(hex(&fast_d), hex(&slow_d), "decrypt differs, key len {}", key.len());
+                assert_eq!(hex(&fast_d), hex(&b), "decrypt did not invert");
+            }
+        }
+    }
+
+    /// The three tables the code does not store must really be rotations of the one it does.
+    #[test]
+    fn the_unstored_tables_are_rotations() {
+        for x in 0..256usize {
+            let s = SBOX[x];
+            // T1 = [3s, 2s, s, s], which is TE rotated right by one byte.
+            let t1 = u32::from_be_bytes([gf(s, 3), gf(s, 2), s, s]);
+            assert_eq!(TE[x].rotate_right(8), t1, "TE rotation wrong at {x}");
+
+            let si = INV_SBOX[x];
+            let u1 = u32::from_be_bytes([gf(si, 11), gf(si, 14), gf(si, 9), gf(si, 13)]);
+            assert_eq!(TD[x].rotate_right(8), u1, "TD rotation wrong at {x}");
+        }
     }
 
     /// FIPS 197 appendix C, all three key lengths. These are the definition.
@@ -341,19 +603,19 @@ mod tests {
     #[test]
     fn gf_multiplication_matches_known_products() {
         // The four constants MixColumns uses, on values that exercise the reduction.
-        assert_eq!(xmul(0x57, 0x01), 0x57);
-        assert_eq!(xmul(0x57, 0x02), 0xae);
-        assert_eq!(xmul(0x57, 0x04), 0x47);
-        assert_eq!(xmul(0x57, 0x13), 0xfe);
+        assert_eq!(gf(0x57, 0x01), 0x57);
+        assert_eq!(gf(0x57, 0x02), 0xae);
+        assert_eq!(gf(0x57, 0x04), 0x47);
+        assert_eq!(gf(0x57, 0x13), 0xfe);
         // 0x80 * 2 is the case that must reduce.
-        assert_eq!(xmul(0x80, 0x02), 0x1b);
+        assert_eq!(gf(0x80, 0x02), 0x1b);
         // Commutative, and 0 and 1 behave.
         for a in [0u8, 1, 0x53, 0xca, 0xff] {
             for b in [0u8, 1, 0x02, 0x1b, 0xff] {
-                assert_eq!(xmul(a, b), xmul(b, a));
+                assert_eq!(gf(a, b), gf(b, a));
             }
-            assert_eq!(xmul(a, 0), 0);
-            assert_eq!(xmul(a, 1), a);
+            assert_eq!(gf(a, 0), 0);
+            assert_eq!(gf(a, 1), a);
         }
     }
 
