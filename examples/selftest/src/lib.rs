@@ -254,8 +254,11 @@ enum Phase {
     Graphics,
     WorkerStart,
     WorkerWait,
+    /// Waits for the bearer, which is negotiating concurrently and has been since the
+    /// first tick. There is no BearerWait beside it any more: the sweep stopped being a
+    /// step in the sequence when the access-point dialog stopped being the last thing to
+    /// happen.
     BearerSweep,
-    BearerWait,
     Dns,
     DnsWait,
     Tcp,
@@ -277,6 +280,13 @@ pub struct SelfTest {
     /// stays responsive instead of freezing for the length of the whole battery.
     driver: Option<i32>,
     deadline: Option<i32>,
+    /// The bearer's own deadline, separate from the phase sequence's.
+    ///
+    /// It has to be separate because the two now run at the same time: bringing a
+    /// connection up is asynchronous and there was never a reason to serialise it behind
+    /// ten seconds of arithmetic. One timer shared between them would have the graphics
+    /// phase cancel the access-point dialog's.
+    bearer_deadline: Option<i32>,
 
     // worker
     work_in: Vec<u8>,
@@ -291,6 +301,8 @@ pub struct SelfTest {
     sweep_handle: i32,
     bearer_handle: i32,
     bearer_iap: i32,
+    /// The routeless attempt was made. Not a route — see `do_sweep_step`.
+    bearer_none: bool,
     attempt_started_us: u64,
     /// What to try, in order: the two id-less strategies then every access point the
     /// handset actually has.
@@ -331,20 +343,33 @@ pub struct SelfTest {
  * trip, so twenty of them cost almost nothing, and the ones that cost real time are
  * exactly the ones worth waiting for. The strategies that ask the system to choose go
  * last, because on this handset neither has ever completed and both are slow to say so. */
-/* "Open the socket without an RConnection at all", handled here and never passed to the
- * shim -- which is why it is a local sentinel rather than a SHIM_IAP_ constant.
+/* "Open the socket without an RConnection at all": the fallback, and no longer a sweep
+ * entry.
  *
- * RSocket::Open and RHostResolver::Open both have overloads that take no RConnection, and
- * shim_net.cpp already calls them when the connection handle resolves to nothing. The
- * stack then uses whatever route is already up. On a handset whose browser works, one is.
+ * RSocket::Open and RHostResolver::Open both take no RConnection, and shim_net.cpp calls
+ * those overloads when the handle resolves to nothing. The stack then uses whatever route
+ * is already up.
  *
- * This goes first because it is the only strategy that cannot raise a dialog, cannot
- * negotiate, and cannot time out -- the three things that have cost six rounds here. If
- * it works, the entire bearer question was never on the critical path for this SDK. */
+ * It was the first thing tried, on the grounds that it cannot raise a dialog, cannot
+ * negotiate and cannot time out. All three are true and none of them is a virtue: it also
+ * cannot *create* a route, so on a handset with nothing up it reports success and then
+ * three phases time out underneath it. That is exactly what the last device run showed.
+ *
+ * Worse, being first delayed the thing that does work. The prompt is what produces the
+ * access-point dialog, and putting a free no-op in front of it meant the dialog was the
+ * second thing to happen rather than the first.
+ *
+ * So: the prompt goes first, and this is what the network phases fall back to when the
+ * sweep produces nothing. Costs nothing either way. */
 const IAP_NONE: i32 = -100;
 
-const SWEEP_HEAD: [i32; 23] = [
-    IAP_NONE,
+/* The prompt first, deliberately.
+ *
+ * It is the entry that shows the access-point dialog, and the dialog is the one part of
+ * this that waits on a person -- so it has to be asked for in the first tick, while
+ * somebody is still looking at the phone. Everything else in the sweep is the machine
+ * talking to itself and can happen behind ten seconds of arithmetic. */
+const SWEEP_HEAD: [i32; 22] = [
     sys::SHIM_IAP_PROMPT,
     sys::SHIM_IAP_DEFAULT,
     1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
@@ -380,6 +405,7 @@ impl SelfTest {
             started: false,
             driver: None,
             deadline: None,
+            bearer_deadline: None,
             work_in: Vec::new(),
             work_out: vec![0u8; 256].into_boxed_slice(),
             work_started_us: 0,
@@ -388,6 +414,7 @@ impl SelfTest {
             sweep_handle: -1,
             bearer_handle: -1,
             bearer_iap: -1,
+            bearer_none: false,
             attempt_started_us: 0,
             sweep: SWEEP_HEAD.to_vec(),
             iap_names: Vec::new(),
@@ -429,6 +456,21 @@ impl SelfTest {
         }
     }
 
+    /// A deadline for the bearer, separate from whatever phase is running.
+    fn expect_bearer(&mut self, secs: i32) {
+        self.cancel_bearer_deadline();
+        let mut h = 0i32;
+        if unsafe { sys::shim_timer_after(secs * 1000, &mut h) } == sys::SHIM_OK {
+            self.bearer_deadline = Some(h);
+        }
+    }
+
+    fn cancel_bearer_deadline(&mut self) {
+        if let Some(h) = self.bearer_deadline.take() {
+            unsafe { sys::shim_timer_cancel(h) };
+        }
+    }
+
     fn cancel_deadline(&mut self) {
         if let Some(h) = self.deadline.take() {
             unsafe { sys::shim_timer_cancel(h) };
@@ -440,6 +482,16 @@ impl SelfTest {
     fn step(&mut self) {
         match self.phase {
             Phase::Platform => {
+                // The connection is asked for first, and then everything else runs while it
+                // negotiates.
+                //
+                // It used to be the last thing the test did, which meant the access-point
+                // dialog appeared ten seconds after launch -- by which time nobody is
+                // looking at the phone, and the whole run was those ten seconds plus however
+                // long a person took to notice. None of that was necessary:
+                // RConnection::Start completes through an event, so it overlaps with the
+                // arithmetic for free.
+                self.start_bearer();
                 self.do_platform();
                 self.report.flush(&mut self.fs);
                 self.next(Phase::Libraries);
@@ -493,7 +545,12 @@ impl SelfTest {
                 self.do_worker_start();
             }
             Phase::BearerSweep => {
-                self.do_sweep_step();
+                // The sweep runs on its own from the first tick; this only waits for it.
+                // Driving it from here is what made the dialog the last thing to happen.
+                match self.bearer_ready() {
+                    Some(_) => self.next(Phase::Dns),
+                    None => self.status = String::from("waiting for a connection"),
+                }
             }
             Phase::Dns => {
                 self.do_dns();
@@ -1162,6 +1219,37 @@ impl SelfTest {
         }
     }
 
+    /// Kick the bearer off, concurrently with everything else.
+    fn start_bearer(&mut self) {
+        self.report.head("bearer (running in the background from here)");
+        self.sweep_at = 0;
+        self.do_sweep_step();
+    }
+
+    /// Whether the network phases can proceed, are still waiting, or have run out.
+    ///
+    /// `Some(true)` with no handle means the routeless fallback: no connection was
+    /// negotiated, so the socket will be opened on whatever route happens to exist. That
+    /// may be none, and then the phases below time out — which is a worse answer than a
+    /// bearer but a better one than not trying.
+    fn bearer_ready(&mut self) -> Option<bool> {
+        if self.bearer_handle >= 0 {
+            return Some(true);
+        }
+        if self.sweep_at >= self.sweep.len() {
+            if !self.bearer_none {
+                self.bearer_none = true;
+                self.report.info(
+                    "no bearer came up",
+                    "falling back to whatever route already exists",
+                );
+                self.report.flush(&mut self.fs);
+            }
+            return Some(true);
+        }
+        None
+    }
+
     fn do_sweep_step(&mut self) {
         if self.sweep_handle >= 0 {
             self.net.net_stop(self.sweep_handle);
@@ -1175,13 +1263,11 @@ impl SelfTest {
         let iap = self.sweep[self.sweep_at];
 
         if iap == IAP_NONE {
-            self.report.check_note("no bearer: socket on the existing route", true,
-                                   "no RConnection, no dialog");
-            self.report.flush(&mut self.fs);
-            self.bearer_handle = -1;
-            self.bearer_iap = -1;
+            // No longer a sweep entry -- the network phases fall back to it when nothing
+            // came up. Kept so the sentinel has exactly one place that handles it.
+            self.bearer_none = true;
             self.sweep_at += 1;
-            self.next(Phase::Dns);
+            self.do_sweep_step();
             return;
         }
 
@@ -1206,10 +1292,9 @@ impl SelfTest {
         match self.net.net_start(strategy) {
             Ok(h) => {
                 self.sweep_handle = h;
-                self.phase = Phase::BearerWait;
                 // The prompt waits on a person and gets longer, but not so long that an
                 // unattended run stalls for minutes on a dialog nobody is there to answer.
-                self.expect(BEARER_DEADLINE_S);
+                self.expect_bearer(BEARER_DEADLINE_S);
             }
             Err(e) => {
                 self.report.info(&label, err_name(e));
@@ -1323,36 +1408,41 @@ impl SelfTest {
 
     /// Everything the network phases do with an event.
     fn on_net_event(&mut self, ev: &RawEvent) -> bool {
-        match self.phase {
-            Phase::BearerWait => {
-                if ev.kind != sys::SHIM_EV_NET_READY || ev.handle != self.sweep_handle {
-                    return false;
-                }
-                self.cancel_deadline();
-                if ev.status == 0 {
-                    let mut got = String::from("IAP ");
-                    push_i64(&mut got, ev.a as i64);
-                    let note = self.attempt_note(&got);
-                    let label = self.sweep_name();
-                    self.report.check_note(&label, true, &note);
-                    self.bearer_handle = self.sweep_handle;
-                    self.bearer_iap = ev.a;
-                    // Keep it: everything after this uses it.
-                    self.sweep_handle = -1;
-                    self.next(Phase::Dns);
-                } else {
-                    let mut err = String::from("err ");
-                    push_i64(&mut err, ev.status as i64);
-                    let note = self.attempt_note(&err);
-                    let label = self.sweep_name();
-                    self.report.info(&label, &note);
-                    self.report.flush(&mut self.fs);
-                    self.sweep_at += 1;
-                    self.phase = Phase::BearerSweep;
-                }
-                true
+        // The bearer first, and outside the phase match: it runs concurrently with whatever
+        // the test sequence is doing, so its completion can arrive during the graphics
+        // phase or the worker thread's.
+        if ev.kind == sys::SHIM_EV_NET_READY
+            && self.sweep_handle >= 0
+            && ev.handle == self.sweep_handle
+        {
+            self.cancel_bearer_deadline();
+            if ev.status == 0 {
+                let mut got = String::from("IAP ");
+                push_i64(&mut got, ev.a as i64);
+                let note = self.attempt_note(&got);
+                let label = self.sweep_name();
+                self.report.check_note(&label, true, &note);
+                self.report.flush(&mut self.fs);
+                self.bearer_handle = self.sweep_handle;
+                self.bearer_iap = ev.a;
+                // Kept: everything after this uses it, so it must not be closed by the
+                // next sweep step.
+                self.sweep_handle = -1;
+                self.sweep_at = self.sweep.len();
+            } else {
+                let mut err = String::from("err ");
+                push_i64(&mut err, ev.status as i64);
+                let note = self.attempt_note(&err);
+                let label = self.sweep_name();
+                self.report.info(&label, &note);
+                self.report.flush(&mut self.fs);
+                self.sweep_at += 1;
+                self.do_sweep_step();
             }
+            return true;
+        }
 
+        match self.phase {
             Phase::DnsWait => {
                 if ev.kind != sys::SHIM_EV_RESOLVED || ev.handle != self.dns_handle {
                     return false;
@@ -1538,7 +1628,7 @@ fn phase_name(p: Phase) -> &'static str {
         Phase::Timings => "timings",
         Phase::Graphics => "graphics",
         Phase::WorkerStart | Phase::WorkerWait => "worker thread",
-        Phase::BearerSweep | Phase::BearerWait => "bearer",
+        Phase::BearerSweep => "bearer",
         Phase::Dns | Phase::DnsWait => "dns",
         Phase::Tcp | Phase::TcpWait => "tcp echo",
         Phase::Http | Phase::HttpWait => "http",
@@ -1566,22 +1656,26 @@ impl App for SelfTest {
                 self.step();
                 return Handled::Consumed;
             }
+            // The bearer's own deadline, checked before the phase sequence's. It fires while
+            // some unrelated phase is running, which is the point of it being separate.
+            if Some(ev.handle) == self.bearer_deadline {
+                self.cancel_bearer_deadline();
+                let what = self.attempt_note(&self.sweep_name());
+                self.report.check_note("timed out", false, &what);
+                self.report.flush(&mut self.fs);
+                self.sweep_at += 1;
+                self.do_sweep_step();
+                return Handled::Consumed;
+            }
             if Some(ev.handle) == self.deadline {
                 self.cancel_deadline();
-                let what = if self.phase == Phase::BearerWait {
-                    self.attempt_note(&self.sweep_name())
-                } else {
-                    String::from(phase_name(self.phase))
-                };
+                let what = String::from(phase_name(self.phase));
                 self.report.check_note("timed out", false, &what);
                 self.report.flush(&mut self.fs);
                 // A timeout is an answer about this phase, not the end of the run.
                 match self.phase {
                     Phase::WorkerWait => self.next(Phase::BearerSweep),
-                    Phase::BearerWait => {
-                        self.sweep_at += 1;
-                        self.phase = Phase::BearerSweep;
-                    }
+
                     Phase::DnsWait => {
                         // A timeout and an error mean the same thing here and only one of
                         // them used to fall back. The routeless attempt succeeds trivially
@@ -1764,7 +1858,7 @@ mod tests {
             Phase::Platform, Phase::Libraries, Phase::Storage, Phase::Hashes,
             Phase::Ciphers, Phase::Random, Phase::Bignum, Phase::Inflate, Phase::Timings,
             Phase::Graphics, Phase::WorkerStart, Phase::WorkerWait, Phase::BearerSweep,
-            Phase::BearerWait, Phase::Dns, Phase::DnsWait, Phase::Tcp, Phase::TcpWait,
+            Phase::Dns, Phase::DnsWait, Phase::Tcp, Phase::TcpWait,
             Phase::Http, Phase::HttpWait, Phase::Done,
         ];
         for p in all {
