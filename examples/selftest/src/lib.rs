@@ -330,7 +330,20 @@ pub struct SelfTest {
  * trip, so twenty of them cost almost nothing, and the ones that cost real time are
  * exactly the ones worth waiting for. The strategies that ask the system to choose go
  * last, because on this handset neither has ever completed and both are slow to say so. */
-const SWEEP_HEAD: [i32; 22] = [
+/* "Open the socket without an RConnection at all", handled here and never passed to the
+ * shim -- which is why it is a local sentinel rather than a SHIM_IAP_ constant.
+ *
+ * RSocket::Open and RHostResolver::Open both have overloads that take no RConnection, and
+ * shim_net.cpp already calls them when the connection handle resolves to nothing. The
+ * stack then uses whatever route is already up. On a handset whose browser works, one is.
+ *
+ * This goes first because it is the only strategy that cannot raise a dialog, cannot
+ * negotiate, and cannot time out -- the three things that have cost six rounds here. If
+ * it works, the entire bearer question was never on the critical path for this SDK. */
+const IAP_NONE: i32 = -100;
+
+const SWEEP_HEAD: [i32; 23] = [
+    IAP_NONE,
     sys::SHIM_IAP_PROMPT,
     sys::SHIM_IAP_DEFAULT,
     1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
@@ -1060,6 +1073,9 @@ impl SelfTest {
     /// because "IAP 6 worked" is not an answer anyone can act on.
     fn sweep_name(&self) -> String {
         let iap = self.sweep[self.sweep_at];
+        if iap == IAP_NONE {
+            return String::from("no bearer");
+        }
         if iap == sys::SHIM_IAP_DEFAULT || iap == sys::SHIM_IAP_PROMPT {
             return String::from(sweep_label(iap));
         }
@@ -1081,6 +1097,18 @@ impl SelfTest {
             return;
         }
         let iap = self.sweep[self.sweep_at];
+
+        if iap == IAP_NONE {
+            self.report.check_note("no bearer: socket on the existing route", true,
+                                   "no RConnection, no dialog");
+            self.report.flush(&mut self.fs);
+            self.bearer_handle = -1;
+            self.bearer_iap = -1;
+            self.sweep_at += 1;
+            self.next(Phase::Dns);
+            return;
+        }
+
         let strategy = match iap {
             sys::SHIM_IAP_PROMPT => Iap::Prompt,
             sys::SHIM_IAP_DEFAULT => Iap::Default,
@@ -1270,6 +1298,15 @@ impl SelfTest {
                     let mut note = String::from("status ");
                     push_i64(&mut note, ev.status as i64);
                     self.report.check_note("resolved example.com", false, &note);
+                    if self.bearer_handle < 0 && self.sweep_at < self.sweep.len() {
+                        // The routeless attempt found no route. That is an answer about
+                        // this strategy, not about DNS, so go back and bring a bearer up
+                        // rather than running TCP and HTTP over nothing.
+                        self.report.info("no bearer failed", "falling back to the bearer sweep");
+                        self.report.flush(&mut self.fs);
+                        self.phase = Phase::BearerSweep;
+                        return true;
+                    }
                 }
                 self.next(Phase::Tcp);
                 true
