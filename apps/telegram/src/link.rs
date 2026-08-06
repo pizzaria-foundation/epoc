@@ -443,15 +443,56 @@ pub fn work(opcode: i32, input: &[u8], out: &mut [u8]) -> i32 {
 /// before a phone number is involved.
 pub fn hello() -> Vec<u8> {
     rpc::init_connection(
-        // api_id and api_hash identify the application and come from my.telegram.org. The
-        // placeholder is enough for help.getConfig and is not enough to log in; see the
-        // tg-proto README on why there is no default worth shipping.
-        6,
+        api_id(),
         "Nokia E72",
         "Symbian 9.3",
         env!("CARGO_PKG_VERSION"),
         &rpc::get_config(),
     )
+}
+
+/* The application's credentials.
+ *
+ * Read at build time from `apps/telegram/api.conf`, which is gitignored: `api_id` and
+ * `api_hash` identify the *application* rather than any user, and Telegram bans pairs that
+ * turn up in public repositories -- so a committed one is a client that stops working for
+ * everyone at once.
+ *
+ * `option_env!` rather than `env!` so a tree without the file still builds. What that
+ * produces is a binary whose `auth.sendCode` answers API_ID_INVALID, which is a legible
+ * failure and in fact a useful test result: it proves the request was built, encrypted,
+ * routed and understood by Telegram. */
+
+/// The application id, or `0` when the build had no credentials.
+pub fn api_id() -> i32 {
+    match option_env!("TG_API_ID") {
+        Some(s) => parse_i32(s),
+        None => 0,
+    }
+}
+
+pub fn api_hash() -> &'static str {
+    option_env!("TG_API_HASH").unwrap_or("")
+}
+
+/// Whether this build can log in at all.
+///
+/// Worth asking before showing a phone-number field: a login that cannot succeed should
+/// say so on the screen rather than after the user has typed a number and waited.
+pub fn has_credentials() -> bool {
+    api_id() != 0 && !api_hash().is_empty()
+}
+
+/// `str::parse` is not const and `option_env!` gives a `&str`; this runs once.
+fn parse_i32(s: &str) -> i32 {
+    let mut v: i32 = 0;
+    for b in s.as_bytes() {
+        if !b.is_ascii_digit() {
+            return 0;
+        }
+        v = v.saturating_mul(10).saturating_add((b - b'0') as i32);
+    }
+    v
 }
 
 #[cfg(test)]

@@ -1,0 +1,15 @@
+# Telegram application credentials.
+#
+# Copy to api.conf and fill in. That file is gitignored: these identify the
+# *application* rather than any user, and Telegram bans pairs that turn up in
+# public repositories.
+#
+# Get them from https://my.telegram.org → API development tools. Any application
+# name and short name will do; the platform is "Other".
+#
+# Without this file the build still works and auth.sendCode answers
+# API_ID_INVALID — which proves the request reached Telegram and was understood,
+# and is the expected result of testing the protocol with no account.
+
+TG_API_ID=0
+TG_API_HASH=

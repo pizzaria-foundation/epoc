@@ -109,6 +109,17 @@ esac
 mkdir -p "$BUILD"
 echo "==> $NAME  (uid3 $UID3, caps: $CAPABILITIES)"
 
+# Telegram credentials, if this app has them. Read here rather than baked into a
+# Cargo config so the same tree builds with or without them: a missing api.conf
+# leaves the vars unset, the crate falls back to a placeholder, and the failure is
+# API_ID_INVALID from the server rather than a build error.
+if [ -f "$APP/api.conf" ]; then
+  # shellcheck disable=SC1090
+  . "$APP/api.conf"
+  export TG_API_ID TG_API_HASH
+  echo "--> api credentials: id $TG_API_ID"
+fi
+
 # ---------------------------------------------------------------- 1. Rust
 RUST_LIB=""
 if [ -n "$RUST_CRATE" ]; then

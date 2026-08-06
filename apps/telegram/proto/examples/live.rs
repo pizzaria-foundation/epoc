@@ -20,12 +20,21 @@ use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use tg_proto::auth::{self, Action, Login};
 use tg_proto::client::{Client, Step};
 use tg_proto::crypto::Rng;
 use tg_proto::rpc::{self, Update};
 
-/// DC2, which is where a client with no configuration starts.
-const DC: &str = "149.154.167.51:443";
+/// Telegram's production data centres. `TG_DC` selects one; the default is where a client
+/// with no stored session begins.
+const DCS: [&str; 6] = [
+    "149.154.167.51:443",
+    "149.154.175.53:443",
+    "149.154.167.51:443",
+    "149.154.175.100:443",
+    "149.154.167.91:443",
+    "91.108.56.130:443",
+];
 
 /// Entropy from the host, standing in for `symbian::random::Random`.
 ///
@@ -56,9 +65,18 @@ fn main() -> std::io::Result<()> {
     let seed = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos() as u64;
     let mut rng = HostRng(seed | 1);
 
-    let mut sock = TcpStream::connect(DC)?;
+    let api_id: i32 = std::env::var("TG_API_ID").ok().and_then(|s| s.parse().ok()).unwrap_or(0);
+    let api_hash = std::env::var("TG_API_HASH").unwrap_or_default();
+    let dc: usize = std::env::var("TG_DC").ok().and_then(|s| s.parse().ok()).unwrap_or(2);
+    let mut login = Login::new(api_id, &api_hash);
+
+    let addr = DCS[dc.min(DCS.len() - 1)];
+    let mut sock = TcpStream::connect(addr)?;
     sock.set_read_timeout(Some(std::time::Duration::from_secs(20)))?;
-    println!("connected to {DC}");
+    println!("connected to DC{dc} at {addr}");
+    if api_id == 0 {
+        println!("  no TG_API_ID: auth calls will answer API_ID_INVALID");
+    }
 
     let (mut client, first) = Client::connect(&mut rng);
     sock.write_all(client.greeting())?;
@@ -87,17 +105,26 @@ fn main() -> std::io::Result<()> {
                     pending.extend(client.on_modpow(&out, &mut rng).expect("modpow rejected"));
                 }
                 Step::Ready => {
-                    let auth = client.auth_key().expect("ready without a key");
+                    let key = client.auth_key().expect("ready without a key");
                     println!("auth key negotiated");
-                    println!("  auth_key_id: {:016x}", auth.id);
-                    println!("  server clock: {}", auth.server_time);
+                    println!("  auth_key_id: {:016x}", key.id);
 
+                    // initConnection is required once per connection, and wrapping the
+                    // first real call in it is how every client does it.
+                    let inner = match std::env::var("TG_PHONE") {
+                        Ok(phone) => {
+                            println!("  asking for a code for {phone}");
+                            let a = login.send_code(&phone);
+                            let Action::Call { body, .. } = a else { unreachable!() };
+                            body
+                        }
+                        Err(_) => {
+                            println!("  no TG_PHONE set, asking for the config instead");
+                            rpc::get_config()
+                        }
+                    };
                     let query = rpc::init_connection(
-                        6,
-                        "Nokia E72",
-                        "Symbian 9.3",
-                        "0.1",
-                        &rpc::get_config(),
+                        api_id, "Nokia E72", "Symbian 9.3", "0.1", &inner,
                     );
                     let (t, _) = now();
                     let (_, step) = client.call(&query, 1, t, 0, &mut rng).expect("call");
@@ -112,12 +139,31 @@ fn main() -> std::io::Result<()> {
                             body.len()
                         );
                         if client.tag_of(req_msg_id) == Some(1) {
-                            println!("\nhelp.getConfig answered. The protocol works.");
+                            if std::env::var("TG_PHONE").is_ok() {
+                                match login.on_reply(auth::tag::SEND_CODE, &body, &mut rng) {
+                                    Action::CodeSent { length } => {
+                                        println!("\na code was sent. digits: {length:?}");
+                                        println!("the login flow works end to end.");
+                                    }
+                                    other => println!("\nunexpected: {other:?}"),
+                                }
+                            } else {
+                                println!("\nhelp.getConfig answered. The protocol works.");
+                            }
                             return Ok(());
                         }
                     }
                     Update::RpcError { code, text, .. } => {
+                        // The interesting ones are named. A Brazilian number asked at DC2
+                        // answers PHONE_MIGRATE_n, which is an instruction rather than a
+                        // failure -- and the most likely thing to happen here.
                         println!("rpc error {code}: {text}");
+                        if let Some(dc) = auth::migrate_target(&text) {
+                            println!("  -> this account lives on DC{dc}; a real client");
+                            println!("     redoes the handshake there. Set TG_DC={dc}.");
+                        } else {
+                            println!("  -> classified as {:?}", auth::AuthError::classify(&text));
+                        }
                         return Ok(());
                     }
                     other => println!("update: {other:?}"),

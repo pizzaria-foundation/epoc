@@ -61,3 +61,16 @@
 *.swp
 *~
 .DS_Store
+
+# ------------------------------------------------------------------ credentials
+
+# The Telegram application credentials. `api_id` and `api_hash` identify the
+# *application*, not the user, and come from my.telegram.org — but Telegram bans
+# pairs that leak into public repositories, so a committed one is a client that
+# stops working for everybody who uses it.
+#
+# `api.conf.example` is tracked and says what to put here. tools/symbuild reads
+# this file if it exists and passes the pair to the build; without it the binary
+# still compiles and `auth.sendCode` answers API_ID_INVALID, which is a legible
+# failure rather than a mysterious one.
+apps/telegram/api.conf
