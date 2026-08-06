@@ -74,6 +74,18 @@ pub const AUTH_SIGN_IN: u32 = 0x8d52_a951;
 pub const AUTH_SENT_CODE: u32 = 0x5e00_2502;
 /// `auth.authorization#2ea2c0d4 flags:# ... user:User = auth.Authorization;`
 pub const AUTH_AUTHORIZATION: u32 = 0x2ea2_c0d4;
+/// `auth.authorizationSignUpRequired#44747e9a flags:# terms_of_service:flags.0?help.TermsOfService = auth.Authorization;`
+pub const AUTH_AUTHORIZATION_SIGNUP: u32 = 0x4474_7e9a;
+/// `account.getPassword#548a30f5 = account.Password;`
+pub const ACCOUNT_GET_PASSWORD: u32 = 0x548a_30f5;
+/// `auth.checkPassword#d18b4d16 password:InputCheckPasswordSRP = auth.Authorization;`
+pub const AUTH_CHECK_PASSWORD: u32 = 0xd18b_4d16;
+/// `inputCheckPasswordSRP#d27ff082 srp_id:long A:bytes M1:bytes = InputCheckPasswordSRP;`
+pub const INPUT_CHECK_PASSWORD_SRP: u32 = 0xd27f_f082;
+/// `auth.resendCode#cae47523 flags:# phone_number:string phone_code_hash:string reason:flags.0?string = auth.SentCode;`
+pub const AUTH_RESEND_CODE: u32 = 0xcae4_7523;
+/// `auth.logOut#3e72ba19 = auth.LoggedOut;`
+pub const AUTH_LOG_OUT: u32 = 0x3e72_ba19;
 
 /// The API layer this client speaks, from the `// LAYER` line at the end of `api.tl`.
 ///
@@ -335,6 +347,106 @@ pub fn auth_sign_in(phone: &str, code_hash: &str, code: &str) -> Vec<u8> {
         .string(code_hash)
         .string(code);
     w.finish()
+}
+
+pub fn account_get_password() -> Vec<u8> {
+    let mut w = Writer::with_capacity(4);
+    w.ctor(ACCOUNT_GET_PASSWORD);
+    w.finish()
+}
+
+/// Ask for a fresh code when the first did not arrive.
+pub fn auth_resend_code(phone: &str, code_hash: &str) -> Vec<u8> {
+    let mut w = Writer::with_capacity(32 + phone.len() + code_hash.len());
+    w.ctor(AUTH_RESEND_CODE).uint(0).string(phone).string(code_hash);
+    w.finish()
+}
+
+pub fn auth_log_out() -> Vec<u8> {
+    let mut w = Writer::with_capacity(4);
+    w.ctor(AUTH_LOG_OUT);
+    w.finish()
+}
+
+/// Answer the two-factor challenge with the SRP proof.
+///
+/// `a` is the client's public value and `m1` the proof, both from [`crate::srp`]. The
+/// password itself never leaves the device and never appears in a request — that is the
+/// point of SRP over sending a hash.
+pub fn auth_check_password(srp_id: i64, a: &[u8], m1: &[u8]) -> Vec<u8> {
+    let mut w = Writer::with_capacity(32 + a.len() + m1.len());
+    w.ctor(AUTH_CHECK_PASSWORD)
+        .ctor(INPUT_CHECK_PASSWORD_SRP)
+        .long(srp_id)
+        .bytes(a)
+        .bytes(m1);
+    w.finish()
+}
+
+/// The two-factor parameters from `account.getPassword`.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct PasswordParams {
+    pub srp_id: i64,
+    /// The server's public value.
+    pub srp_b: Vec<u8>,
+    pub salt1: Vec<u8>,
+    pub salt2: Vec<u8>,
+    pub g: u32,
+    pub p: Vec<u8>,
+    /// What the user set as a reminder, if anything.
+    pub hint: String,
+}
+
+/// Parse an `account.password`.
+///
+/// Read through [`crate::walk`] rather than by hand: `account.password` has thirteen fields
+/// of which six are flag-gated, and the ones that matter sit behind three of them. Counting
+/// that out by hand is how a field ends up read as the one after it.
+///
+/// Returns `None` when the account has no password — `has_password` clear, which is also
+/// what gates `current_algo`, `srp_B` and `srp_id`, so their absence *is* the answer.
+pub fn parse_password(body: &[u8]) -> Result<Option<PasswordParams>> {
+    use crate::schema as sc;
+    use crate::walk::{as_int, as_long, as_str, Walker};
+
+    let (c, f) = Walker::new(body).value().map_err(|_| Error::BadContainer)?;
+    if c.id != sc::ACCOUNT_PASSWORD_CTOR {
+        return Err(Error::Tl(tl::Error::Unexpected { want: sc::ACCOUNT_PASSWORD_CTOR, got: c.id }));
+    }
+
+    let (Some(algo_bytes), Some(srp_b), Some(srp_id)) = (
+        f[sc::ACCOUNT_PASSWORD_CURRENT_ALGO].bytes,
+        as_str(&f[sc::ACCOUNT_PASSWORD_SRP_B]),
+        as_long(&f[sc::ACCOUNT_PASSWORD_SRP_ID]),
+    ) else {
+        return Ok(None);
+    };
+
+    let (ac, af) = Walker::new(algo_bytes).value().map_err(|_| Error::BadContainer)?;
+    // passwordKdfAlgoUnknown means the server wants a client that speaks a KDF this one
+    // does not. Refusing is correct: guessing at the algorithm produces a proof the server
+    // rejects, which reads as a wrong password.
+    if ac.id != sc::PASSWORDKDFALGOSHA256SHA256PBKDF2HMACSHA512ITER100000SHA256MODPOW_CTOR {
+        return Err(Error::Tl(tl::Error::UnknownConstructor(ac.id)));
+    }
+    let salt1 = as_str(&af[sc::PASSWORDKDFALGOSHA256SHA256PBKDF2HMACSHA512ITER100000SHA256MODPOW_SALT1]);
+    let salt2 = as_str(&af[sc::PASSWORDKDFALGOSHA256SHA256PBKDF2HMACSHA512ITER100000SHA256MODPOW_SALT2]);
+    let g = as_int(&af[sc::PASSWORDKDFALGOSHA256SHA256PBKDF2HMACSHA512ITER100000SHA256MODPOW_G]);
+    let p = as_str(&af[sc::PASSWORDKDFALGOSHA256SHA256PBKDF2HMACSHA512ITER100000SHA256MODPOW_P]);
+
+    let (Some(salt1), Some(salt2), Some(g), Some(p)) = (salt1, salt2, g, p) else {
+        return Err(Error::BadContainer);
+    };
+
+    Ok(Some(PasswordParams {
+        srp_id,
+        srp_b: srp_b.to_vec(),
+        salt1: salt1.to_vec(),
+        salt2: salt2.to_vec(),
+        g: g as u32,
+        p: p.to_vec(),
+        hint: as_str(&f[sc::ACCOUNT_PASSWORD_HINT]).map(text).unwrap_or_default(),
+    }))
 }
 
 /// What `auth.sendCode` returned.

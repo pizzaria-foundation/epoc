@@ -216,6 +216,28 @@ impl Link {
         session_store::clear(&mut fs, why)
     }
 
+    /// Move to another data centre.
+    ///
+    /// Not a reconnection: an auth key belongs to one data centre, so this is a new socket,
+    /// a new handshake and a new key. Two exponentiations and four round trips — about four
+    /// seconds on this hardware — which is why the result is worth persisting and why the
+    /// stored session records which data centre it came from.
+    ///
+    /// The old link is closed here rather than left to `Drop`, because both would otherwise
+    /// hold a socket at once and the shim has eight.
+    pub fn migrate(&mut self, dc: u8) -> symbian::Result<()> {
+        self.sock.close(&mut self.net);
+        self.bearer.stop(&mut self.net);
+
+        // Any stored key was for the previous data centre and is now useless. Discarding it
+        // here means the next launch starts at the right one instead of learning this again.
+        let _ = Self::forget(session_store::Invalidate::UnknownKey);
+
+        let fresh = Self::open(dc, None)?;
+        *self = fresh;
+        Ok(())
+    }
+
     pub fn is_ready(&self) -> bool {
         self.client.is_ready()
     }

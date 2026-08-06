@@ -42,6 +42,7 @@
 
 extern crate alloc;
 
+pub mod auth;
 pub mod chats;
 pub mod client;
 pub mod crypto;
@@ -58,4 +59,27 @@ pub mod transport;
 
 pub use tl::{Reader, Writer};
 pub use client::{Client, Step};
+
+/// Telegram's Diffie-Hellman and SRP prime, for tests that need a real one.
+///
+/// Behind `cfg(test)` because nothing at run time needs the prime as a literal — the
+/// handshake and SRP both check the one the server sends against a hash of it, which is
+/// 32 bytes rather than 256.
+#[cfg(test)]
+pub(crate) fn srp_test_prime() -> alloc::vec::Vec<u8> {
+    const HEX: &str = concat!(
+        "C71CAEB9C6B1C9048E6C522F70F13F73980D40238E3E21C14934D037563D930F",
+        "48198A0AA7C14058229493D22530F4DBFA336F6E0AC925139543AED44CCE7C37",
+        "20FD51F69458705AC68CD4FE6B6B13ABDC9746512969328454F18FAF8C595F64",
+        "2477FE96BB2A941D5BCD1D4AC8CC49880708FA9B378E3C4F3A9060BEE67CF9A4",
+        "A4A695811051907E162753B56B0F6B410DBA74D8A84B2A14B3144E0EF1284754",
+        "FD17ED950D5965B4B9DD46582DB1178D169C6BC465B0D6FF9CA3928FEF5B9AE4",
+        "E418FC15E83EBEA0F87FA9FF5EED70050DED2849F47BF959D956850CE929851F",
+        "0D8115F635B105EE2E4E15D04B2454BF6F4FADF034B10403119CD8E3B92FCC5B",
+    );
+    (0..HEX.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&HEX[i..i + 2], 16).unwrap())
+        .collect()
+}
 pub use transport::{Frame, Transport};
