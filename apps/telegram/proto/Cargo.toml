@@ -1,0 +1,25 @@
+[package]
+name = "tg-proto"
+description = "MTProto 2.0: TL serialisation, the transport, the auth-key handshake and the encrypted session"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lib]
+# A plain rlib with no runtime items, for the same reason `tg` is one: the whole protocol
+# has to be exercisable with `cargo test` on the host. A crate carrying a #[panic_handler]
+# cannot be, because cargo links the test harness against std, which already has one.
+#
+# Nothing here touches the platform. Sockets, files, randomness and the worker thread are
+# all passed in by the caller — see the `no I/O` section of the crate docs.
+crate-type = ["rlib"]
+
+[features]
+default = []
+# Turns on the std-only helpers the reference differential uses: hex dumping, and reading
+# the fixtures the Python client writes. Never enabled for the device.
+std = []
+
+[dependencies]
+symbian-crypto = { workspace = true }
