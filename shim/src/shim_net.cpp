@@ -152,16 +152,24 @@ void CShimNet::Start()
         {
         iPrefs.SetIapId(static_cast<TUint32>(iIap));
         iPrefs.SetDialogPreference(ECommDbDialogPrefDoNotPrompt);
+        iConnection.Start(iPrefs, iStatus);
         }
     else if (iIap == SHIM_IAP_PROMPT)
         {
         iPrefs.SetDialogPreference(ECommDbDialogPrefPrompt);
+        iConnection.Start(iPrefs, iStatus);
         }
     else
         {
-        iPrefs.SetDialogPreference(ECommDbDialogPrefDoNotPrompt);
+        /* No preferences at all, which is what "let the system decide" actually means.
+         *
+         * The first version set ECommDbDialogPrefDoNotPrompt on an otherwise empty
+         * TCommDbConnPref and passed that — but an empty preference has IAP 0, so it does
+         * not say "use the default", it says "connect to access point zero without
+         * asking". The overload with no argument is the documented default path, and it
+         * is the one the SDK's own Chat example uses. */
+        iConnection.Start(iStatus);
         }
-    iConnection.Start(iPrefs, iStatus);
     SetActive();
     }
 

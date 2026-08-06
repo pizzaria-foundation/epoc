@@ -10,7 +10,13 @@ AuthenticationCanceled — which is exactly the failure we were getting.
 So: register an agent that answers RequestPinCode with a fixed PIN, pair, then
 mark the device trusted so later OBEX pushes need no confirmation at all.
 
-    python3 tools/btpair.py <MAC> [PIN]
+    python3 tools/btpair.py <MAC> [PIN]      # we start the pairing
+    python3 tools/btpair.py --listen [PIN]   # the phone starts it, we just answer
+
+The second form is the one to use when the phone is doing the pairing. An agent has to
+be registered and stay registered for BlueZ to have anywhere to ask, and a one-shot
+`bluetoothctl agent on` unregisters the moment it exits — so an incoming pair silently
+gets no answer and times out.
 """
 
 import sys
@@ -70,8 +76,9 @@ class Agent(dbus.service.Object):
 
 def main():
     if len(sys.argv) < 2:
-        sys.exit(f"usage: {sys.argv[0]} <MAC> [PIN]")
-    mac = sys.argv[1]
+        sys.exit(f"usage: {sys.argv[0]} <MAC>|--listen [PIN]")
+    listen = sys.argv[1] == "--listen"
+    mac = None if listen else sys.argv[1]
     pin = sys.argv[2] if len(sys.argv) > 2 else "0000"
 
     dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
@@ -85,6 +92,23 @@ def main():
     mgr.RegisterAgent(AGENT_PATH, CAPABILITY)
     mgr.RequestDefaultAgent(AGENT_PATH)
     print(f"agent registered (PIN {pin})")
+
+    if listen:
+        # Nothing to initiate: just stay alive so BlueZ has an agent to ask. Everything
+        # interesting is printed from the Agent methods above.
+        print("listening for an incoming pairing - start it from the phone")
+        print(f"  PIN is {pin} if it asks")
+        print("  Ctrl-C to stop")
+        try:
+            loop.run()
+        except KeyboardInterrupt:
+            pass
+        finally:
+            try:
+                mgr.UnregisterAgent(AGENT_PATH)
+            except dbus.DBusException:
+                pass
+        return
 
     path = "/org/bluez/hci0/dev_" + mac.replace(":", "_")
     dev = dbus.Interface(bus.get_object("org.bluez", path), "org.bluez.Device1")

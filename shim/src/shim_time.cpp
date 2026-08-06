@@ -173,12 +173,20 @@ uint64_t shim_now_us(void)
      * measuring a frame that distinction is the whole point.
      *
      * The period is queried rather than assumed: it is not the same on every
-     * device, and hardcoding 1000 would silently skew every measurement. */
-    TInt periodNs = 0;
-    if (HAL::Get(HALData::ENanoTickPeriod, periodNs) != KErrNone || periodNs <= 0)
-        periodNs = 1000000;   /* 1 ms, the usual value */
+     * device, and hardcoding 1000 would silently skew every measurement.
+     *
+     * ENanoTickPeriod is in MICROSECONDS, despite the name. hal_data.h says so in as
+     * many words -- "The time between nanokernel ticks, in microseconds" -- and reading
+     * nanoseconds off the name made this function return milliseconds while claiming
+     * microseconds. Every duration the device self test printed was 1000x too small,
+     * including a 2048-bit modpow that appeared to take 0 ms; the giveaway was a
+     * framebuffer fill implying 66666 fps. A unit is not documentation, and a name is
+     * not a unit. */
+    TInt periodUs = 0;
+    if (HAL::Get(HALData::ENanoTickPeriod, periodUs) != KErrNone || periodUs <= 0)
+        periodUs = 1000;   /* 1 ms, the usual value */
     const TUint ticks = User::NTickCount();
-    return static_cast<uint64_t>(ticks) * static_cast<uint64_t>(periodNs) / 1000;
+    return static_cast<uint64_t>(ticks) * static_cast<uint64_t>(periodUs);
     }
 
 int64_t shim_unix_time(void)

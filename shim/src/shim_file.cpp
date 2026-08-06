@@ -173,7 +173,24 @@ int32_t shim_file_open(const uint16_t* path, int32_t len, int32_t mode, int32_t*
     const TUint m = FileMode(mode);
     TSlot& s = gSlots[slot];
 
-    if (mode & SHIM_FILE_CREATE)
+    if (mode & SHIM_FILE_APPEND)
+        {
+        /* Append wins over create, and getting that precedence wrong was a real bug.
+         *
+         * symbian::fs maps OpenMode::Append to WRITE|CREATE|APPEND, meaning "add to the
+         * end, making the file if it is not there". Testing CREATE first turned that
+         * into Replace -- which truncates -- so the Seek(ESeekEnd) below landed at zero
+         * and an append silently became an overwrite.
+         *
+         * The host fake did not catch it because it models the OpenMode enum rather than
+         * these flags, so its Append branch never went near a truncation. The device self
+         * test caught it on the first run. A fake one layer above the layer with the bug
+         * cannot see the bug. */
+        err = s.iFile.Open(*fs, name, m);
+        if (err == KErrNotFound || err == KErrPathNotFound)
+            err = s.iFile.Create(*fs, name, m);
+        }
+    else if (mode & SHIM_FILE_CREATE)
         {
         /* Replace, not Create: Create fails with KErrAlreadyExists, and every caller
          * that asks to create a file it is about to write in full means "make this

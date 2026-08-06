@@ -28,7 +28,7 @@ use alloc::boxed::Box;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use symbian::net::{Bearer, Ipv4, Lookup, Progress, ShimNet, TcpStream};
+use symbian::net::{Bearer, Iap, Ipv4, Lookup, Net, Progress, ShimNet, TcpStream};
 use symbian_sys as sys;
 use symbian_ui::{
     chrome, App, Canvas, Handled, Key, KeyEvent, RawEvent, Rect, Softkey, Theme,
@@ -48,6 +48,30 @@ const HTTP_HOST: &str = "example.com";
 const HTTP_PORT: u16 = 80;
 
 const DNS_HOST: &str = "example.com";
+
+/// How to ask for a bearer, in the order the sweep tries them.
+///
+/// The sweep exists because the prompt produced no dialog on the first device this ran
+/// on, and there are several plausible reasons — a connection already active, a handset
+/// on the newer destination model rather than CommDB, a preference that means something
+/// other than what it reads like. Rather than guess a third time, this asks the device
+/// and prints what it answers.
+///
+/// Negative values are the shim's `SHIM_IAP_*`; anything else is an access point id.
+/// Eight ids is arbitrary and enough: a handset with more than eight configured access
+/// points is not the situation this is diagnosing.
+const SWEEP: [i32; 10] = [
+    sys::SHIM_IAP_DEFAULT,
+    sys::SHIM_IAP_PROMPT,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+];
 
 /// The worker's job table.
 pub const OP_MODPOW: i32 = 1;
@@ -198,6 +222,8 @@ impl Writer<'_> {
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Test {
+    /// Ask the device which way of choosing an access point actually works here.
+    Sweep,
     Echo,
     Dns,
     Http,
@@ -205,10 +231,11 @@ pub enum Test {
 }
 
 impl Test {
-    const ALL: [Test; 4] = [Test::Echo, Test::Dns, Test::Http, Test::Work];
+    const ALL: [Test; 5] = [Test::Sweep, Test::Echo, Test::Dns, Test::Http, Test::Work];
 
     fn name(self) -> &'static str {
         match self {
+            Test::Sweep => "0 bearer sweep",
             Test::Echo => "1 echo (LAN)",
             Test::Dns => "2 dns",
             Test::Http => "3 http get",
@@ -250,6 +277,22 @@ pub struct NetProbe {
     spin: u32,
     /// Handle of the repeating timer that animates the spinner.
     timer: Option<i32>,
+    /// Which entry of [`SWEEP`] is being tried, when the sweep is running.
+    sweep_at: Option<usize>,
+    /// The bearer handle the sweep opened directly, bypassing `Bearer` — the sweep wants
+    /// each strategy tried exactly once, and `Bearer`'s own fall back to a prompt would
+    /// muddle which one answered.
+    sweep_handle: i32,
+
+    /// A deadline on whatever is outstanding.
+    ///
+    /// Every network step here can wait forever: a bearer prompt nobody answers, a
+    /// connect to an address with nothing behind it, a DNS server that never replies. On
+    /// screen all three look identical to a hung app, which is the one diagnosis that is
+    /// never useful — so a timer turns "still waiting" into a line that names what it was
+    /// waiting for.
+    deadline: Option<i32>,
+    waiting_for: &'static str,
 
     exit: bool,
 }
@@ -276,12 +319,34 @@ impl NetProbe {
             work_running: false,
             spin: 0,
             timer: None,
+            sweep_at: None,
+            sweep_handle: -1,
+            deadline: None,
+            waiting_for: "",
             exit: false,
         };
         p.log.push(|w| {
             w.s("Select runs, arrows switch test");
         });
         p
+    }
+
+    /// Start a deadline on whatever was just issued. Replaces any previous one, because
+    /// only the most recent outstanding operation is worth naming.
+    fn expect(&mut self, what: &'static str, secs: i32) {
+        self.cancel_deadline();
+        let mut h = 0i32;
+        if unsafe { sys::shim_timer_after(secs * 1000, &mut h) } == sys::SHIM_OK {
+            self.deadline = Some(h);
+            self.waiting_for = what;
+        }
+    }
+
+    fn cancel_deadline(&mut self) {
+        if let Some(h) = self.deadline.take() {
+            unsafe { sys::shim_timer_cancel(h) };
+        }
+        self.waiting_for = "";
     }
 
     /// Bring the bearer up if it is not, and remember what to do afterwards.
@@ -306,6 +371,8 @@ impl NetProbe {
                 self.log.push(|w| {
                     w.s("bearer: asking for access point");
                 });
+                // Generous: this one waits on a person, not a network.
+                self.expect("access point", 60);
             }
             Err(e) => self.log.push(|w| {
                 w.s("bearer failed: ").s(err_name(e));
@@ -315,6 +382,16 @@ impl NetProbe {
     }
 
     fn run(&mut self, test: Test) {
+        // Refusing before clearing. Clearing first wiped the very lines that said what
+        // was going on — the screen ended up reading "4 worker thread / already running"
+        // with no trace of the run it was talking about.
+        if test == Test::Work && self.work_running {
+            self.log.push(|w| {
+                w.s("already running, wait for it");
+            });
+            return;
+        }
+
         self.log.clear();
         self.log.push(|w| {
             w.s(test.name());
@@ -333,6 +410,61 @@ impl NetProbe {
                 self.start_dns(HTTP_HOST);
             }
             Test::Work => self.start_work(),
+            Test::Sweep => {
+                self.sweep_at = Some(0);
+                self.try_sweep();
+            }
+        }
+    }
+
+    /// Try the current sweep entry, or report that none worked.
+    fn try_sweep(&mut self) {
+        // Release the previous attempt, or each failure leaves a bearer behind and the
+        // shim's two slots are gone by the third try.
+        if self.sweep_handle >= 0 {
+            self.net.net_stop(self.sweep_handle);
+            self.sweep_handle = -1;
+        }
+        let Some(i) = self.sweep_at else { return };
+        if i >= SWEEP.len() {
+            self.sweep_at = None;
+            self.log.push(|w| {
+                w.s("no strategy worked");
+            });
+            return;
+        }
+
+        let iap = SWEEP[i];
+        let label = sweep_label(iap);
+        self.log.push(|w| {
+            w.s("try ").s(label);
+        });
+
+        let strategy = match iap {
+            sys::SHIM_IAP_PROMPT => Iap::Prompt,
+            sys::SHIM_IAP_DEFAULT => Iap::Default,
+            id => Iap::Id(id as u32),
+        };
+        match self.net.net_start(strategy) {
+            Ok(h) => {
+                self.sweep_handle = h;
+                // The prompt waits on a person; the rest wait on the stack.
+                let secs = if iap == sys::SHIM_IAP_PROMPT { 45 } else { 12 };
+                self.expect("bearer", secs);
+            }
+            Err(e) => {
+                self.log.push(|w| {
+                    w.s("  start failed: ").s(err_name(e));
+                });
+                self.advance_sweep();
+            }
+        }
+    }
+
+    fn advance_sweep(&mut self) {
+        if let Some(i) = self.sweep_at {
+            self.sweep_at = Some(i + 1);
+            self.try_sweep();
         }
     }
 
@@ -361,6 +493,7 @@ impl NetProbe {
             });
             return;
         }
+        self.expect("connect", 20);
         self.stream = Some(s);
     }
 
@@ -373,7 +506,10 @@ impl NetProbe {
             w.s("resolving ").s(host);
         });
         match Lookup::start(&mut self.net, bearer, host) {
-            Ok(l) => self.lookup = Some(l),
+            Ok(l) => {
+                self.lookup = Some(l);
+                self.expect("dns", 15);
+            }
             Err(e) => self.log.push(|w| {
                 w.s("resolve failed: ").s(err_name(e));
             }),
@@ -381,12 +517,6 @@ impl NetProbe {
     }
 
     fn start_work(&mut self) {
-        if self.work_running {
-            self.log.push(|w| {
-                w.s("already running");
-            });
-            return;
-        }
         // A real 2048-bit modulus, so the timing is the real timing. Built here rather
         // than as a constant because the job's input format is three length-prefixed
         // fields and assembling it is clearer than a hex blob.
@@ -473,6 +603,21 @@ impl NetProbe {
     }
 }
 
+fn sweep_label(iap: i32) -> &'static str {
+    match iap {
+        sys::SHIM_IAP_DEFAULT => "system default",
+        sys::SHIM_IAP_PROMPT => "prompt",
+        1 => "IAP 1",
+        2 => "IAP 2",
+        3 => "IAP 3",
+        4 => "IAP 4",
+        5 => "IAP 5",
+        6 => "IAP 6",
+        7 => "IAP 7",
+        _ => "IAP 8",
+    }
+}
+
 /// Short names for the errors this probe can actually produce. `Display` would pull in
 /// `core::fmt`'s machinery for the sake of a dozen strings.
 fn err_name(e: symbian::Error) -> &'static str {
@@ -501,6 +646,26 @@ impl App for NetProbe {
         // The spinner tick. Consumed here rather than becoming a key, and the only reason
         // this app implements handle_raw at all besides the network completions.
         if ev.kind == sys::SHIM_EV_TIMER {
+            // The deadline and the spinner share the timer event, told apart by handle.
+            if Some(ev.handle) == self.deadline {
+                let what = self.waiting_for;
+                self.cancel_deadline();
+                self.log.push(|w| {
+                    w.s("timed out waiting for ").s(what);
+                });
+                // A sweep entry that timed out is just a strategy that does not work
+                // here, which is an answer rather than a failure. Move to the next.
+                if self.sweep_at.is_some() {
+                    self.advance_sweep();
+                    return Handled::Consumed;
+                }
+                // Whatever was outstanding is abandoned rather than left to complete into
+                // a run that has moved on.
+                self.stream = None;
+                self.lookup = None;
+                self.pending = None;
+                return Handled::Consumed;
+            }
             self.spin = self.spin.wrapping_add(1);
             return Handled::Consumed;
         }
@@ -527,11 +692,34 @@ impl App for NetProbe {
             return Handled::Consumed;
         }
 
+        // The sweep owns its own bearer handle, so it gets first look at a NET_READY.
+        if self.sweep_at.is_some() && ev.kind == sys::SHIM_EV_NET_READY {
+            if ev.handle == self.sweep_handle {
+                self.cancel_deadline();
+                if ev.status == 0 {
+                    let iap = ev.a;
+                    self.sweep_at = None;
+                    self.log.push(|w| {
+                        w.s("  UP. use IAP ").n(iap as i64);
+                    });
+                } else {
+                    let status = ev.status;
+                    self.log.push(|w| {
+                        w.s("  no: ").n(status as i64);
+                    });
+                    self.advance_sweep();
+                }
+            }
+            return Handled::Consumed;
+        }
+
         // The bearer, which every network test waits for.
         if let Some(b) = &mut self.bearer {
             match b.on_event(&mut self.net, ev) {
                 Ok(true) => {
+                    // Read what is needed out of the borrow before touching self again.
                     let iap = b.iap().unwrap_or(0);
+                    self.cancel_deadline();
                     self.log.push(|w| {
                         w.s("bearer up, IAP ").n(iap as i64);
                     });
@@ -555,6 +743,7 @@ impl App for NetProbe {
         if let Some(l) = &mut self.lookup {
             match l.on_event(ev) {
                 Ok(Some(addr)) => {
+                    self.cancel_deadline();
                     self.log.push(|w| {
                         w.s("resolved ").ip(addr);
                     });
@@ -586,6 +775,7 @@ impl App for NetProbe {
         match progress {
             Progress::None => Handled::Ignored,
             Progress::Connected => {
+                self.cancel_deadline();
                 self.log.push(|w| {
                     w.s("connected");
                 });
@@ -659,11 +849,7 @@ impl App for NetProbe {
         let frame = chrome::Frame::split(screen, theme, true, true);
         chrome::clear(c, theme);
 
-        // The spinner lives in the title bar's detail slot, which is where the eye
-        // already is and costs no layout.
-        let spinner = ["|", "/", "-", "\\"][(self.spin % 4) as usize];
-        let detail = if self.work_running { spinner } else { "" };
-        chrome::title_bar(c, frame.title, theme, self.test.name(), Some(detail));
+        chrome::title_bar(c, frame.title, theme, self.test.name(), None);
         chrome::softkey_bar(c, frame.softkeys, theme, [Some("Run"), None, Some("Exit")]);
 
         let small = theme.fonts.small;
@@ -679,6 +865,16 @@ impl App for NetProbe {
             };
             c.draw_text(Point::new(4, y + small.ascent()), text, small, color);
             y += small.line_height() + 1;
+        }
+
+        // The spinner gets its own line, in the accent colour, at the size the body font
+        // draws. It was a single character in the title bar's corner, which is too small
+        // to be the evidence this whole test rests on — the point is to watch it move.
+        if self.work_running {
+            let frames = ["working  |", "working  /", "working  -", "working  \\"];
+            let text = frames[(self.spin % 4) as usize];
+            let row = Rect { y0: frame.content.y1 - 30, ..frame.content };
+            c.draw_text_in(row, text, theme.fonts.strong, theme.palette.accent, Align::Center);
         }
 
         let hint = Rect { y0: frame.content.y1 - 12, ..frame.content };
@@ -745,13 +941,13 @@ mod tests {
 
     #[test]
     fn the_test_selector_wraps_both_ways() {
-        assert_eq!(Test::Echo.prev(), Test::Work);
-        assert_eq!(Test::Work.next(), Test::Echo);
-        let mut t = Test::Echo;
+        assert_eq!(Test::Sweep.prev(), Test::Work);
+        assert_eq!(Test::Work.next(), Test::Sweep);
+        let mut t = Test::Sweep;
         for _ in 0..Test::ALL.len() {
             t = t.next();
         }
-        assert_eq!(t, Test::Echo);
+        assert_eq!(t, Test::Sweep);
     }
 
     #[test]

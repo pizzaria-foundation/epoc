@@ -58,9 +58,13 @@ struct TJob
     TInt iInLen;
     TUint8* iOut;
     TInt iOutLen;
-    /* A real, process-owned handle to the GUI thread, so the worker can complete its
-     * request status from the other side. */
-    RThread iGui;
+    /* The GUI thread's id, which the worker opens a handle to. An id rather than a
+     * handle, and that distinction closed a crash: RHandleBase::Duplicate takes the
+     * handle to copy from `this->iHandle` and uses its argument only to say whose handle
+     * space that value lives in. Handing it a default-constructed RThread therefore asks
+     * the kernel to duplicate handle 0 — KERN-EXEC 0, on the GUI thread, which closes the
+     * application. RThread::Open(TThreadId) has no such reading. */
+    TThreadId iGuiId;
     TRequestStatus* iStatus;
     };
 
@@ -80,9 +84,22 @@ TInt WorkerMain(TAny* aPtr)
     const TInt result =
         rust_work(job->iOpcode, job->iIn, job->iInLen, job->iOut, job->iOutLen);
 
-    /* The completion lands in the GUI thread's active scheduler like any other, which
-     * is why there is nothing to poll. */
-    job->iGui.RequestComplete(job->iStatus, result);
+    /* The completion lands in the GUI thread's active scheduler like any other, which is
+     * why there is nothing to poll.
+     *
+     * Opened here rather than handed over as a handle: a handle belongs to the thread
+     * that made it, and getting one across thread boundaries is exactly where the crash
+     * was. Opening by id from this side cannot be got subtly wrong.
+     *
+     * If Open fails the GUI thread waits forever, which is a hang rather than a crash and
+     * is the better of the two failures — but there is no recovery available from here,
+     * and Open on a live thread in the same process does not realistically fail. */
+    RThread gui;
+    if (gui.Open(job->iGuiId) == KErrNone)
+        {
+        gui.RequestComplete(job->iStatus, result);
+        gui.Close();
+        }
     return KErrNone;
     }
 
@@ -102,11 +119,16 @@ private:
 
     RThread iThread;
     TBool iThreadOpen;
+    /* Bumped per job so the thread name is unique. Symbian thread names must be unique
+     * within a process, and a name reused before the kernel has finished reaping the
+     * previous thread comes back KErrAlreadyExists — which for a probe that runs the same
+     * test repeatedly would be an intermittent failure with no obvious cause. */
+    TInt iSeq;
     };
 
 CShimWorker* gWorker = NULL;
 
-CShimWorker::CShimWorker() : CActive(EPriorityStandard), iThreadOpen(EFalse)
+CShimWorker::CShimWorker() : CActive(EPriorityStandard), iThreadOpen(EFalse), iSeq(0)
     {
     }
 
@@ -132,8 +154,6 @@ CShimWorker::~CShimWorker()
         iThread.Close();
         iThreadOpen = EFalse;
         }
-    if (gJob.iGui.Handle() != KNullHandle)
-        gJob.iGui.Close();
     }
 
 TInt CShimWorker::Submit(TInt aOpcode, const TUint8* aIn, TInt aInLen, TUint8* aOut,
@@ -149,8 +169,6 @@ TInt CShimWorker::Submit(TInt aOpcode, const TUint8* aIn, TInt aInLen, TUint8* a
         iThread.Close();
         iThreadOpen = EFalse;
         }
-    if (gJob.iGui.Handle() != KNullHandle)
-        gJob.iGui.Close();
 
     gJob.iOpcode = aOpcode;
     gJob.iIn = aIn;
@@ -158,14 +176,9 @@ TInt CShimWorker::Submit(TInt aOpcode, const TUint8* aIn, TInt aInLen, TUint8* a
     gJob.iOut = aOut;
     gJob.iOutLen = aOutLen;
     gJob.iStatus = &iStatus;
-
-    /* A real handle to this thread. The default-constructed RThread is a pseudo-handle
-     * that only means "current thread" in the thread that holds it, so it has to be
-     * duplicated into something the worker can use. */
-    RThread current;
-    const TInt dup = gJob.iGui.Duplicate(current);
-    if (dup != KErrNone)
-        return dup;
+    /* Our own id, for the worker to open. RThread() is the current-thread pseudo-handle,
+     * which is meaningless in another thread — the id is not. */
+    gJob.iGuiId = RThread().Id();
 
     iStatus = KRequestPending;
     SetActive();
@@ -177,8 +190,11 @@ TInt CShimWorker::Submit(TInt aOpcode, const TUint8* aIn, TInt aInLen, TUint8* a
      * The 6-argument overload gives the thread its own heap; see the note at the top on
      * why the shared-allocator overload is not used. 4 KB minimum, 256 KB maximum — a
      * job that wants more than that is the wrong shape for this facility. */
-    const TInt created = iThread.Create(
-        _L("shim_worker"), WorkerMain, 16 * 1024, 4 * 1024, 256 * 1024, &gJob);
+    iSeq++;
+    TName name;
+    name.Format(_L("shim_worker_%d"), iSeq);
+    const TInt created =
+        iThread.Create(name, WorkerMain, 16 * 1024, 4 * 1024, 256 * 1024, &gJob);
     if (created != KErrNone)
         {
         /* Undo the SetActive, or the scheduler waits on a request nothing will ever
@@ -186,7 +202,6 @@ TInt CShimWorker::Submit(TInt aOpcode, const TUint8* aIn, TInt aInLen, TUint8* a
         TRequestStatus* s = &iStatus;
         User::RequestComplete(s, created);
         Cancel();
-        gJob.iGui.Close();
         return created;
         }
     iThreadOpen = ETrue;

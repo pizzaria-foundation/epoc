@@ -457,6 +457,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "selftest"
+version = "0.1.0"
+dependencies = [
+ "symbian",
+ "symbian-crypto",
+ "symbian-gfx",
+ "symbian-sim",
+ "symbian-sys",
+ "symbian-ui",
+]
+
+[[package]]
 name = "serde"
 version = "1.0.229"
 source = "registry+https://github.com/rust-lang/crates.io-index"

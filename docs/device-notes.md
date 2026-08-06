@@ -172,6 +172,27 @@ icon doing nothing. `examples/libprobe` asks with `RLibrary::Load` instead, whic
 stronger test than checking the filesystem — a DLL can be present and still fail to load
 through a wrong UID, its own unsatisfied imports, or a capability we do not hold.
 
+## Two units and one precedence, found by the device self test
+
+**`HALData::ENanoTickPeriod` is in microseconds.** The name says nanoseconds; `hal_data.h`
+says "The time between nanokernel ticks, in microseconds". Reading it as nanoseconds made
+`shim_now_us` return milliseconds under a microsecond name, so every duration the SDK ever
+printed was 1000x too small.
+
+What is worth keeping is *how* it surfaced. Nothing failed. The self test reported a
+2048-bit modpow at 0 ms, a 64 KB flash write at 23 us, and a framebuffer fill implying
+66666 fps — all plausible-looking numbers in a passing report. The lie was only visible
+by knowing what the hardware cannot do: 600 MHz ARM11 does not write flash at 2.8 GB/s.
+**A measurement has no error bars, so a wrong one looks exactly like a right one.** Sanity
+against physics is the only check a timing has.
+
+**Append must be tested before create.** `symbian::fs` maps `OpenMode::Append` to
+`WRITE|CREATE|APPEND`, and the shim tested `CREATE` first — which is `RFile::Replace`, which
+truncates, so the following `Seek(ESeekEnd)` landed at zero and an append became an
+overwrite. The host fake missed it because it models the `OpenMode` enum, one layer *above*
+the flags where the bug lived. A fake above the buggy layer cannot see the bug; this one
+was caught by the first run on the handset.
+
 ## Searching this SDK
 
 **Always `grep -a`.** Most of these headers carry a `©` in the copyright line, encoded as
