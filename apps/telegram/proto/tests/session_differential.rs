@@ -104,7 +104,7 @@ fn session(fx: &Fixture) -> Session {
     key.copy_from_slice(&fx.auth_key);
     let mut salt = [0u8; 8];
     salt.copy_from_slice(&fx.salt);
-    Session::new(&AuthKey { key, id: fx.auth_key_id, salt, time_offset: 0 }, fx.session_id)
+    Session::new(&AuthKey { key, id: fx.auth_key_id, salt, server_time: 0 }, fx.session_id)
 }
 
 /// The core claim: this crate can read what Telegram actually sent.

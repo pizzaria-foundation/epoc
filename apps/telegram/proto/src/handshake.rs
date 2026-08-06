@@ -167,13 +167,18 @@ pub struct AuthKey {
     /// The initial salt, from `new_nonce[0..8] XOR server_nonce[0..8]`. Rotates during a
     /// session; this is only the first one.
     pub salt: [u8; 8],
-    /// `server_time - local_time` in seconds, from `server_DH_inner_data`.
+    /// The server's Unix time, exactly as `server_DH_inner_data` reported it.
     ///
-    /// Worth keeping: MTProto rejects a `msg_id` more than 30 s ahead or 300 s behind the
-    /// server, and a phone's clock is set by hand. Without this correction a handset whose
-    /// clock is a minute out cannot send anything, and the error it gets back does not
-    /// mention the clock.
-    pub time_offset: i32,
+    /// **Absolute, not an offset.** This module has no clock, so it cannot subtract one —
+    /// and an earlier version stored this in a field called `time_offset`, which produced
+    /// `msg_id`s 56 years in the future and a `bad_msg_notification` with code 16. The live
+    /// run against Telegram found that in one line; nothing offline could have, because
+    /// every test that had a clock had the same wrong one on both sides.
+    ///
+    /// The subtraction happens in [`crate::client::Client`], which is given a local time.
+    /// It matters because MTProto rejects a `msg_id` more than 30 s ahead or 300 s behind
+    /// the server, and a phone's clock is set by hand.
+    pub server_time: i32,
 }
 
 impl core::fmt::Debug for AuthKey {
@@ -182,7 +187,7 @@ impl core::fmt::Debug for AuthKey {
         // an auth key in it is the whole account.
         f.debug_struct("AuthKey")
             .field("id", &self.id)
-            .field("time_offset", &self.time_offset)
+            .field("server_time", &self.server_time)
             .finish_non_exhaustive()
     }
 }
@@ -211,7 +216,7 @@ pub struct Handshake {
     /// The AES key and IV protecting the DH exchange, derived once `new_nonce` and
     /// `server_nonce` are both known.
     aes: ([u8; 32], [u8; 32]),
-    time_offset: i32,
+    server_time: i32,
     /// `new_nonce_hash1` from `dh_gen_ok`, checked once the key exists.
     expected_hash: [u8; 16],
 }
@@ -239,7 +244,7 @@ impl Handshake {
             dh_prime: Vec::new(),
             g_a: Vec::new(),
             aes: ([0u8; 32], [0u8; 32]),
-            time_offset: 0,
+            server_time: 0,
             expected_hash: [0u8; 16],
         };
 
@@ -361,9 +366,7 @@ impl Handshake {
 
         self.dh_prime = dh_prime.to_vec();
         self.g_a = g_a.to_vec();
-        // The offset, not the time. A stored absolute time is wrong a second later; an
-        // offset stays right as long as neither clock is adjusted.
-        self.time_offset = server_time;
+        self.server_time = server_time;
 
         self.state = State::AwaitGb;
         Ok(Action::ModPow {
@@ -473,7 +476,7 @@ impl Handshake {
             key: auth_key,
             id,
             salt,
-            time_offset: self.time_offset,
+            server_time: self.server_time,
         })))
     }
 }

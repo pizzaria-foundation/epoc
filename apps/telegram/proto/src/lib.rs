@@ -42,6 +42,7 @@
 
 extern crate alloc;
 
+pub mod client;
 pub mod crypto;
 pub mod handshake;
 pub mod keys;
@@ -52,4 +53,5 @@ pub mod tl;
 pub mod transport;
 
 pub use tl::{Reader, Writer};
+pub use client::{Client, Step};
 pub use transport::{Frame, Transport};

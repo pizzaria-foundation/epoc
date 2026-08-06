@@ -231,6 +231,15 @@ impl Session {
         self.open(Dir::In, wire)
     }
 
+    /// Decrypt as the *server* would, for tests: reads a message the client sent.
+    ///
+    /// The counterpart to `encrypt_as_server`, and there for the same reason — the two
+    /// directions use different key material, so a test that wants to look at what a client
+    /// put on the wire has to read it the way the server will.
+    pub fn decrypt_as_client(&self, wire: &[u8]) -> Result<Incoming> {
+        self.open(Dir::Out, wire)
+    }
+
     /// Encrypt as the *server* would, for tests and for the reference differential.
     ///
     /// It exists because a client cannot decrypt its own output and should not be able to:
@@ -374,7 +383,7 @@ mod tests {
         for (i, b) in k.iter_mut().enumerate() {
             *b = (i as u8).wrapping_mul(7).wrapping_add(3);
         }
-        AuthKey { key: k, id: 0x1122_3344_5566_7788, salt: [1, 2, 3, 4, 5, 6, 7, 8], time_offset: 0 }
+        AuthKey { key: k, id: 0x1122_3344_5566_7788, salt: [1, 2, 3, 4, 5, 6, 7, 8], server_time: 0 }
     }
 
     #[test]
