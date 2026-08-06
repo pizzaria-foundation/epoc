@@ -331,10 +331,23 @@ pub struct SelfTest {
  * exactly the ones worth waiting for. The strategies that ask the system to choose go
  * last, because on this handset neither has ever completed and both are slow to say so. */
 const SWEEP_HEAD: [i32; 22] = [
-    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
-    sys::SHIM_IAP_DEFAULT,
     sys::SHIM_IAP_PROMPT,
+    sys::SHIM_IAP_DEFAULT,
+    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
 ];
+
+/* One deadline for every strategy, and a long one.
+ *
+ * Three rounds of tuning this number were all wrong for the same reason: I sized it for
+ * network negotiation. It is not waiting for a network. On this handset a connection
+ * attempt raises a dialog and waits for a person -- not only the strategy named "prompt",
+ * which is what I had assumed, but any of them. One access point timed out at 35013 ms in
+ * two separate runs, to the millisecond, which is not what a radio failing to associate
+ * looks like. It is what a countdown looks like.
+ *
+ * So the deadline is no longer a measurement of anything. It is only there to stop an
+ * unattended run hanging forever, and it is set well past human reaction time. */
+const BEARER_DEADLINE_S: i32 = 150;
 
 impl Default for SelfTest {
     fn default() -> Self {
@@ -1080,6 +1093,7 @@ impl SelfTest {
          * off this handset ended at "-- entering bearer" and read like a freeze; it was
          * a sweep in progress. A phase that can be slow has to narrate itself, or the
          * only observable difference between working and hung is patience. */
+        self.status = String::from("connecting - ANSWER ANY DIALOG on screen");
         let label = self.sweep_name();
         self.report.info("trying", &label);
         self.report.flush(&mut self.fs);
@@ -1091,7 +1105,7 @@ impl SelfTest {
                 self.phase = Phase::BearerWait;
                 // The prompt waits on a person and gets longer, but not so long that an
                 // unattended run stalls for minutes on a dialog nobody is there to answer.
-                self.expect(if iap == sys::SHIM_IAP_PROMPT { 40 } else { 35 });
+                self.expect(BEARER_DEADLINE_S);
             }
             Err(e) => {
                 self.report.info(&label, err_name(e));
