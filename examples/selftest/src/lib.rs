@@ -290,6 +290,7 @@ pub struct SelfTest {
     sweep_handle: i32,
     bearer_handle: i32,
     bearer_iap: i32,
+    attempt_started_us: u64,
     /// What to try, in order: the two id-less strategies then every access point the
     /// handset actually has.
     sweep: Vec<i32>,
@@ -311,18 +312,29 @@ pub struct SelfTest {
     status: String,
 }
 
-/* Both strategies that need no access-point id, and nothing else.
+/* Numbered access points first, then the two that ask the system to choose.
  *
- * An earlier version swept ids 1..8 and spent two minutes learning that this handset does
- * not number access points that way -- the ids are whatever the comms database assigned.
- * The obvious next move was to read that database, and CCommsDatabase turned out to pull
- * ordinals from commdb.dll that this E72 does not export: the image stopped loading at
- * all, which is a worse failure than a bad guess because it produces no report to read.
+ * The order is backwards from the obvious one, and the reason is in an earlier report:
  *
- * So neither. The browser works on this handset, which means a default connection exists,
- * and SHIM_IAP_DEFAULT is exactly the "use the configured default" path the browser takes.
- * Two attempts, no new imports, and the deadline is the thing that was actually wrong. */
-const SWEEP_HEAD: [i32; 2] = [sys::SHIM_IAP_DEFAULT, sys::SHIM_IAP_PROMPT];
+ *     IAP 1: err -1
+ *     FAIL timed out  bearer      <- this was IAP 2
+ *
+ * An id that does not exist answers KErrNotFound immediately. An id that *times out* is
+ * one the stack accepted and was still trying to bring up when the 12 s deadline fired.
+ * So IAP 2 exists and was working, and the sweep killed it. Reading that timeout as
+ * "another bad guess" is what sent the previous round chasing the comms database, which
+ * added six commdb ordinals this handset does not export and stopped the image loading
+ * altogether.
+ *
+ * Which makes the numbered sweep cheap rather than wasteful: a missing id costs one round
+ * trip, so twenty of them cost almost nothing, and the ones that cost real time are
+ * exactly the ones worth waiting for. The strategies that ask the system to choose go
+ * last, because on this handset neither has ever completed and both are slow to say so. */
+const SWEEP_HEAD: [i32; 22] = [
+    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
+    sys::SHIM_IAP_DEFAULT,
+    sys::SHIM_IAP_PROMPT,
+];
 
 impl Default for SelfTest {
     fn default() -> Self {
@@ -349,6 +361,7 @@ impl SelfTest {
             sweep_handle: -1,
             bearer_handle: -1,
             bearer_iap: -1,
+            attempt_started_us: 0,
             sweep: SWEEP_HEAD.to_vec(),
             iap_names: Vec::new(),
             dns_handle: -1,
@@ -1017,6 +1030,18 @@ impl SelfTest {
 
     // ---- network phases ----
 
+    /// How long the attempt in flight has taken, as a report note. An id that does not
+    /// exist answers in milliseconds; one that is genuinely negotiating takes seconds, and
+    /// telling those apart is the whole difference between a bad guess and a short
+    /// deadline.
+    fn attempt_note(&self, prefix: &str) -> String {
+        let mut n = String::from(prefix);
+        n.push_str("  after ");
+        push_i64(&mut n, ((now_us() - self.attempt_started_us) / 1000) as i64);
+        n.push_str(" ms");
+        n
+    }
+
     /// What to call the strategy at `sweep_at` in the report. The id-less ones have fixed
     /// names; a real access point reports the name and service type the database gave it,
     /// because "IAP 6 worked" is not an answer anyone can act on.
@@ -1058,6 +1083,7 @@ impl SelfTest {
         let label = self.sweep_name();
         self.report.info("trying", &label);
         self.report.flush(&mut self.fs);
+        self.attempt_started_us = now_us();
 
         match self.net.net_start(strategy) {
             Ok(h) => {
@@ -1065,7 +1091,7 @@ impl SelfTest {
                 self.phase = Phase::BearerWait;
                 // The prompt waits on a person and gets longer, but not so long that an
                 // unattended run stalls for minutes on a dialog nobody is there to answer.
-                self.expect(if iap == sys::SHIM_IAP_PROMPT { 40 } else { 30 });
+                self.expect(if iap == sys::SHIM_IAP_PROMPT { 40 } else { 35 });
             }
             Err(e) => {
                 self.report.info(&label, err_name(e));
@@ -1186,8 +1212,9 @@ impl SelfTest {
                 }
                 self.cancel_deadline();
                 if ev.status == 0 {
-                    let mut note = String::from("IAP ");
-                    push_i64(&mut note, ev.a as i64);
+                    let mut got = String::from("IAP ");
+                    push_i64(&mut got, ev.a as i64);
+                    let note = self.attempt_note(&got);
                     let label = self.sweep_name();
                     self.report.check_note(&label, true, &note);
                     self.bearer_handle = self.sweep_handle;
@@ -1196,8 +1223,9 @@ impl SelfTest {
                     self.sweep_handle = -1;
                     self.next(Phase::Dns);
                 } else {
-                    let mut note = String::from("err ");
-                    push_i64(&mut note, ev.status as i64);
+                    let mut err = String::from("err ");
+                    push_i64(&mut err, ev.status as i64);
+                    let note = self.attempt_note(&err);
                     let label = self.sweep_name();
                     self.report.info(&label, &note);
                     self.report.flush(&mut self.fs);
@@ -1412,7 +1440,12 @@ impl App for SelfTest {
             }
             if Some(ev.handle) == self.deadline {
                 self.cancel_deadline();
-                self.report.check_note("timed out", false, phase_name(self.phase));
+                let what = if self.phase == Phase::BearerWait {
+                    self.attempt_note(&self.sweep_name())
+                } else {
+                    String::from(phase_name(self.phase))
+                };
+                self.report.check_note("timed out", false, &what);
                 self.report.flush(&mut self.fs);
                 // A timeout is an answer about this phase, not the end of the run.
                 match self.phase {
