@@ -254,6 +254,47 @@ Also settled: **the handset had no SIM.** Three access points answered `-4180`, 
 cellular network. Only the Wi-Fi one was ever going to work, and none of the sweep logic
 could have known that.
 
+## The optimisations, measured on the handset rather than predicted
+
+| | before | after | predicted |
+|---|---|---|---|
+| AES-256 | 169 KB/s | **2461 KB/s** | 3550 KB/s |
+
+The T-tables transferred: **14.6x**. The prediction was 21x, taken from the host ratio, and
+it was too high for the reason the module doc gave before the measurement existed — an
+out-of-order core gains more from a shortened dependency chain than an in-order ARM11 does.
+The number that was honest all along was the ARM instruction count, which said 12% for
+SHA-512 and made no claim about AES beyond "a factor of twenty, not a third".
+
+Also confirmed present: **fepbase.dll**, **random.dll** and **cryptography.dll** all load.
+The FEP path for the keyboard's Fn layer is therefore available, and `CSystemRandom` is
+there if the entropy pool ever needs upgrading.
+
+## Opening a socket is not having a route
+
+`Bearer::none()` — open the socket with no `RConnection`, on whatever route is already up —
+reports success unconditionally, because all it does is decline to open a connection. It
+creates nothing.
+
+On a handset with no active data connection the socket opens, the connect is issued, and
+nothing ever completes. The self test showed it as three timeouts in a row with a cheerful
+`ok` above them:
+
+```
+ok   no bearer: socket on the existing route
+FAIL timed out  dns
+FAIL timed out  tcp echo
+FAIL timed out  http
+```
+
+S60 tears connections down when they go idle, so "the browser worked earlier" does not mean
+a route exists now. The routeless path is a cheap first try and nothing more; a real client
+still has to bring a bearer up when it fails.
+
+The bug that hid it: the fallback to the bearer sweep fired on a DNS *error* and not on a
+DNS *timeout*, and a route that does not exist produces the second. One arm of a match
+going to the wrong place, in code whose whole purpose was to notice this.
+
 ## Measured on the handset, not estimated
 
 From the device self test, after the clock was fixed. These replace the scaled-from-host

@@ -1582,7 +1582,20 @@ impl App for SelfTest {
                         self.sweep_at += 1;
                         self.phase = Phase::BearerSweep;
                     }
-                    Phase::DnsWait => self.next(Phase::Tcp),
+                    Phase::DnsWait => {
+                        // A timeout and an error mean the same thing here and only one of
+                        // them used to fall back. The routeless attempt succeeds trivially
+                        // -- it just declines to open an RConnection -- so its failure shows
+                        // up as DNS never completing, which took this path and skipped
+                        // straight to TCP over a route that does not exist.
+                        if self.bearer_handle < 0 && self.sweep_at < self.sweep.len() {
+                            self.report.info("no route", "falling back to the bearer sweep");
+                            self.report.flush(&mut self.fs);
+                            self.phase = Phase::BearerSweep;
+                        } else {
+                            self.next(Phase::Tcp);
+                        }
+                    }
                     Phase::TcpWait => {
                         self.close_tcp();
                         self.next(Phase::Http);

@@ -164,6 +164,38 @@ fn render_app() {
     shot("16-chats-light", &light, &[]);
     let _ = Softkey::Left;
 
+    // Login screens.
+    {
+        use tg::login::{Login, Screen as Ls};
+        let shot_login = |name: &str, theme: &symbian_ui::Theme<'_>, screen: Ls| {
+            let mut login = Login::for_preview(screen);
+            let mut s = Screen::new(E72_SCREEN);
+            {
+                let mut c = s.canvas();
+                login.draw(&mut c, theme);
+            }
+            s.save(name);
+        };
+        shot_login("17-login-phone", &dark, Ls::Phone {
+            field: symbian_ui::TextField::with_limit(16),
+            error: None,
+        });
+        shot_login("18-login-code", &dark, Ls::Code {
+            field: symbian_ui::TextField::with_limit(8),
+            length: Some(5),
+            error: None,
+        });
+        shot_login("19-login-password", &dark, Ls::Password {
+            field: {
+                let mut f = symbian_ui::TextField::with_limit(128);
+                f.set_masked(true);
+                f
+            },
+            hint: String::from("dica do usuário"),
+            error: None,
+        });
+    }
+
     render_design_system();
 }
 
