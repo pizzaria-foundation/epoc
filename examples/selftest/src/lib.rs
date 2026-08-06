@@ -45,6 +45,13 @@ use symbian_ui::{chrome, App, Canvas, Handled, Key, KeyEvent, RawEvent, Rect, So
 const ECHO_ADDR: Ipv4 = Ipv4::new(192, 168, 15, 74);
 const ECHO_PORT: u16 = 7654;
 const HTTP_HOST: &str = "example.com";
+/* A literal address for the same host, used when the lookup fails.
+ *
+ * Without it the phases chain: no DNS means no HTTP, and a run that cannot resolve tells
+ * you nothing about whether TCP to the internet works. Separating them turns one failure
+ * into two independent answers -- "DNS is broken but sockets are fine" is a diagnosis,
+ * "the network phase failed" is not. */
+const HTTP_FALLBACK: Ipv4 = Ipv4::new(104, 20, 23, 154);
 
 pub const OP_MODPOW: i32 = 1;
 
@@ -1152,12 +1159,14 @@ impl SelfTest {
         target.push(':');
         push_i64(&mut target, ECHO_PORT as i64);
         self.report.info("target", &target);
+        self.report.info("note", "needs the phone on the same LAN as the host; a failure here may be routing, not sockets");
 
         match self.net.tcp_open(self.bearer_handle) {
             Ok(h) => {
                 self.tcp_handle = h;
                 let r = self.net.tcp_connect(h, ECHO_ADDR, ECHO_PORT);
                 self.report.check("connect issued", r.is_ok());
+                self.report.flush(&mut self.fs);
                 if r.is_ok() {
                     self.rx_seen.clear();
                     self.phase = Phase::TcpWait;
@@ -1176,16 +1185,19 @@ impl SelfTest {
 
     fn do_http(&mut self) {
         self.report.head("http get");
-        let Some(addr) = self.resolved else {
-            self.report.info("skipped", "dns produced no address");
-            self.next(Phase::Done);
-            return;
+        let addr = match self.resolved {
+            Some(a) => a,
+            None => {
+                self.report.info("dns failed, using a literal address", "104.20.23.154");
+                HTTP_FALLBACK
+            }
         };
         match self.net.tcp_open(self.bearer_handle) {
             Ok(h) => {
                 self.tcp_handle = h;
                 let r = self.net.tcp_connect(h, addr, 80);
                 self.report.check("connect issued", r.is_ok());
+                self.report.flush(&mut self.fs);
                 if r.is_ok() {
                     self.rx_seen.clear();
                     self.phase = Phase::HttpWait;
@@ -1294,6 +1306,7 @@ impl SelfTest {
                             return true;
                         }
                         self.report.check("connected", true);
+                        self.report.flush(&mut self.fs);
                         self.issue_read();
                         let payload: &[u8] = if http {
                             b"GET / HTTP/1.0\r\nHost: example.com\r\n\r\n"
