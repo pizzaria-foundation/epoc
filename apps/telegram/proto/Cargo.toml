@@ -5,6 +5,9 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
+# Named rather than inherited: this crate's home is its own repository, not the SDK's. See
+# the note at the top of README.md.
+repository = "https://github.com/Lab2021/tg"
 
 [lib]
 # A plain rlib with no runtime items, for the same reason `tg` is one: the whole protocol

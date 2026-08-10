@@ -1,5 +1,14 @@
 # tg — the Telegram client
 
+**Repository: [Lab2021/tg](https://github.com/Lab2021/tg). Built on the
+[epoc](https://github.com/Lab2021/epoc) SDK.**
+
+While the split is in progress this directory still sits inside the SDK checkout, and the
+path dependencies in `Cargo.toml` point at `../../crates/`. Nothing in the SDK depends on
+anything here — moving this directory and deleting five lines from the SDK's root
+`Cargo.toml` (its two workspace members, the `exclude` entry and the two `tg*` path deps) is
+the whole separation.
+
 The reference app, and the reason the SDK exists. The UI is real and runs on the E72; the
 protocol is real and talks to Telegram. They are not joined up yet — `App::mock()` still
 backs the screens.
