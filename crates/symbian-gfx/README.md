@@ -66,6 +66,13 @@ regardless of which fonts a given handset shipped with.
 ## Seeing it without a device
 
 ```
-cargo test -p symbian-gfx     # 39 tests
+cargo test -p symbian-gfx     # 49 tests
 cargo run -p preview          # writes preview-out/*.png at 2x
 ```
+
+---
+
+Part of [epoc](../../README.md), a Rust SDK for Symbian S60 3rd Edition. MIT licensed; see
+`LICENSE` at the repository root. `symbian` in this crate's name is descriptive, not a claim
+on somebody else's trademark - the repository README says more. Written with AI assistance,
+and every hardware claim in it was measured rather than reasoned about.

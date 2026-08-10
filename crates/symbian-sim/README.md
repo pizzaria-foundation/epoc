@@ -79,3 +79,10 @@ Searched in a few relative locations, because the working directory depends on h
 was invoked — the SDK root for a workspace member, the app's own directory for a standalone
 project. `SYMBIAN_ASSETS` overrides. Guessing one path and failing with "no such file"
 would send people looking for a missing asset rather than a wrong `cwd`.
+
+---
+
+Part of [epoc](../../README.md), a Rust SDK for Symbian S60 3rd Edition. MIT licensed; see
+`LICENSE` at the repository root. `symbian` in this crate's name is descriptive, not a claim
+on somebody else's trademark - the repository README says more. Written with AI assistance,
+and every hardware claim in it was measured rather than reasoned about.

@@ -225,3 +225,10 @@ claims is worse than no check.
 - **`RSA_PAD`**, MTProto 2.0's padding scheme around the raw RSA primitive. Protocol work
   rather than crypto work.
 - **PBKDF2**, twenty lines over `hmac_sha512`, for when 2FA passwords matter.
+
+---
+
+Part of [epoc](../../README.md), a Rust SDK for Symbian S60 3rd Edition. MIT licensed; see
+`LICENSE` at the repository root. `symbian` in this crate's name is descriptive, not a claim
+on somebody else's trademark - the repository README says more. Written with AI assistance,
+and every hardware claim in it was measured rather than reasoned about.

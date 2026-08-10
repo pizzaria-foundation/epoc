@@ -24,7 +24,7 @@ code behind them lives here. That is the whole reason for the shape.
 
 Before this existed, each app carried its own copy: about 120 lines of `unsafe` across the
 allocator, the panic handler, the key translation and the framebuffer setup, duplicated
-three times. `apps/telegram/device/src/lib.rs` went from 277 lines to 16.
+three times. The reference app's device crate went from 277 lines to 16.
 
 ## What the macro does per step
 
@@ -91,3 +91,10 @@ Nine, all host-side, all about the translation layer — including that an unkno
 survives as `Key::Raw` rather than being dropped, and that a lone UTF-16 surrogate is
 rejected rather than becoming U+FFFD. Both are cases where the wrong behaviour is a visible
 artifact in someone's text with no trail back to here.
+
+---
+
+Part of [epoc](../../README.md), a Rust SDK for Symbian S60 3rd Edition. MIT licensed; see
+`LICENSE` at the repository root. `symbian` in this crate's name is descriptive, not a claim
+on somebody else's trademark - the repository README says more. Written with AI assistance,
+and every hardware claim in it was measured rather than reasoned about.

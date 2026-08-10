@@ -1,6 +1,9 @@
 # symbian-ui
 
-The widget toolkit and the design system. `no_std`, `forbid(unsafe_code)`, 74 tests.
+The widget toolkit and the design system. `no_std`, `forbid(unsafe_code)`, 84 tests.
+
+Lists, text fields, the screen chrome, 20 icons, five palettes, and a full-screen image
+viewer - everything that decides what a 320x240 screen looks like.
 
 ## Why there is no widget tree
 
@@ -109,3 +112,10 @@ Absolute pixels. 320×240 is the only target, there is no DPI to adapt to, and a
 factor would add arithmetic that never pays off. An 18px title plus a 17px softkey bar
 leaves 205px, which is five 38px rows and change — and there is a test asserting exactly
 that, because "the list looks empty" is the failure mode of getting it wrong.
+
+---
+
+Part of [epoc](../../README.md), a Rust SDK for Symbian S60 3rd Edition. MIT licensed; see
+`LICENSE` at the repository root. `symbian` in this crate's name is descriptive, not a claim
+on somebody else's trademark - the repository README says more. Written with AI assistance,
+and every hardware claim in it was measured rather than reasoned about.

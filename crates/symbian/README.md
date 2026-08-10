@@ -1,7 +1,11 @@
 # symbian
 
 Safe wrappers over the shim: owned handles that close themselves, `Result` instead of
-negative integers, and the retry loops that partial reads and writes need.
+negative integers, and the retry loops that partial reads and writes need. `no_std`,
+80 tests.
+
+Files, sockets, images, timers, randomness, a disk cache, Publish & Subscribe, and the
+device log - the platform, as something an application can call without writing `unsafe`.
 
 [`symbian-sys`](../symbian-sys) is the raw ABI. This is the layer an app should actually
 use.
@@ -176,3 +180,10 @@ later as a timeout, pointing at entirely the wrong thing.
 
 UDP is in the shim ABI but has no wrapper yet: `TcpStream`'s state machine does not fit a
 datagram socket, and a `UdpSocket` deserves its own rather than a flag.
+
+---
+
+Part of [epoc](../../README.md), a Rust SDK for Symbian S60 3rd Edition. MIT licensed; see
+`LICENSE` at the repository root. `symbian` in this crate's name is descriptive, not a claim
+on somebody else's trademark - the repository README says more. Written with AI assistance,
+and every hardware claim in it was measured rather than reasoned about.
