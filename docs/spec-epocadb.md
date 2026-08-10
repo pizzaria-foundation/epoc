@@ -44,7 +44,7 @@ on Symbian 9.3:
 │  ├── ring buffer              logs → TCP                       │
 │  └── UDP beacon               announces itself every 8 s       │
 │                                                               │
-│  apps/telegram/src/devbridge.rs   the application's side       │
+│  symbian-app/src/devbridge.rs     the application's side       │
 │                                                               │
 │  Driven from the event loop; the bridge is polled, never blocks.│
 │  No shim changes. Uses existing TcpStream, UdpSocket and fs.    │
@@ -270,7 +270,7 @@ the app's gitignored `api.conf`, and not otherwise:
 ```
 
 The app names its own feature in `app.conf` via `DEV_BRIDGE_FEATURE`. With the
-feature off, `apps/telegram/src/devbridge.rs` compiles to a zero-sized struct whose
+feature off, `crates/symbian-app/src/devbridge.rs` compiles to a zero-sized struct whose
 methods do nothing, `epocadb` is not a dependency at all, and the binary carries no
 listener.
 

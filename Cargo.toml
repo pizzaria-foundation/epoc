@@ -13,18 +13,16 @@ members = [
     "crates/symbian-audio",
     "crates/symbian-preview",
     "crates/symbian-crypto",
-    "apps/telegram",
-    "apps/telegram/proto",
     "examples/netprobe",
     "examples/selftest",
     "examples/imgprobe",
     "examples/audioprobe",
     "tools/preview",
 ]
-# apps/telegram/device is deliberately absent: it is a no_std staticlib carrying a
-# #[panic_handler], which collides with std's when cargo builds the test harness.
-# It is its own workspace root, built only for the ARM target. See its Cargo.toml.
-exclude = ["examples/selftest/device", "examples/netprobe/device", "apps/telegram/device"]
+# Every app's device crate is deliberately absent: a no_std staticlib carrying a
+# #[panic_handler] collides with std's when cargo builds the test harness, so each one is its
+# own workspace root, built only for the ARM target. See any device/Cargo.toml.
+exclude = ["examples/selftest/device", "examples/netprobe/device"]
 
 [workspace.package]
 version = "0.1.0"
@@ -46,8 +44,6 @@ symbian-preview = { path = "crates/symbian-preview" }
 symbian-crypto = { path = "crates/symbian-crypto" }
 opus = { path = "crates/opus" }
 epocadb = { path = "crates/epocadb" }
-tg-proto = { path = "apps/telegram/proto" }
-tg = { path = "apps/telegram" }
 selftest = { path = "examples/selftest" }
 netprobe = { path = "examples/netprobe" }
 

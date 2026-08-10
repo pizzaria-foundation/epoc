@@ -66,17 +66,13 @@ __pycache__/
 
 # ------------------------------------------------------------------ credentials
 
-# The Telegram application credentials. `api_id` and `api_hash` identify the
-# *application*, not the user, and come from my.telegram.org — but Telegram bans
-# pairs that leak into public repositories, so a committed one is a client that
-# stops working for everybody who uses it.
+# Every app's api.conf, wherever it sits. `tools/symbuild` sources this file if it is there
+# and passes what it finds to the build: application credentials for whatever service the app
+# talks to, and EPOCADB_HOST, which is one machine's LAN address and nobody else's build
+# setting. An app tracks `api.conf.example` instead, saying what belongs in it.
 #
-# `api.conf.example` is tracked and says what to put here. tools/symbuild reads
-# this file if it exists and passes the pair to the build; without it the binary
-# still compiles and `auth.sendCode` answers API_ID_INVALID, which is a legible
-# failure rather than a mysterious one.
-apps/telegram/api.conf
-
-# symmon's holds no credentials, only EPOCADB_HOST — but that is still one machine's LAN
-# address, which is nobody else's build setting.
-apps/symmon/api.conf
+# Matched by name rather than by path, because an app is a directory that can move — and did.
+# An app in its own repository should carry this same rule in its own .gitignore, since this
+# one stops applying the moment it leaves.
+api.conf
+**/api.conf

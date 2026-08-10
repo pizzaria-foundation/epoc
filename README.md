@@ -60,16 +60,18 @@ crates/
   symbian-crypto  hashes and ciphers the platform does not ship
   symbian-sim     the host simulator, generic over any App
   symbian-preview host-side contact sheets: any screen to a PNG
-  epocadb           the device side of the dev bridge: logs, push/pull, over two sockets
+  epocadb         the device side of the dev bridge: logs, push/pull, over two sockets
 
 shim/             the C++ side: everything that can Leave, and the event pump
 tools/            epoc (new, build, db, preview), mkfont, e32dump, e32prep, btpush, serve
-apps/telegram/    the reference app — moving to its own repository
 examples/         hello-gui (C++), keyprobe and libprobe (device diagnostics)
 docs/             start with getting-started.md
 ```
 
 Each crate has its own README with the decisions behind it.
+
+The reference application — a Telegram client that runs on the E72 — lives in its own
+repository at [Lab2021/tg](https://github.com/Lab2021/tg) and depends on this one by revision.
 
 ## Where to read next
 

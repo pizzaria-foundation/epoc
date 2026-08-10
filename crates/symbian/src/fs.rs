@@ -399,7 +399,7 @@ pub fn append_capped<F: Fs>(fs: &mut F, path: &Utf16Path, data: &[u8], cap: u64)
 /// are chopped into small pieces, and writes can be partial.
 ///
 /// Public, and not behind `#[cfg(test)]`, because the crates above this one need it too —
-/// the media cache in `apps/telegram` is file logic worth testing and there is no phone in a
+/// `crate::cache` is file logic worth testing and there is no phone in a
 /// `cargo test`. Same reasoning as [`crate::image::MemImages`]. It costs nothing in a device
 /// build: nothing references it, and `--gc-sections` sweeps it.
 pub struct MemFs {

@@ -667,28 +667,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tg"
-version = "0.1.0"
-dependencies = [
- "symbian",
- "symbian-app",
- "symbian-crypto",
- "symbian-gfx",
- "symbian-preview",
- "symbian-sim",
- "symbian-sys",
- "symbian-ui",
- "tg-proto",
-]
-
-[[package]]
-name = "tg-proto"
-version = "0.1.0"
-dependencies = [
- "symbian-crypto",
-]
-
-[[package]]
 name = "unicode-ident"
 version = "1.0.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
