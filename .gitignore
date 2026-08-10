@@ -61,6 +61,8 @@
 *.swp
 *~
 .DS_Store
+__pycache__/
+*.pyc
 
 # ------------------------------------------------------------------ credentials
 
@@ -74,3 +76,7 @@
 # still compiles and `auth.sendCode` answers API_ID_INVALID, which is a legible
 # failure rather than a mysterious one.
 apps/telegram/api.conf
+
+# symmon's holds no credentials, only EPOCADB_HOST — but that is still one machine's LAN
+# address, which is nobody else's build setting.
+apps/symmon/api.conf

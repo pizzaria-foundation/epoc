@@ -203,4 +203,11 @@ int64_t shim_unix_time(void)
     return static_cast<int64_t>(secs.Int());
     }
 
+int32_t shim_utc_offset(void)
+    {
+    /* Seconds east of UTC: positive for CET, negative for Brazil.
+     * Added to a UTC timestamp to get local wall-clock time. */
+    return User::UTCOffset().Int();
+    }
+
 } /* extern "C" */

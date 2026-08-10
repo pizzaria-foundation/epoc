@@ -1,0 +1,15 @@
+[package]
+name = "symbian-audio"
+description = "Ogg/Opus in, PCM and a playable RIFF/WAVE file out — what the handset's own codecs do not cover"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+# The decode-only libopus wrapper. It holds the FFI so this crate can stay
+# `#![forbid(unsafe_code)]`.
+opus = { workspace = true }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_vendor, values("symbian"))'] }

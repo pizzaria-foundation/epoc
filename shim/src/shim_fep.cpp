@@ -113,8 +113,16 @@ CShimFepEditor* gFepEditor = NULL;
 /* Which mechanism is live.
  *
  * Both are compiled in. SHIM_KEYBOARD_FEP advertises the editor below; SHIM_KEYBOARD_SCAN
- * is the scan-code table that is tested on hardware and works for letters and digits. */
+ * is the scan-code table that is tested on hardware and works for letters and digits.
+ *
+ * When SHIM_USE_FEP is defined at compile time, the editor is always created and the
+ * default is FEP — no Rust-side call needed. A call to shim_keyboard_mode(SHIM_KEYBOARD_SCAN)
+ * can still switch back at runtime for comparison. */
+#ifdef SHIM_USE_FEP
+TInt gKeyboardMode = SHIM_KEYBOARD_FEP;
+#else
 TInt gKeyboardMode = SHIM_KEYBOARD_SCAN;
+#endif
 
 CShimFepEditor::CShimFepEditor()
     : iCursor(0), iEditing(EFalse), iState(NULL), iStateUid(TUid::Null())

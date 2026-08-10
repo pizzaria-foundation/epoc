@@ -85,9 +85,31 @@ enum ShimEventKind {
     SHIM_EV_NET_READY = 25,
     /* A worker-thread job finished. `status` is what rust_work returned. */
     SHIM_EV_WORK_DONE = 30,
+    /* An image decode finished. `a` and `b` are the decoded width and height,
+     * which are the size the codec could actually deliver and not necessarily
+     * the size that was asked for — see shim_image_decode_start. Call
+     * shim_image_result to collect the pixels, then shim_image_close. */
+    SHIM_EV_IMAGE_DONE = 40,
+    /* An audio clip finished opening. `a` is its duration in milliseconds, `status` the
+     * Symbian error. `handle` is the open generation, which is what tells a caller that
+     * this belongs to the clip it just asked for and not to one already dismissed. */
+    SHIM_EV_AUDIO_OPENED = 41,
+    /* Playback ended. `status` is SHIM_OK for a clip that reached its end, KErrCancel
+     * when shim_audio_stop caused it, and a real error otherwise — notably
+     * SHIM_ERR_IN_USE, which arrives mid-playback when the ringtone takes the device.
+     * `d` carries the platform's raw code, since "ended" and "ended by underflow" are
+     * one outcome to a caller and two different facts in a probe report. */
+    SHIM_EV_AUDIO_DONE = 42,
+    /* A subscribed Publish & Subscribe property changed. `a` is the key, `c` the freshly
+     * read integer value. From shim_prop; the daemon uses it as its stop signal. */
+    SHIM_EV_PROP = 53,
     /* The app should exit; nothing may be queued after it. */
     SHIM_EV_QUIT = 90
 };
+
+/* Subtypes carried in `a` of SHIM_EV_APP_EVENT. */
+#define SHIM_APP_EV_LIST  0   /* running window-group set changed (launch/exit) */
+#define SHIM_APP_EV_FOCUS 1   /* foreground window group changed (app switch) */
 
 /* Deliberately POD and fixed-size so RunL() can push one without allocating and
  * without any chance of leaving. */
@@ -203,6 +225,10 @@ int32_t shim_probe_pixel_layout(uint32_t* out_word);
  * import library the linker sees. */
 int32_t shim_dll_present(const uint16_t* name, int32_t len);
 
+/* This process's own UID3 (the -DSHIM_APP_UID3 value), used as the Publish & Subscribe
+ * category an app publishes its own telemetry in. Zero if the build did not set it. */
+uint32_t shim_own_uid3(void);
+
 /* Fill `out` with entropy — NOT with random numbers.
  *
  * The distinction matters enough to be in the name of the thing. What comes back is a
@@ -292,6 +318,71 @@ uint64_t shim_now_us(void);
 /* Seconds since the Unix epoch, for message timestamps. The device clock drifts;
  * a networked app should correct against the server rather than trust this. */
 int64_t shim_unix_time(void);
+
+/* Seconds east of UTC (local minus UTC), from User::UTCOffset.
+ * Negative for the Americas, positive for Europe. */
+int32_t shim_utc_offset(void);
+
+/* ------------------------------------------------------------------ images --
+ * Decoding, through CImageDecoder — which handles whatever the device has a
+ * plugin for: JPEG, PNG, GIF and BMP on every S60 3rd handset.
+ *
+ * ASYNCHRONOUS, and that is not a preference. CImageDecoder::Convert is driven by
+ * an active object in the *calling* thread — the plugin self-completes to decode
+ * in slices, which is how it avoids monopolising the scheduler. Calling
+ * User::WaitForRequest on it from rust_step, which is itself a CIdle callback,
+ * therefore deadlocks: the scheduler cannot dispatch the decoder's RunL while we
+ * sit in the wait. It is not a slow path, it is a frozen phone.
+ *
+ * So decoding takes the shape everything else asynchronous here takes: start it,
+ * get SHIM_EV_IMAGE_DONE, collect the pixels.
+ *
+ * SIZE IS A REQUEST, NOT AN INSTRUCTION. The ICL only reduces by powers of two
+ * (1/1, 1/2, 1/4, 1/8, and only what the codec supports — JPEG usually all four,
+ * PNG usually none). max_w/max_h pick the largest reduction that still fits;
+ * the event reports what came out, which is never larger than the request but is
+ * rarely exactly it. Any final resampling is the caller's. */
+
+/* Dimensions without decoding pixels. Synchronous: this only parses the header,
+ * which is bounded work and does not go through Convert. */
+int32_t shim_image_probe(const uint16_t* path, int32_t path_len, int32_t* w, int32_t* h);
+
+/* Begin a decode to RGB565. Completion arrives as SHIM_EV_IMAGE_DONE carrying
+ * `*handle`, with the decoded width in `a` and height in `b`.
+ *
+ * _mem decodes from a buffer, which is what a download actually has. The buffer
+ * must stay put and unmodified until the event arrives — the decoder reads from it
+ * rather than copying, and the caller's Vec is the only owner. */
+int32_t shim_image_decode_start(const uint16_t* path, int32_t path_len,
+                                int32_t max_w, int32_t max_h, int32_t* handle);
+int32_t shim_image_decode_start_mem(const uint8_t* data, int32_t len,
+                                    int32_t max_w, int32_t max_h, int32_t* handle);
+
+/* Copy the decoded pixels out, after SHIM_EV_IMAGE_DONE reported success.
+ * `out_cap` is in pixels; SHIM_ERR_OVERFLOW if it is short of width*height.
+ * Fills `*w`/`*h` with the same values the event carried. */
+int32_t shim_image_result(int32_t handle, uint16_t* out, int32_t out_cap,
+                          int32_t* w, int32_t* h);
+
+/* Nine diagnostic integers about a decode, in this order:
+ *
+ *   0  state: 1 still pending, 2 completed
+ *   1  completion code, meaningful once state is 2
+ *   2  frames the decoder found, or -1 if it never got that far
+ *   3  native width      4  native height
+ *   5  power-of-two reduction chosen, or -1
+ *   6  bitmap width      7  bitmap height
+ *   8  1 while the request is still outstanding
+ *
+ * A poll rather than a log, because a decode that never completes emits no event and
+ * the shim has no channel of its own — the only way to learn anything about one is for
+ * the caller to ask. Writes min(cap, 9) values. */
+int32_t shim_image_describe(int32_t handle, int32_t* out, int32_t cap);
+
+/* Release the slot. Cancels an outstanding decode; safe on a handle that already
+ * completed, and safe on 0. Every successful _start needs one of these, or the
+ * slot and its bitmap leak. */
+void shim_image_close(int32_t handle);
 
 /* ---------------------------------------------------------------- sockets --
  * Every ESock operation is asynchronous — there are no synchronous variants of
@@ -441,6 +532,16 @@ int32_t shim_file_rename(const uint16_t* from, int32_t from_len,
                          const uint16_t* to, int32_t to_len);
 void shim_file_close(int32_t handle);
 
+/* Create a directory and any missing parents (RFs::MkDirAll). An already-existing
+ * directory is success. The path should end in a backslash. Synchronous. */
+int32_t shim_mkdir(const uint16_t* path, int32_t path_len);
+
+/* List the file entries (not subdirectories) of a directory. `buf` is filled with the
+ * entry names as NUL-separated UTF-16 units, and `count` receives how many fit. A
+ * directory that does not exist is not an error — it lists as zero entries. Synchronous,
+ * like the rest of the file API. */
+int32_t shim_dir_list(const uint16_t* path, int32_t path_len, uint16_t* buf, int32_t cap, int32_t* count);
+
 /* ------------------------------------------------------------------- alloc --
  * None of these can leave, so none of them TRAP. That is the point: the shim
  * calls User::Alloc and User::ReAlloc, never the AllocL/ReAllocL variants, so an
@@ -460,6 +561,70 @@ void shim_panic(const uint8_t* file, uint32_t file_len, uint32_t line);
  * to nothing useful on a retail device but is the only way to see anything from
  * a process with no console. */
 void shim_debug(const uint16_t* text, int32_t len);
+
+/* ---------------------------------------------------------------- process --
+ * Launch and query a process — for a GUI app starting its own headless daemon (see
+ * USE_SHIM_DAEMON). Compiled in only when the app sets USE_PROC. No capability is required
+ * to create a process from an executable already installed in \sys\bin. */
+/* Create a process from a full UTF-16 path (e.g. "!:\\sys\\bin\\myappd.exe"), resume it,
+ * and wait for its RProcess::Rendezvous. SHIM_OK once the child has signalled it is up;
+ * the child's own capabilities, not the caller's, govern what it may then do. */
+int32_t shim_process_start(const uint16_t* path, int32_t path_len);
+/* Whether a process built from UID3 is running now: 1 yes, 0 no, negative on error. */
+int32_t shim_process_running(uint32_t uid3);
+
+/* ------------------------------------------------------------------ memory --
+ * How much room is left, for an app that wants to know its own. Compiled in only when the
+ * app sets USE_MEM.
+ *
+ * Cheap, and no capability: HAL for the device-wide RAM figures and User::AllocSize for
+ * this process's own heap. Values are in KiB (a device has ~128 MiB,
+ * which is 131072 KiB — comfortably inside an i32), or a negative Symbian error. */
+int32_t shim_mem_free_kb(void);
+int32_t shim_mem_total_kb(void);
+int32_t shim_heap_used_kb(void);
+
+/* ------------------------------------------------- Publish & Subscribe (P&S) --
+ * A one-integer control channel between the controller and the daemon. Compiled in only
+ * when the app sets USE_PROP. The category is the app's own SecureId, so defining and
+ * writing need no capability; a subscriber posts SHIM_EV_PROP on every change. */
+int32_t shim_prop_define(uint32_t category, uint32_t key);
+int32_t shim_prop_set(uint32_t category, uint32_t key, int32_t value);
+int32_t shim_prop_get(uint32_t category, uint32_t key, int32_t* out);
+int32_t shim_prop_subscribe(uint32_t category, uint32_t key);
+void    shim_prop_unsubscribe(uint32_t category, uint32_t key);
+
+/* ------------------------------------------------------------------- audio -- */
+/* Plays one sound file at a time through the platform's media framework.
+ *
+ * Format: what MMF ships as standard is AU, WAV and raw PCM, plus whatever the handset
+ * adds (AMR, AAC, MP3). Notably NOT Opus — `mmf/common/mmffourcc.h` has no code for it,
+ * so a Telegram voice message must be decoded to PCM in Rust and handed here wrapped in
+ * a RIFF/WAVE container. The container is not optional: raw PCM is the one standard
+ * format the plugin resolver cannot identify from its header.
+ *
+ * One clip at a time, deliberately: the sound device is a single exclusive resource
+ * that the platform arbitrates between processes, and a second player in one process
+ * fails with SHIM_ERR_IN_USE. Opening a new clip replaces whatever was open.
+ *
+ * Opening is asynchronous — a SHIM_EV_AUDIO_OPENED arrives with the duration, and only
+ * then is shim_audio_play meaningful. Requires no capability. */
+int32_t shim_audio_open_file(const uint16_t* path, int32_t len);
+int32_t shim_audio_play(void);
+/* Keeps the position, so a following play resumes rather than restarts. */
+int32_t shim_audio_pause(void);
+/* Ends playback and pushes SHIM_EV_AUDIO_DONE with KErrCancel. The push is this side's
+ * doing: the platform does not call back after a stop, so a caller waiting for the
+ * event it gets on a natural end would wait forever. */
+int32_t shim_audio_stop(void);
+/* Polled rather than pushed — a position event per frame would cost more than reading
+ * it when a progress bar is actually being drawn. Zero when nothing is open. */
+int32_t shim_audio_position_ms(void);
+int32_t shim_audio_duration_ms(void);
+/* Percent of the device maximum, clamped. The platform's own scale is device-specific
+ * and not a percentage, so the conversion happens on the shim side. */
+int32_t shim_audio_set_volume(int32_t percent);
+int32_t shim_audio_close(void);
 
 #ifdef __cplusplus
 }

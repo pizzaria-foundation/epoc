@@ -32,4 +32,17 @@ int32_t shim_dll_present(const uint16_t* name, int32_t len)
     return err;
     }
 
+/* This process's own UID3, the value symbuild passes as -DSHIM_APP_UID3. The Rust runtime
+ * uses it as its Publish & Subscribe category, so an app can publish telemetry (present
+ * stats) in its own category with no capability, and a reader can pick it up from another
+ * process — reading a foreign category is free. Zero if the build did not set it. */
+uint32_t shim_own_uid3(void)
+    {
+#ifdef SHIM_APP_UID3
+    return (uint32_t) SHIM_APP_UID3;
+#else
+    return 0;
+#endif
+    }
+
 } /* extern "C" */

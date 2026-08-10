@@ -1,6 +1,8 @@
-# A Rust SDK for Symbian S60 3rd Edition
+# epoc — a Rust SDK for Symbian S60 3rd Edition
 
 Write applications in Rust for a 2009 Nokia. They run on the phone.
+
+*EPOC is what this operating system was called before it was called Symbian.*
 
 Target: **Nokia E72** — Symbian OS 9.3, S60 3rd Ed FP2, ARM1136JF-S at 600 MHz,
 320×240 landscape QVGA, hardware QWERTY, no touchscreen, ~45 MB free RAM.
@@ -8,9 +10,9 @@ Target: **Nokia E72** — Symbian OS 9.3, S60 3rd Ed FP2, ARM1136JF-S at 600 MHz
 Host: **aarch64 Linux**. No Wine, no x86 emulation, no Windows, anywhere in the chain.
 
 ```
-tools/symnew myapp                     # scaffold a project that builds and runs
+tools/epoc new myapp                   # scaffold a project that builds and runs
 cargo run -p myapp --example sim       # see it on your desktop, right now
-tools/symbuild apps/myapp              # → apps/myapp/build/myapp.sis
+tools/epoc build apps/myapp            # → apps/myapp/build/myapp.sis
 ```
 
 That third command produces an installable package. The first two need no phone.
@@ -28,13 +30,14 @@ and takes input from the full QWERTY.
 | Timers, clock | ✅ |
 | Files, atomic save | ✅ `symbian::fs` — the app's data cage, no capability needed |
 | Host simulator | ✅ `symbian-sim` — the real app in a window |
-| Project scaffolding | ✅ `tools/symnew` |
+| Project scaffolding | ✅ `epoc new` |
 | TCP, DNS | ⬜ declared in the ABI, not implemented |
 | UDP, HTTP | ⬜ not started |
-| Crypto | ⬜ not started. See [device notes](docs/device-notes.md) on what the platform does and does not give you |
+| Crypto | ✅ `symbian-crypto` — SHA-1/256/512, HMAC, AES, IGE, bignum, PBKDF2. See [device notes](docs/device-notes.md) on why none of it could come from the platform |
+| Device logging | ✅ `symbian::log!`, switched by `DEBUG=` in `app.conf`; file on the phone plus a live stream to the host |
 | Image decode | ⬜ no PNG or JPEG |
 
-164 tests, all on the host.
+712 tests, all on the host.
 
 ## What you can build today
 
@@ -49,15 +52,19 @@ Not yet: anything that talks to a network.
 ```
 crates/
   symbian-gfx     the rasterizer. no_std, no unsafe, no allocation while drawing
-  symbian-ui      widgets and the design system: surfaces, icons, five palettes
+  symbian-ui      widgets and the design system: surfaces, icons, five palettes, the viewer
   symbian-sys     the raw FFI boundary, mirroring shim/inc/symbian_shim.h
-  symbian         safe wrappers — files today, sockets when they exist
-  symbian-app     the device entry points, as one macro
+  symbian         safe wrappers — files, sockets, the disk cache, and the log
+  symbian-app     the device entry points as one macro, and the dev bridge
+  symbian-audio   Ogg/Opus in, playable RIFF/WAVE out — codecs the handset lacks
+  symbian-crypto  hashes and ciphers the platform does not ship
   symbian-sim     the host simulator, generic over any App
+  symbian-preview host-side contact sheets: any screen to a PNG
+  epocadb           the device side of the dev bridge: logs, push/pull, over two sockets
 
 shim/             the C++ side: everything that can Leave, and the event pump
-tools/            symnew, symbuild, mkfont, e32dump, e32prep, btpush, serve
-apps/telegram/    the reference app
+tools/            epoc (new, build, db, preview), mkfont, e32dump, e32prep, btpush, serve
+apps/telegram/    the reference app — moving to its own repository
 examples/         hello-gui (C++), keyprobe and libprobe (device diagnostics)
 docs/             start with getting-started.md
 ```
@@ -72,6 +79,7 @@ Each crate has its own README with the decisions behind it.
 | [docs/architecture.md](docs/architecture.md) | Why there is a C++ shim, and what crosses the boundary |
 | [docs/device-notes.md](docs/device-notes.md) | Everything the hardware taught us that no document says |
 | [docs/build-flow.md](docs/build-flow.md) | The pipeline, stage by stage |
+| [docs/epocadb.md](docs/epocadb.md) | The dev bridge: live logs, file push/pull, the wire protocol and device API |
 
 ## The one-paragraph version of how it works
 

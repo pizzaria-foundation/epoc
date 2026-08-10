@@ -92,6 +92,17 @@ TInt Fs(RFs*& out)
         const TInt err = gFs.Connect();
         if (err != KErrNone)
             return err;
+        /* Shareable across threads in this process.
+         *
+         * Needed by the image decoder, which runs the codec on a thread the ICL creates
+         * (EOptionAlwaysThread, see shim_image.cpp) and hands it this session. A session
+         * that is not shared is bound to the thread that connected it, and a codec thread
+         * touching it gets a bad-handle panic rather than an error return.
+         *
+         * The result is deliberately ignored: every other user of this session is
+         * single-threaded and works either way, so a refusal here should not stop the app
+         * from opening its own files. */
+        (void) gFs.ShareAuto();
         gFsOpen = ETrue;
         }
     out = &gFs;
@@ -112,6 +123,14 @@ TUint FileMode(int32_t mode)
     }
 
 } /* namespace */
+
+/* The one session, for the rest of the shim. Declared in shim_priv.h; the image
+ * decoder is the caller. Kept as a thin forward to Fs() so there is still exactly one
+ * place that decides when to connect. */
+TInt ShimFsSession(RFs*& aOut)
+    {
+    return Fs(aOut);
+    }
 
 extern "C" {
 
@@ -327,6 +346,65 @@ int32_t shim_file_rename(const uint16_t* from, int32_t from_len,
         return derr;
 
     return fs->Rename(src, dst);
+    }
+
+int32_t shim_mkdir(const uint16_t* path, int32_t path_len)
+    {
+    if (!path || path_len <= 0)
+        return SHIM_ERR_ARGUMENT;
+    RFs* fs = NULL;
+    const TInt err = Fs(fs);
+    if (err != KErrNone)
+        return err;
+    TPtrC16 p(reinterpret_cast<const TUint16*>(path), path_len);
+    /* MkDirAll creates every missing component. An existing directory is success as far
+     * as the caller cares — it wanted the directory to be there, and it is. */
+    const TInt rc = fs->MkDirAll(p);
+    return (rc == KErrNone || rc == KErrAlreadyExists) ? SHIM_OK : rc;
+    }
+
+int32_t shim_dir_list(const uint16_t* path, int32_t path_len, uint16_t* buf, int32_t cap, int32_t* count)
+    {
+    if (count)
+        *count = 0;
+    if (!path || path_len <= 0 || !buf || cap <= 0)
+        return SHIM_ERR_ARGUMENT;
+    RFs* fs = NULL;
+    const TInt err = Fs(fs);
+    if (err != KErrNone)
+        return err;
+
+    TPtrC16 dir(reinterpret_cast<const TUint16*>(path), path_len);
+    CDir* entries = NULL;
+    /* Synchronous listing; files only via the sort/attribute filter below. */
+    const TInt gerr = fs->GetDir(dir, KEntryAttNormal | KEntryAttHidden, ESortByName, entries);
+    if (gerr != KErrNone)
+        {
+        /* A directory that is not there yet is not a failure — nothing to list. */
+        return (gerr == KErrNotFound || gerr == KErrPathNotFound) ? SHIM_OK : gerr;
+        }
+
+    TInt pos = 0;    /* units written into buf */
+    TInt n = 0;
+    const TInt total = entries->Count();
+    for (TInt i = 0; i < total; i++)
+        {
+        const TEntry& e = (*entries)[i];
+        if (e.IsDir())
+            continue;
+        const TDesC& name = e.iName;
+        /* name + a NUL separator must fit, or stop and report what did. */
+        if (pos + name.Length() + 1 > cap)
+            break;
+        for (TInt j = 0; j < name.Length(); j++)
+            buf[pos++] = name[j];
+        buf[pos++] = 0;
+        n++;
+        }
+    delete entries;
+    if (count)
+        *count = n;
+    return SHIM_OK;
     }
 
 void shim_file_close(int32_t handle)

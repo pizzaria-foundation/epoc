@@ -141,6 +141,31 @@ pub struct Located<'a> {
     pub bytes: Option<&'a [u8]>,
 }
 
+/// A field by position, or an absent one when the index is past the constructor's fields.
+///
+/// # Why this is not just `f[i]`
+///
+/// Field indices are positional constants tied to one constructor, and a constructor family
+/// shares a Rust `enum` variant while *not* sharing field positions. `channel` has
+/// `access_hash` at index 31; `channelForbidden` is the same kind of peer with eight fields
+/// in total. Reading the first index out of the second panicked the app on every chat list
+/// that contained an inaccessible channel — see the note in `chats::parse_named`.
+///
+/// Absent rather than an error, because that is what the callers already handle: every
+/// reader here is `Option`-returning and every call site already has a default for a field
+/// the flags left out. A missing name is a row that says `#1234`; a panic is an application
+/// that closes itself.
+///
+/// This does not make a wrong index correct — it makes it a wrong *value* instead of a dead
+/// process, which is the difference between a bug someone can report and one that reports
+/// nothing.
+pub fn field<'a>(fields: &[Located<'a>], i: usize) -> Located<'a> {
+    match fields.get(i) {
+        Some(f) => *f,
+        None => Located { kind: K_FLAGS, bytes: None },
+    }
+}
+
 impl<'a> Walker<'a> {
     pub fn new(buf: &'a [u8]) -> Self {
         Walker { r: Reader::new(buf) }

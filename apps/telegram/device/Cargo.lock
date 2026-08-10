@@ -14,7 +14,9 @@ dependencies = [
 name = "symbian-app"
 version = "0.1.0"
 dependencies = [
+ "symbian",
  "symbian-gfx",
+ "symbian-keys",
  "symbian-sys",
  "symbian-ui",
 ]
@@ -25,6 +27,10 @@ version = "0.1.0"
 
 [[package]]
 name = "symbian-gfx"
+version = "0.1.0"
+
+[[package]]
+name = "symbian-keys"
 version = "0.1.0"
 
 [[package]]
@@ -44,6 +50,7 @@ name = "tg"
 version = "0.1.0"
 dependencies = [
  "symbian",
+ "symbian-app",
  "symbian-crypto",
  "symbian-sys",
  "symbian-ui",

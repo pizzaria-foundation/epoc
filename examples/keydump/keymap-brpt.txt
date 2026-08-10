@@ -1,0 +1,269 @@
+# Measured on a Brazilian Nokia E72-2 (RM-530) by examples/keydump, 2026-08-09.
+# This is a real device measurement. tools/testdata/keydump-synthetic.txt is the fabricated
+# one; do not confuse them.
+# keydump 1 - the handset's own qwerty keymap, via CPtiEngine
+# K <ptikey> <case> <n> <ucs2>... ; 0xF000..0xF005 marks a dead key, mark follows
+# N <char> <ptikey> <case-index>  ; numeric-mode bindings
+
+# language brazilian-portuguese id 76
+# activate rc 0
+K 0031 lower 1 0072
+K 0031 upper 1 0052
+K 0031 chr-lower 1 0072
+K 0031 chr-upper 1 0052
+K 0032 lower 1 0074
+K 0032 upper 1 0054
+K 0032 chr-lower 1 0074
+K 0032 chr-upper 1 0054
+K 0033 lower 1 0079
+K 0033 upper 1 0059
+K 0033 chr-lower 1 0079
+K 0033 chr-upper 1 0059
+K 0034 lower 1 0066
+K 0034 upper 1 0046
+K 0034 chr-lower 1 0066
+K 0034 chr-upper 1 0046
+K 0035 lower 1 0067
+K 0035 upper 1 0047
+K 0035 chr-lower 1 0067
+K 0035 chr-upper 1 0047
+K 0036 lower 1 0068
+K 0036 upper 1 0048
+K 0036 chr-lower 1 0068
+K 0036 chr-upper 1 0048
+K 0037 lower 1 0076
+K 0037 upper 1 0056
+K 0037 chr-lower 1 0076
+K 0037 chr-upper 1 0056
+K 0038 lower 1 0062
+K 0038 upper 1 0042
+K 0038 chr-lower 1 0062
+K 0038 chr-upper 1 0042
+K 0039 lower 2 006E 00F1
+K 0039 upper 2 004E 00D1
+K 0039 chr-lower 2 006E 00F1
+K 0039 chr-upper 2 004E 00D1
+K 0030 lower 1 006D
+K 0030 upper 1 004D
+K 0030 chr-lower 1 006D
+K 0030 chr-upper 1 004D
+K 0041 lower 8 0061 00E3 00E1 00E0 00E2 00AA 00E4 00E6
+K 0041 upper 8 0041 00C3 00C1 00C0 00C2 00AA 00C4 00C6
+K 0041 chr-lower 8 0061 00E3 00E1 00E0 00E2 00AA 00E4 00E6
+K 0041 chr-upper 8 0041 00C3 00C1 00C0 00C2 00AA 00C4 00C6
+K 0043 lower 2 0063 00E7
+K 0043 upper 2 0043 00C7
+K 0043 chr-lower 2 0063 00E7
+K 0043 chr-upper 2 0043 00C7
+K 0044 lower 1 0064
+K 0044 upper 1 0044
+K 0044 chr-lower 1 0064
+K 0044 chr-upper 1 0044
+K 0045 lower 5 0065 00E9 00EA 00E8 00EB
+K 0045 upper 5 0045 00C9 00CA 00C8 00CB
+K 0045 chr-lower 5 0065 00E9 00EA 00E8 00EB
+K 0045 chr-upper 5 0045 00C9 00CA 00C8 00CB
+K 0049 lower 5 0069 00ED 00EE 00EC 00EF
+K 0049 upper 5 0049 00CD 00CE 00CC 00CF
+K 0049 chr-lower 5 0069 00ED 00EE 00EC 00EF
+K 0049 chr-upper 5 0049 00CD 00CE 00CC 00CF
+K 004B lower 1 006B
+K 004B upper 1 004B
+K 004B chr-lower 1 006B
+K 004B chr-upper 1 004B
+K 004C lower 1 006C
+K 004C upper 1 004C
+K 004C chr-lower 1 006C
+K 004C chr-upper 1 004C
+K 004F lower 6 006F 00F3 00F5 00F4 00BA 00F2
+K 004F upper 6 004F 00D3 00D5 00D4 00BA 00D2
+K 004F chr-lower 6 006F 00F3 00F5 00F4 00BA 00F2
+K 004F chr-upper 6 004F 00D3 00D5 00D4 00BA 00D2
+K 0050 lower 1 0070
+K 0050 upper 1 0050
+K 0050 chr-lower 1 0070
+K 0050 chr-upper 1 0050
+K 0051 lower 1 0071
+K 0051 upper 1 0051
+K 0051 chr-lower 1 0071
+K 0051 chr-upper 1 0051
+K 0053 lower 2 0073 00DF
+K 0053 upper 1 0053
+K 0053 chr-lower 2 0073 00DF
+K 0053 chr-upper 1 0053
+K 0057 lower 1 0077
+K 0057 upper 1 0057
+K 0057 chr-lower 1 0077
+K 0057 chr-upper 1 0057
+K 0058 lower 1 0078
+K 0058 upper 1 0058
+K 0058 chr-lower 1 0078
+K 0058 chr-upper 1 0058
+K 005A lower 1 007A
+K 005A upper 1 005A
+K 005A chr-lower 1 007A
+K 005A chr-upper 1 005A
+K 0082 lower 1 002C
+K 0082 upper 1 003B
+K 0082 chr-lower 1 002C
+K 0082 chr-upper 1 003B
+K 0079 lower 1 00E7
+K 0079 upper 1 00C7
+K 0079 chr-lower 1 00E7
+K 0079 chr-upper 1 00C7
+K 007D lower 1 002E
+K 007D upper 1 003A
+K 007D chr-lower 1 002E
+K 007D chr-upper 1 003A
+K 007A lower 2 F001 00B4
+K 007A upper 2 F002 0060
+K 007A chr-lower 2 F001 00B4
+K 007A chr-upper 2 F002 0060
+K 007F lower 1 006A
+K 007F upper 1 004A
+K 007F chr-lower 1 006A
+K 007F chr-upper 1 004A
+K 007E lower 2 F003 007E
+K 007E upper 2 F004 005E
+K 007E chr-lower 2 F003 007E
+K 007E chr-upper 2 F004 005E
+# numeric bindings 15
+N 002A 002A 4
+N 0031 0031 4
+N 0032 0032 4
+N 0033 0033 4
+N 0034 0034 4
+N 0035 0035 4
+N 0036 0036 4
+N 0037 0037 4
+N 0038 0038 4
+N 0039 0039 4
+N 0030 0030 4
+N 0023 007F 4
+N 002B 0049 4
+N 0070 0050 0
+N 0077 0057 0
+
+# language english id 1
+# activate rc 0
+K 0031 lower 1 0072
+K 0031 upper 1 0052
+K 0031 chr-lower 1 0072
+K 0031 chr-upper 1 0052
+K 0032 lower 1 0074
+K 0032 upper 1 0054
+K 0032 chr-lower 1 0074
+K 0032 chr-upper 1 0054
+K 0033 lower 1 0079
+K 0033 upper 1 0059
+K 0033 chr-lower 1 0079
+K 0033 chr-upper 1 0059
+K 0034 lower 1 0066
+K 0034 upper 1 0046
+K 0034 chr-lower 1 0066
+K 0034 chr-upper 1 0046
+K 0035 lower 1 0067
+K 0035 upper 1 0047
+K 0035 chr-lower 1 0067
+K 0035 chr-upper 1 0047
+K 0036 lower 1 0068
+K 0036 upper 1 0048
+K 0036 chr-lower 1 0068
+K 0036 chr-upper 1 0048
+K 0037 lower 1 0076
+K 0037 upper 1 0056
+K 0037 chr-lower 1 0076
+K 0037 chr-upper 1 0056
+K 0038 lower 1 0062
+K 0038 upper 1 0042
+K 0038 chr-lower 1 0062
+K 0038 chr-upper 1 0042
+K 0039 lower 2 006E 00F1
+K 0039 upper 2 004E 00D1
+K 0039 chr-lower 2 006E 00F1
+K 0039 chr-upper 2 004E 00D1
+K 0030 lower 1 006D
+K 0030 upper 1 004D
+K 0030 chr-lower 1 006D
+K 0030 chr-upper 1 004D
+K 0041 lower 7 0061 00E0 00E2 00E6 00E1 00E3 00E4
+K 0041 upper 7 0041 00C0 00C2 00C6 00C1 00C3 00C4
+K 0041 chr-lower 7 0061 00E0 00E2 00E6 00E1 00E3 00E4
+K 0041 chr-upper 7 0041 00C0 00C2 00C6 00C1 00C3 00C4
+K 0043 lower 2 0063 00E7
+K 0043 upper 2 0043 00C7
+K 0043 chr-lower 2 0063 00E7
+K 0043 chr-upper 2 0043 00C7
+K 0044 lower 1 0064
+K 0044 upper 1 0044
+K 0044 chr-lower 1 0064
+K 0044 chr-upper 1 0044
+K 0045 lower 5 0065 00E8 00E9 00EA 00EB
+K 0045 upper 5 0045 00C8 00C9 00CA 00CB
+K 0045 chr-lower 5 0065 00E8 00E9 00EA 00EB
+K 0045 chr-upper 5 0045 00C8 00C9 00CA 00CB
+K 0049 lower 5 0069 00EE 00EF 00EC 00ED
+K 0049 upper 5 0049 00CE 00CF 00CC 00CD
+K 0049 chr-lower 5 0069 00EE 00EF 00EC 00ED
+K 0049 chr-upper 5 0049 00CE 00CF 00CC 00CD
+K 004B lower 1 006B
+K 004B upper 1 004B
+K 004B chr-lower 1 006B
+K 004B chr-upper 1 004B
+K 004C lower 1 006C
+K 004C upper 1 004C
+K 004C chr-lower 1 006C
+K 004C chr-upper 1 004C
+K 004F lower 5 006F 00F3 00F4 00F2 00F5
+K 004F upper 5 004F 00D3 00D4 00D2 00D5
+K 004F chr-lower 5 006F 00F3 00F4 00F2 00F5
+K 004F chr-upper 5 004F 00D3 00D4 00D2 00D5
+K 0050 lower 1 0070
+K 0050 upper 1 0050
+K 0050 chr-lower 1 0070
+K 0050 chr-upper 1 0050
+K 0051 lower 1 0071
+K 0051 upper 1 0051
+K 0051 chr-lower 1 0071
+K 0051 chr-upper 1 0051
+K 0053 lower 2 0073 00DF
+K 0053 upper 1 0053
+K 0053 chr-lower 2 0073 00DF
+K 0053 chr-upper 1 0053
+K 0057 lower 1 0077
+K 0057 upper 1 0057
+K 0057 chr-lower 1 0077
+K 0057 chr-upper 1 0057
+K 0058 lower 1 0078
+K 0058 upper 1 0058
+K 0058 chr-lower 1 0078
+K 0058 chr-upper 1 0058
+K 005A lower 1 007A
+K 005A upper 1 005A
+K 005A chr-lower 1 007A
+K 005A chr-upper 1 005A
+K 0082 lower 1 002C
+K 0082 upper 1 003B
+K 0082 chr-lower 1 002C
+K 0082 chr-upper 1 003B
+K 0079 lower 1 00E7
+K 0079 upper 1 00C7
+K 0079 chr-lower 1 00E7
+K 0079 chr-upper 1 00C7
+K 007D lower 1 002E
+K 007D upper 1 003A
+K 007D chr-lower 1 002E
+K 007D chr-upper 1 003A
+K 007A lower 2 F001 00B4
+K 007A upper 2 F002 0060
+K 007A chr-lower 2 F001 00B4
+K 007A chr-upper 2 F002 0060
+K 007F lower 1 006A
+K 007F upper 1 004A
+K 007F chr-lower 1 006A
+K 007F chr-upper 1 004A
+K 007E lower 2 F003 007E
+K 007E upper 2 F004 005E
+K 007E chr-lower 2 F003 007E
+K 007E chr-upper 2 F004 005E
+# end

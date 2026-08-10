@@ -578,6 +578,74 @@ pub const MESSAGE_OUT: usize = 1;
 pub const MESSAGE_PEER_ID: usize = 21;
 pub const MESSAGE_DATE: usize = 28;
 pub const MESSAGE_MESSAGE: usize = 29;
+pub const MESSAGE_MEDIA: usize = 30;
+
+/// `messageMediaPhoto#e216eb63`
+pub const MESSAGEMEDIAPHOTO_CTOR: u32 = 0xe216eb63;
+pub const MESSAGEMEDIAPHOTO_PHOTO: usize = 3;
+
+/// `messageMediaDocument#52d8ccd9`
+pub const MESSAGEMEDIADOCUMENT_CTOR: u32 = 0x52d8ccd9;
+pub const MESSAGEMEDIADOCUMENT_DOCUMENT: usize = 6;
+pub const MESSAGEMEDIADOCUMENT_VOICE: usize = 5;
+
+/// `photo#fb197a65`
+pub const PHOTO_CTOR: u32 = 0xfb197a65;
+pub const PHOTO_ID: usize = 2;
+pub const PHOTO_ACCESS_HASH: usize = 3;
+pub const PHOTO_FILE_REFERENCE: usize = 4;
+pub const PHOTO_SIZES: usize = 6;
+pub const PHOTO_DC_ID: usize = 8;
+
+/// `document#8fd4c4d8`
+pub const DOCUMENT_CTOR: u32 = 0x8fd4c4d8;
+pub const DOCUMENT_ID: usize = 1;
+pub const DOCUMENT_ACCESS_HASH: usize = 2;
+pub const DOCUMENT_FILE_REFERENCE: usize = 3;
+pub const DOCUMENT_MIME_TYPE: usize = 5;
+pub const DOCUMENT_SIZE: usize = 6;
+pub const DOCUMENT_THUMBS: usize = 7;
+pub const DOCUMENT_DC_ID: usize = 9;
+pub const DOCUMENT_ATTRIBUTES: usize = 10;
+
+/// `photoSize#75c78e60`
+pub const PHOTOSIZE_CTOR: u32 = 0x75c78e60;
+pub const PHOTOSIZE_TYPE: usize = 0;
+pub const PHOTOSIZE_W: usize = 1;
+pub const PHOTOSIZE_H: usize = 2;
+pub const PHOTOSIZE_SIZE: usize = 3;
+
+/// `photoCachedSize#021e1ad6`
+pub const PHOTOCACHEDSIZE_CTOR: u32 = 0x021e1ad6;
+pub const PHOTOCACHEDSIZE_TYPE: usize = 0;
+pub const PHOTOCACHEDSIZE_W: usize = 1;
+pub const PHOTOCACHEDSIZE_H: usize = 2;
+pub const PHOTOCACHEDSIZE_BYTES: usize = 3;
+
+/// `photoStrippedSize#e0b0bc2e`
+pub const PHOTOSTRIPPEDSIZE_CTOR: u32 = 0xe0b0bc2e;
+pub const PHOTOSTRIPPEDSIZE_TYPE: usize = 0;
+pub const PHOTOSTRIPPEDSIZE_BYTES: usize = 1;
+
+/// `photoSizeProgressive#fa3efb95`
+pub const PHOTOSIZEPROGRESSIVE_CTOR: u32 = 0xfa3efb95;
+pub const PHOTOSIZEPROGRESSIVE_TYPE: usize = 0;
+pub const PHOTOSIZEPROGRESSIVE_W: usize = 1;
+pub const PHOTOSIZEPROGRESSIVE_H: usize = 2;
+
+/// `documentAttributeAudio#9852f9c6`
+pub const DOCUMENTATTRIBUTEAUDIO_CTOR: u32 = 0x9852f9c6;
+pub const DOCUMENTATTRIBUTEAUDIO_VOICE: usize = 1;
+pub const DOCUMENTATTRIBUTEAUDIO_DURATION: usize = 2;
+pub const DOCUMENTATTRIBUTEAUDIO_WAVEFORM: usize = 5;
+
+/// `documentAttributeFilename#15590068`
+pub const DOCUMENTATTRIBUTEFILENAME_CTOR: u32 = 0x15590068;
+pub const DOCUMENTATTRIBUTEFILENAME_FILE_NAME: usize = 0;
+
+/// `documentAttributeSticker#6319d612`
+pub const DOCUMENTATTRIBUTESTICKER_CTOR: u32 = 0x6319d612;
+pub const DOCUMENTATTRIBUTESTICKER_ALT: usize = 2;
 
 /// `messageService#7a800e0a`
 pub const MESSAGESERVICE_CTOR: u32 = 0x7a800e0a;
@@ -599,6 +667,7 @@ pub const DIALOG_UNREAD_COUNT: usize = 8;
 /// `user#b1b8cc83`
 pub const USER_CTOR: u32 = 0xb1b8cc83;
 pub const USER_ID: usize = 32;
+pub const USER_ACCESS_HASH: usize = 33;
 pub const USER_FIRST_NAME: usize = 34;
 pub const USER_LAST_NAME: usize = 35;
 pub const USER_SELF: usize = 1;
@@ -611,6 +680,7 @@ pub const CHAT_TITLE: usize = 8;
 /// `channel#d49f34c6`
 pub const CHANNEL_CTOR: u32 = 0xd49f34c6;
 pub const CHANNEL_ID: usize = 30;
+pub const CHANNEL_ACCESS_HASH: usize = 31;
 pub const CHANNEL_TITLE: usize = 32;
 
 /// `chatForbidden#6592a1a7`
@@ -621,6 +691,7 @@ pub const CHATFORBIDDEN_TITLE: usize = 1;
 /// `channelForbidden#17d493d5`
 pub const CHANNELFORBIDDEN_CTOR: u32 = 0x17d493d5;
 pub const CHANNELFORBIDDEN_ID: usize = 4;
+pub const CHANNELFORBIDDEN_ACCESS_HASH: usize = 5;
 pub const CHANNELFORBIDDEN_TITLE: usize = 6;
 
 /// `peerUser#59511722`

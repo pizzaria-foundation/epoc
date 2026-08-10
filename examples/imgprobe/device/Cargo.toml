@@ -1,0 +1,26 @@
+# Its own workspace root, and it has to be: a crate that defines #[panic_handler] cannot be
+# built for the host at all, because cargo links the test harness against std, which already
+# defines one. Excluding it keeps `cargo test --workspace` green.
+[workspace]
+
+[package]
+name = "imgprobe-device"
+description = "Device entry point for imgprobe"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["staticlib"]
+
+[dependencies]
+imgprobe = { path = ".." }
+symbian-app = { path = "../../../crates/symbian-app" }
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true
+debug = false
+overflow-checks = false

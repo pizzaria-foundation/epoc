@@ -1,4 +1,4 @@
-# Its own workspace root, for the same reason apps/telegram/device is: a crate that
+# Its own workspace root, like every device crate: a crate that
 # defines #[panic_handler] cannot be built for the host at all, because cargo links
 # the test harness against std, which already defines it.
 [workspace]

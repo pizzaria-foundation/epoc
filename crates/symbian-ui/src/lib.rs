@@ -50,6 +50,7 @@ pub mod input;
 pub mod list;
 pub mod paint;
 pub mod theme;
+pub mod viewer;
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
 pub mod tokens;
@@ -61,9 +62,11 @@ pub use input::{Handled, Key, KeyEvent, Modifiers, Softkey};
 pub use list::{ListState, Rows, Uniform};
 pub use theme::{Fonts, Metrics, Palette, Theme};
 pub use tokens::{Space, Surface};
+pub use viewer::{Viewer, ViewerAction};
 
 // Re-exported so an app needs only this crate in scope to draw.
 pub use symbian_gfx as gfx;
 pub use symbian_gfx::{
     Align, BitmapFont, Canvas, Color, Edges, Fitted, Font, Glyph, Point, Rect, Size,
+    WithFallback,
 };

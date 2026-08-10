@@ -35,6 +35,10 @@ pub const MAX_PATH: usize = 256;
 /// `Debug` prints the path as text rather than as 256 integers — on a platform where
 /// `RDebug::Print` is the only channel, a dump nobody can read is a dump nobody
 /// looks at.
+///
+/// `Clone` and not `Copy`: it is 516 bytes, and a copy that costs that much should be
+/// visible at the call site rather than happening wherever one is passed by value.
+#[derive(Clone)]
 pub struct Utf16Path {
     buf: [u16; MAX_PATH],
     len: usize,
@@ -156,6 +160,10 @@ pub trait Fs {
     fn size(&mut self, handle: i32) -> Result<u64>;
     fn seek(&mut self, handle: i32, pos: u64) -> Result<()>;
     fn close(&mut self, handle: i32);
+    /// List the file entries (not subdirectories) of `path` into `out` as NUL-separated
+    /// UTF-16 units, returning how many names were written. A directory that does not
+    /// exist lists as zero.
+    fn list_dir(&mut self, path: &[u16], out: &mut [u16]) -> Result<usize>;
     fn delete(&mut self, path: &[u16]) -> Result<()>;
     fn rename(&mut self, from: &[u16], to: &[u16]) -> Result<()>;
     /// The app's private directory, created if absent.
@@ -212,6 +220,17 @@ impl Fs for ShimFs {
 
     fn close(&mut self, handle: i32) {
         unsafe { sys::shim_file_close(handle) }
+    }
+
+    fn list_dir(&mut self, path: &[u16], out: &mut [u16]) -> Result<usize> {
+        let mut count = 0i32;
+        // SAFETY: `path`/`out` are valid for their lengths; the shim writes at most
+        // `out.len()` units and reports the entry count through `count`, a live local.
+        let rc = unsafe {
+            sys::shim_dir_list(path.as_ptr(), path.len() as i32, out.as_mut_ptr(), out.len() as i32, &mut count)
+        };
+        Error::check(rc)?;
+        Ok(count.max(0) as usize)
     }
 
     fn delete(&mut self, path: &[u16]) -> Result<()> {
@@ -349,144 +368,203 @@ pub fn write_atomic<F: Fs>(fs: &mut F, path: &Utf16Path, data: &[u8]) -> Result<
     fs.rename(tmp.as_units(), path.as_units())
 }
 
+/// Append `data`, starting the file over first if it has passed `cap` bytes.
+///
+/// The primitive under [`crate::applog`] and `symbian::log`. A log that grows without bound
+/// on a phone eventually becomes the problem it was meant to diagnose, and the two obvious
+/// alternatives are both worse than a restart: dropping the oldest half costs a full read
+/// and rewrite on the GUI thread, and stopping at the cap produces a log that documents
+/// everything except the bug.
+///
+/// The size is checked *before* appending rather than after, so `cap` is a ceiling rather
+/// than a ceiling plus one line.
+pub fn append_capped<F: Fs>(fs: &mut F, path: &Utf16Path, data: &[u8], cap: u64) -> Result<()> {
+    let too_big = match File::open(fs, path, OpenMode::Append) {
+        Ok(mut f) => f.size().unwrap_or(0) >= cap,
+        // Not there yet, or not openable at all: let the append below be the real test, so
+        // a caller gets one error rather than two different ones for the same problem.
+        Err(_) => false,
+    };
+    if too_big {
+        write_atomic(fs, path, b"")?;
+    }
+
+    let mut f = File::open(fs, path, OpenMode::Append)?;
+    f.write_all(data)
+}
+
+// ------------------------------------------------------------------- testing --
+
+/// An in-memory [`Fs`], with the two behaviours that make real file code go wrong: reads
+/// are chopped into small pieces, and writes can be partial.
+///
+/// Public, and not behind `#[cfg(test)]`, because the crates above this one need it too —
+/// the media cache in `apps/telegram` is file logic worth testing and there is no phone in a
+/// `cargo test`. Same reasoning as [`crate::image::MemImages`]. It costs nothing in a device
+/// build: nothing references it, and `--gc-sections` sweeps it.
+pub struct MemFs {
+    pub files: Vec<(Vec<u16>, Vec<u8>)>,
+    pub open: Vec<Option<(usize, usize)>>, // (file index, position)
+    /// Cap on a single read. 0 means unlimited.
+    pub read_chunk: usize,
+    /// Cap on a single write. 0 means unlimited.
+    pub write_chunk: usize,
+    pub private: Vec<u16>,
+}
+
+impl MemFs {
+    pub fn new() -> Self {
+        MemFs {
+            files: Vec::new(),
+            open: Vec::new(),
+            read_chunk: 0,
+            write_chunk: 0,
+            private: "C:\\private\\E1234569\\".encode_utf16().collect(),
+        }
+    }
+
+    fn find(&self, path: &[u16]) -> Option<usize> {
+        self.files.iter().position(|(p, _)| p == path)
+    }
+
+    pub fn contents(&self, path: &str) -> Option<&[u8]> {
+        let key: Vec<u16> = path.encode_utf16().collect();
+        self.find(&key).map(|i| self.files[i].1.as_slice())
+    }
+}
+
+impl Fs for MemFs {
+    fn open(&mut self, path: &[u16], mode: OpenMode) -> Result<i32> {
+        let idx = match (self.find(path), mode) {
+            (Some(i), OpenMode::Replace) => {
+                self.files[i].1.clear();
+                i
+            }
+            (Some(i), _) => i,
+            (None, OpenMode::Read) => return Err(Error::NotFound),
+            (None, _) => {
+                self.files.push((path.to_vec(), Vec::new()));
+                self.files.len() - 1
+            }
+        };
+        let pos = if mode == OpenMode::Append { self.files[idx].1.len() } else { 0 };
+        self.open.push(Some((idx, pos)));
+        Ok(self.open.len() as i32) // 1-based, so 0 stays "no handle"
+    }
+
+    fn read(&mut self, handle: i32, buf: &mut [u8]) -> Result<usize> {
+        let slot = self.open.get((handle - 1) as usize).copied().flatten();
+        let (idx, pos) = slot.ok_or(Error::Platform(sys::SHIM_ERR_BAD_HANDLE))?;
+        let data = &self.files[idx].1;
+        let mut want = buf.len().min(data.len().saturating_sub(pos));
+        if self.read_chunk > 0 {
+            want = want.min(self.read_chunk);
+        }
+        buf[..want].copy_from_slice(&data[pos..pos + want]);
+        self.open[(handle - 1) as usize] = Some((idx, pos + want));
+        Ok(want)
+    }
+
+    fn write(&mut self, handle: i32, buf: &[u8]) -> Result<usize> {
+        let slot = self.open.get((handle - 1) as usize).copied().flatten();
+        let (idx, pos) = slot.ok_or(Error::Platform(sys::SHIM_ERR_BAD_HANDLE))?;
+        let n = if self.write_chunk > 0 { buf.len().min(self.write_chunk) } else { buf.len() };
+        let data = &mut self.files[idx].1;
+        if data.len() < pos {
+            data.resize(pos, 0);
+        }
+        data.truncate(pos);
+        data.extend_from_slice(&buf[..n]);
+        self.open[(handle - 1) as usize] = Some((idx, pos + n));
+        Ok(n)
+    }
+
+    fn size(&mut self, handle: i32) -> Result<u64> {
+        let slot = self.open.get((handle - 1) as usize).copied().flatten();
+        let (idx, _) = slot.ok_or(Error::Platform(sys::SHIM_ERR_BAD_HANDLE))?;
+        Ok(self.files[idx].1.len() as u64)
+    }
+
+    fn seek(&mut self, handle: i32, pos: u64) -> Result<()> {
+        let slot = self.open.get((handle - 1) as usize).copied().flatten();
+        let (idx, _) = slot.ok_or(Error::Platform(sys::SHIM_ERR_BAD_HANDLE))?;
+        self.open[(handle - 1) as usize] = Some((idx, pos as usize));
+        Ok(())
+    }
+
+    fn close(&mut self, handle: i32) {
+        if let Some(s) = self.open.get_mut((handle - 1) as usize) {
+            *s = None;
+        }
+    }
+
+    fn list_dir(&mut self, path: &[u16], out: &mut [u16]) -> Result<usize> {
+        // Immediate file children of `path`: a key that starts with the dir and whose
+        // remainder holds no further separator. Names are packed NUL-separated.
+        let sep = b'\\' as u16;
+        let mut pos = 0usize;
+        let mut n = 0usize;
+        for (key, _data) in &self.files {
+            if key.len() <= path.len() || key[..path.len()] != *path {
+                continue;
+            }
+            let name = &key[path.len()..];
+            if name.iter().any(|&u| u == sep) {
+                continue; // in a subdirectory, not an immediate child
+            }
+            if pos + name.len() + 1 > out.len() {
+                break;
+            }
+            out[pos..pos + name.len()].copy_from_slice(name);
+            pos += name.len();
+            out[pos] = 0;
+            pos += 1;
+            n += 1;
+        }
+        Ok(n)
+    }
+
+    fn delete(&mut self, path: &[u16]) -> Result<()> {
+        match self.find(path) {
+            Some(i) => {
+                self.files.remove(i);
+                // Indices shift, so anything still open past the removed file
+                // would now point at the wrong one. Tests never do that, and
+                // panicking here would be better than silently corrupting.
+                Ok(())
+            }
+            None => Err(Error::NotFound),
+        }
+    }
+
+    fn rename(&mut self, from: &[u16], to: &[u16]) -> Result<()> {
+        // Removing the destination shifts the indices, so `from` is located again
+        // afterwards rather than before — the same ordering the shim uses, and for
+        // the same reason.
+        self.find(from).ok_or(Error::NotFound)?;
+        if let Some(dst) = self.find(to) {
+            self.files.remove(dst);
+        }
+        let src = self.find(from).ok_or(Error::NotFound)?;
+        self.files[src].0 = to.to_vec();
+        Ok(())
+    }
+
+    fn private_path(&mut self, out: &mut [u16]) -> Result<usize> {
+        if self.private.len() > out.len() {
+            return Err(Error::Overflow);
+        }
+        out[..self.private.len()].copy_from_slice(&self.private);
+        Ok(self.private.len())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use alloc::string::String;
     use alloc::vec;
 
-    /// An in-memory [`Fs`], with the two behaviours that make real file code go
-    /// wrong: reads are chopped into small pieces, and writes can be partial.
-    struct MemFs {
-        files: Vec<(Vec<u16>, Vec<u8>)>,
-        open: Vec<Option<(usize, usize)>>, // (file index, position)
-        /// Cap on a single read. 0 means unlimited.
-        read_chunk: usize,
-        /// Cap on a single write. 0 means unlimited.
-        write_chunk: usize,
-        private: Vec<u16>,
-    }
-
-    impl MemFs {
-        fn new() -> Self {
-            MemFs {
-                files: Vec::new(),
-                open: Vec::new(),
-                read_chunk: 0,
-                write_chunk: 0,
-                private: "C:\\private\\E1234569\\".encode_utf16().collect(),
-            }
-        }
-
-        fn find(&self, path: &[u16]) -> Option<usize> {
-            self.files.iter().position(|(p, _)| p == path)
-        }
-
-        fn contents(&self, path: &str) -> Option<&[u8]> {
-            let key: Vec<u16> = path.encode_utf16().collect();
-            self.find(&key).map(|i| self.files[i].1.as_slice())
-        }
-    }
-
-    impl Fs for MemFs {
-        fn open(&mut self, path: &[u16], mode: OpenMode) -> Result<i32> {
-            let idx = match (self.find(path), mode) {
-                (Some(i), OpenMode::Replace) => {
-                    self.files[i].1.clear();
-                    i
-                }
-                (Some(i), _) => i,
-                (None, OpenMode::Read) => return Err(Error::NotFound),
-                (None, _) => {
-                    self.files.push((path.to_vec(), Vec::new()));
-                    self.files.len() - 1
-                }
-            };
-            let pos = if mode == OpenMode::Append { self.files[idx].1.len() } else { 0 };
-            self.open.push(Some((idx, pos)));
-            Ok(self.open.len() as i32) // 1-based, so 0 stays "no handle"
-        }
-
-        fn read(&mut self, handle: i32, buf: &mut [u8]) -> Result<usize> {
-            let slot = self.open.get((handle - 1) as usize).copied().flatten();
-            let (idx, pos) = slot.ok_or(Error::Platform(sys::SHIM_ERR_BAD_HANDLE))?;
-            let data = &self.files[idx].1;
-            let mut want = buf.len().min(data.len().saturating_sub(pos));
-            if self.read_chunk > 0 {
-                want = want.min(self.read_chunk);
-            }
-            buf[..want].copy_from_slice(&data[pos..pos + want]);
-            self.open[(handle - 1) as usize] = Some((idx, pos + want));
-            Ok(want)
-        }
-
-        fn write(&mut self, handle: i32, buf: &[u8]) -> Result<usize> {
-            let slot = self.open.get((handle - 1) as usize).copied().flatten();
-            let (idx, pos) = slot.ok_or(Error::Platform(sys::SHIM_ERR_BAD_HANDLE))?;
-            let n = if self.write_chunk > 0 { buf.len().min(self.write_chunk) } else { buf.len() };
-            let data = &mut self.files[idx].1;
-            if data.len() < pos {
-                data.resize(pos, 0);
-            }
-            data.truncate(pos);
-            data.extend_from_slice(&buf[..n]);
-            self.open[(handle - 1) as usize] = Some((idx, pos + n));
-            Ok(n)
-        }
-
-        fn size(&mut self, handle: i32) -> Result<u64> {
-            let slot = self.open.get((handle - 1) as usize).copied().flatten();
-            let (idx, _) = slot.ok_or(Error::Platform(sys::SHIM_ERR_BAD_HANDLE))?;
-            Ok(self.files[idx].1.len() as u64)
-        }
-
-        fn seek(&mut self, handle: i32, pos: u64) -> Result<()> {
-            let slot = self.open.get((handle - 1) as usize).copied().flatten();
-            let (idx, _) = slot.ok_or(Error::Platform(sys::SHIM_ERR_BAD_HANDLE))?;
-            self.open[(handle - 1) as usize] = Some((idx, pos as usize));
-            Ok(())
-        }
-
-        fn close(&mut self, handle: i32) {
-            if let Some(s) = self.open.get_mut((handle - 1) as usize) {
-                *s = None;
-            }
-        }
-
-        fn delete(&mut self, path: &[u16]) -> Result<()> {
-            match self.find(path) {
-                Some(i) => {
-                    self.files.remove(i);
-                    // Indices shift, so anything still open past the removed file
-                    // would now point at the wrong one. Tests never do that, and
-                    // panicking here would be better than silently corrupting.
-                    Ok(())
-                }
-                None => Err(Error::NotFound),
-            }
-        }
-
-        fn rename(&mut self, from: &[u16], to: &[u16]) -> Result<()> {
-            // Removing the destination shifts the indices, so `from` is located again
-            // afterwards rather than before — the same ordering the shim uses, and for
-            // the same reason.
-            self.find(from).ok_or(Error::NotFound)?;
-            if let Some(dst) = self.find(to) {
-                self.files.remove(dst);
-            }
-            let src = self.find(from).ok_or(Error::NotFound)?;
-            self.files[src].0 = to.to_vec();
-            Ok(())
-        }
-
-        fn private_path(&mut self, out: &mut [u16]) -> Result<usize> {
-            if self.private.len() > out.len() {
-                return Err(Error::Overflow);
-            }
-            out[..self.private.len()].copy_from_slice(&self.private);
-            Ok(self.private.len())
-        }
-    }
 
     fn utf8(units: &[u16]) -> String {
         char::decode_utf16(units.iter().copied()).map(|c| c.unwrap()).collect()

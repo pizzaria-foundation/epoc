@@ -177,6 +177,64 @@ pub trait Font {
     }
 }
 
+/// Two atlases as one font: whatever the primary lacks comes from the fallback.
+///
+/// This exists for emoji, and the shape of the problem is why it is a run-time chain
+/// rather than more glyphs in each atlas. Emoji have no bold — Noto Emoji ships one
+/// weight — so adding them to the regular *and* the bold atlas stores two byte-identical
+/// copies of every one. On a device where `.rodata` is already the largest thing in the
+/// image, paying twice for the same pixels is not a rounding error.
+///
+/// Metrics come from the primary, always. A chained font must lay out exactly as the
+/// text atlas alone does, or adding emoji support would move every line in the
+/// application. The fallback contributes glyphs and nothing else — which also means its
+/// bearings must have been computed against the primary's ascent when it was built; see
+/// `--ascent` in `tools/mkfont.py`.
+///
+/// `fallback_advance` likewise comes from the primary: a codepoint neither atlas has is
+/// still charged the primary's space, so the missing-glyph behaviour is unchanged.
+#[derive(Clone, Copy)]
+pub struct WithFallback<P, F> {
+    primary: P,
+    fallback: F,
+}
+
+impl<P: Font, F: Font> WithFallback<P, F> {
+    pub fn new(primary: P, fallback: F) -> Self {
+        Self { primary, fallback }
+    }
+}
+
+impl<P: core::fmt::Debug, F: core::fmt::Debug> core::fmt::Debug for WithFallback<P, F> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("WithFallback")
+            .field("primary", &self.primary)
+            .field("fallback", &self.fallback)
+            .finish()
+    }
+}
+
+impl<P: Font, F: Font> Font for WithFallback<P, F> {
+    fn line_height(&self) -> i32 {
+        self.primary.line_height()
+    }
+    fn ascent(&self) -> i32 {
+        self.primary.ascent()
+    }
+    fn descent(&self) -> i32 {
+        self.primary.descent()
+    }
+    fn glyph(&self, ch: char) -> Option<Glyph<'_>> {
+        match self.primary.glyph(ch) {
+            Some(g) => Some(g),
+            None => self.fallback.glyph(ch),
+        }
+    }
+    fn fallback_advance(&self) -> i32 {
+        self.primary.fallback_advance()
+    }
+}
+
 /// Blanket impl so `&F` and `Box<F>` are usable wherever a `Font` is wanted.
 impl<F: Font + ?Sized> Font for &F {
     fn line_height(&self) -> i32 {
@@ -412,6 +470,69 @@ mod tests {
         g.push((' ', 4));
         g.push(('\u{2026}', 9));
         atlas(&g)
+    }
+
+    #[test]
+    fn a_fallback_supplies_only_what_the_primary_lacks() {
+        // The emoji case: a text atlas with no emoji, chained to an emoji atlas with no
+        // letters. Every glyph must come from exactly one of them.
+        let text = font6();
+        let extra = atlas(&[('\u{1F600}', 11), ('\u{2764}', 10)]);
+        let primary = BitmapFont::new(&text).unwrap();
+        let fallback = BitmapFont::new(&extra).unwrap();
+        let chained = WithFallback::new(primary, fallback);
+
+        assert!(chained.glyph('a').is_some(), "from the primary");
+        assert!(chained.glyph('\u{1F600}').is_some(), "from the fallback");
+        assert!(chained.glyph('\u{2764}').is_some());
+        assert!(chained.glyph('\u{1F4A9}').is_none(), "in neither");
+        // And the primary wins where both have it, so the fallback can never change the
+        // look of ordinary text.
+        assert_eq!(chained.advance('a'), primary.advance('a'));
+    }
+
+    #[test]
+    fn a_fallback_does_not_change_the_line_box() {
+        // Load-bearing: if metrics came from whichever atlas answered, adding emoji
+        // support would move every line in every screen. They come from the primary,
+        // always — note the two atlases here disagree on all three.
+        let text = font6();
+        let extra = {
+            let mut d = atlas(&[('\u{1F600}', 11)]);
+            d[4..6].copy_from_slice(&99u16.to_le_bytes()); // line_height
+            d[6..8].copy_from_slice(&80i16.to_le_bytes()); // ascent
+            d[8..10].copy_from_slice(&19i16.to_le_bytes()); // descent
+            d
+        };
+        let primary = BitmapFont::new(&text).unwrap();
+        let fallback = BitmapFont::new(&extra).unwrap();
+        assert_eq!(fallback.line_height(), 99, "the fixture really does disagree");
+
+        let chained = WithFallback::new(primary, fallback);
+        assert_eq!(chained.line_height(), primary.line_height());
+        assert_eq!(chained.ascent(), primary.ascent());
+        assert_eq!(chained.descent(), primary.descent());
+        // Including what a codepoint neither atlas has costs, so the missing-glyph
+        // behaviour is exactly what it was before chaining.
+        assert_eq!(chained.fallback_advance(), primary.fallback_advance());
+        assert_eq!(chained.advance('\u{1F4A9}'), primary.fallback_advance());
+    }
+
+    #[test]
+    fn a_chained_font_measures_and_wraps_across_both_atlases() {
+        // measure/fit/wrap are trait defaults built on `advance`, so they inherit the
+        // chain for free — but only if `advance` really goes through `glyph`.
+        let text = font6();
+        let extra = atlas(&[('\u{1F600}', 11)]);
+        let primary = BitmapFont::new(&text).unwrap();
+        let fallback = BitmapFont::new(&extra).unwrap();
+        let chained = WithFallback::new(primary, fallback);
+
+        // "ab" is 6+6, the emoji is 11.
+        assert_eq!(chained.measure("ab"), 12);
+        assert_eq!(chained.measure("ab\u{1F600}"), 23);
+        // Without the chain the emoji would be charged the fallback advance instead.
+        assert_ne!(chained.measure("ab\u{1F600}"), primary.measure("ab\u{1F600}"));
     }
 
     #[test]

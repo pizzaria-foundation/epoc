@@ -55,6 +55,13 @@ pub struct Login {
     pub(crate) code_sent: bool,
     /// Set when the server says the account needs a password.
     pub(crate) password_needed: bool,
+    /// Connection status, shown on all screens. Empty string = hidden.
+    pub(crate) status: &'static str,
+    /// Whether the connection is ready for the user to send a request.
+    pub(crate) connected: bool,
+    /// The last phone number the user typed, kept so it survives screen
+    /// transitions and the app going to the background.
+    pub(crate) phone: String,
 }
 
 /// What the caller must do, returned by every method that advances the machine.
@@ -72,19 +79,22 @@ pub enum Progress {
 impl Login {
     pub fn new(api_id: i32, api_hash: &str) -> Self {
         Login {
-            screen: Screen::Phone {
-                field: TextField::with_limit(16),
-                error: None,
-            },
+            // Start on Waiting rather than Phone: the network is not ready on launch and
+            // showing a number field that cannot be used reads as a broken screen. The
+            // Waiting screen shows connection progress ("conectando…", "computing the key")
+            // and transitions to Phone once the link is ready — or directly to Chats if
+            // the session was loaded from disk.
+            screen: Screen::Waiting("conectando…"),
             machine: auth::Login::new(api_id, api_hash),
             api_id,
             api_hash_empty: api_hash.is_empty(),
             code_sent: false,
             password_needed: false,
+            status: "",
+            connected: false,
+            phone: String::new(),
         }
     }
-
-    /// Build a Login for the purpose of rendering a specific screen in the preview.
     pub fn for_preview(screen: Screen) -> Self {
         Login {
             screen,
@@ -93,6 +103,9 @@ impl Login {
             api_hash_empty: true,
             code_sent: false,
             password_needed: false,
+            status: "",
+            connected: true,
+            phone: String::new(),
         }
     }
 
@@ -104,6 +117,35 @@ impl Login {
     /// the screen can say it up front.
     pub fn credentials_missing(&self) -> bool {
         self.api_id == 0 || self.api_hash_empty
+    }
+
+    /// Update what a waiting screen says.
+    ///
+    /// The screen used to show whatever set it — "sending the code" — for as long as it took,
+    /// which on a handset where the handshake is four seconds meant staring at a sentence
+    /// that had stopped being true. The connection reports where it actually is; this puts
+    /// that on the screen.
+    /// Transition from Waiting to Phone, so the user can type a number. Called once the
+    /// connection is up and there is no saved session to skip ahead with.
+    ///
+    /// A no-op on any screen other than Waiting — Phone, Code and Password stay as they are.
+    pub fn show_phone(&mut self) {
+        if matches!(self.screen, Screen::Waiting(_)) {
+            self.screen = self.make_phone_screen(None);
+        }
+    }
+
+    /// Update what a waiting screen says.
+    ///
+    /// The screen used to show whatever set it — "sending the code" — for as long as it took,
+    /// which on a handset where the handshake is four seconds meant staring at a sentence
+    /// that had stopped being true. The connection reports where it actually is; this puts
+    /// that on the screen.
+    pub fn set_status(&mut self, text: &'static str) {
+        self.status = text;
+        if let Screen::Waiting(msg) = &mut self.screen {
+            *msg = text;
+        }
     }
 
     /// Post an error on whatever screen is in front.
@@ -118,10 +160,7 @@ impl Login {
             Screen::Code { error, .. } => *error = Some(msg),
             Screen::Password { error, .. } => *error = Some(msg),
             Screen::Waiting(_) => {
-                self.screen = Screen::Phone {
-                    field: TextField::with_limit(16),
-                    error: Some(msg),
-                };
+                self.screen = self.make_phone_screen(Some(msg));
             }
         }
     }
@@ -138,8 +177,17 @@ impl Login {
 
     /// Ask the server to send a code to `phone`.
     pub fn ask_send_code(&mut self, phone: &str) -> Progress {
+        self.phone = String::from(phone);
         self.screen = Screen::Waiting("sending the code");
         progress(self.machine.send_code(phone))
+    }
+
+    fn make_phone_screen(&self, error: Option<String>) -> Screen {
+        let mut field = TextField::with_limit(16);
+        if !self.phone.is_empty() {
+            field.insert_str(&self.phone);
+        }
+        Screen::Phone { field, error }
     }
 
     /// Ask for another code.
@@ -158,6 +206,15 @@ impl Login {
     pub fn submit_password(&mut self, password: &[u8]) -> Progress {
         self.screen = Screen::Waiting("checking the password");
         progress(self.machine.submit_password(password))
+    }
+
+    /// Re-issue whatever is outstanding, on a connection that has just come back.
+    ///
+    /// `None` when there is nothing waiting on the network — the machine is idle, or the
+    /// person is typing.
+    pub fn resume(&mut self) -> Option<Progress> {
+        let act = self.machine.resume()?;
+        Some(self.apply(act))
     }
 
     /// Feed a successful reply.
@@ -215,10 +272,7 @@ impl Login {
                     Screen::Waiting(_) => {
                         // An error while waiting means the screen that triggered the
                         // request should show it. Fall back to Phone as the safest.
-                        self.screen = Screen::Phone {
-                            field: TextField::with_limit(16),
-                            error: Some(error_text(e)),
-                        };
+                        self.screen = self.make_phone_screen(Some(error_text(e)));
                     }
                 }
                 return Progress::Error(e.clone());
@@ -246,10 +300,19 @@ impl Login {
         (handled, action)
     }
 
-    pub fn draw(&mut self, c: &mut Canvas<'_>, theme: &Theme<'_>) {
+     pub fn draw(&mut self, c: &mut Canvas<'_>, theme: &Theme<'_>) {
         let screen = Rect::from_size(c.size());
         let frame = Frame::split(screen, theme, true, true);
         chrome::clear(c, theme);
+
+        let draw_status = |c: &mut Canvas, x: i32, y1: i32, th: &Theme| {
+            if !self.status.is_empty() {
+                c.draw_text_in(
+                    Rect::from_xywh(x, y1 - th.metrics.pad - th.fonts.small.line_height(), frame.content.width() - th.metrics.pad * 2, th.fonts.small.line_height()),
+                    self.status, th.fonts.small, th.palette.accent, Align::Center,
+                );
+            }
+        };
 
         match &self.screen {
             Screen::Phone { ref field, ref error } => {
@@ -272,8 +335,9 @@ impl Login {
                 );
                 chrome::softkey_bar(
                     c, frame.softkeys, theme,
-                    [None, if missing { None } else { Some("Avançar") }, None],
+                    [None, if missing || !self.connected { None } else { Some("Avançar") }, None],
                 );
+                draw_status(c, frame.content.x0, frame.softkeys.y0, theme);
             }
             Screen::Code { ref field, length, ref error } => {
                 chrome::title_bar(
@@ -307,17 +371,19 @@ impl Login {
                 );
                 chrome::softkey_bar(
                     c, frame.softkeys, theme,
-                    [Some("Voltar"), Some("Entrar"), None],
+                    [Some("Voltar"), if self.connected { Some("Entrar") } else { None }, None],
                 );
+                draw_status(c, frame.content.x0, frame.softkeys.y0, theme);
             }
             Screen::Password { ref field, ref hint, ref error } => {
                 chrome::title_bar(
                     c, frame.title, theme, "Telegram", Some("senha"),
                 );
-                draw_field_centered(
+                let field_r = draw_field_centered(
                     c, frame.content, theme, "Senha de dois fatores",
                     None, Some("senha"), field, error.as_deref(),
                 );
+                draw_eye(c, frame.content, field_r, theme, !field.is_masked());
                 if !hint.is_empty() {
                     c.draw_text_in(
                         Rect::from_xywh(
@@ -335,8 +401,16 @@ impl Login {
                 }
                 chrome::softkey_bar(
                     c, frame.softkeys, theme,
-                    [None, Some("Entrar"), None],
+                    [
+                        // The only way to reveal a password on a handset with no touch
+                        // screen. The label says what pressing it will do, not what the
+                        // field is doing now — a softkey is a verb.
+                        Some(if field.is_masked() { "Mostrar" } else { "Ocultar" }),
+                        if self.connected { Some("Entrar") } else { None },
+                        None,
+                    ],
                 );
+                draw_status(c, frame.content.x0, frame.softkeys.y0, theme);
             }
             Screen::Waiting(msg) => {
                 chrome::title_bar(
@@ -425,6 +499,12 @@ fn handle_screen_key(
             }
         }
         Screen::Password { field, .. } => {
+            // Before the field sees it: the left softkey is not text.
+            if matches!(ev.key, Key::Softkey(Softkey::Left)) {
+                let masked = field.is_masked();
+                field.set_masked(!masked);
+                return (Handled::Consumed, LoginAction::None);
+            }
             let handled = handle_field(field, ev, false);
             if handled.is_consumed() {
                 return (handled, LoginAction::None);
@@ -460,7 +540,7 @@ fn draw_field_centered(
     placeholder: Option<&str>,
     field: &TextField,
     error: Option<&str>,
-) {
+) -> Rect {
     let p = &theme.palette;
     let m = &theme.metrics;
     let body = theme.fonts.body;
@@ -559,6 +639,55 @@ fn draw_field_centered(
             Align::Center,
         );
     }
+    field_r
+}
+
+/// An eye to the right of the password field, saying whether the text is visible.
+///
+/// Drawn rather than written, because the state has to be readable at a glance while
+/// someone is typing and the softkey label is at the other end of the screen. Two arcs and
+/// a pupil at this size is four rows of pixels; a slash across it when hidden.
+fn draw_eye(c: &mut Canvas<'_>, area: Rect, field: Rect, theme: &Theme<'_>, open: bool) {
+    let p = &theme.palette;
+    let h = 9;
+    let w = 14;
+    let x0 = field.x1 + 6;
+    let y0 = field.y0 + (field.height() - h) / 2;
+    // The field is centred with a margin either side; if the eye will not fit in it the
+    // softkey label is the whole control, which is why that one says the verb.
+    if x0 + w > area.x1 {
+        return;
+    }
+    let colour = if open { p.accent } else { p.dim };
+
+    // The outline: a lens shape, widest in the middle.
+    for row in 0..h {
+        // Distance from the middle row, as a fraction of the half height.
+        let d = (row as i32 - h / 2).abs();
+        let inset = d * w / (h + 1);
+        let (a, b) = (x0 + inset, x0 + w - inset);
+        if b <= a {
+            continue;
+        }
+        if row == 0 || row == h - 1 || d == h / 2 {
+            c.fill_rect(Rect::new(a, y0 + row, b, y0 + row + 1), colour);
+        } else {
+            c.fill_rect(Rect::new(a, y0 + row, a + 1, y0 + row + 1), colour);
+            c.fill_rect(Rect::new(b - 1, y0 + row, b, y0 + row + 1), colour);
+        }
+    }
+    // The pupil.
+    let cx = x0 + w / 2;
+    let cy = y0 + h / 2;
+    c.fill_rect(Rect::new(cx - 1, cy - 1, cx + 2, cy + 2), colour);
+
+    if !open {
+        // A slash, one pixel per row, corner to corner.
+        for row in 0..h {
+            let x = x0 + row * w / h;
+            c.fill_rect(Rect::new(x, y0 + row, x + 2, y0 + row + 1), p.text);
+        }
+    }
 }
 
 fn progress(act: Action) -> Progress {
@@ -609,6 +738,48 @@ fn itoa(mut v: u32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_left_softkey_reveals_the_password() {
+        // Typed characters go to the field; the softkey does not. Checked in that order
+        // because `handle_field` would otherwise swallow it.
+        let mut login = Login::new(0, "");
+        login.screen = Screen::Password {
+            field: {
+                let mut f = TextField::with_limit(128);
+                f.set_masked(true);
+                f.insert_str("hunter2");
+                f
+            },
+            hint: String::new(),
+            error: None,
+        };
+        let t = theme();
+        let r = Rect::from_xywh(0, 0, 240, 320);
+
+        let masked_before = match &login.screen {
+            Screen::Password { field, .. } => field.display().to_string(),
+            _ => panic!(),
+        };
+        assert_eq!(masked_before, "*******", "the field was not masked to begin with");
+
+        login.handle_key(KeyEvent::new(Key::Softkey(Softkey::Left)), &t, r);
+        match &login.screen {
+            Screen::Password { field, .. } => {
+                assert_eq!(field.display(), "hunter2", "the eye did not open");
+                assert!(!field.is_masked());
+            }
+            _ => panic!("the screen changed"),
+        }
+
+        // And back.
+        login.handle_key(KeyEvent::new(Key::Softkey(Softkey::Left)), &t, r);
+        match &login.screen {
+            Screen::Password { field, .. } => assert_eq!(field.display(), "*******"),
+            _ => panic!(),
+        }
+    }
+
     use symbian_ui::{BitmapFont, Fonts, Size};
 
     fn atlas() -> alloc::vec::Vec<u8> {
@@ -723,6 +894,7 @@ mod tests {
         let t = theme();
         let r = Rect { x0: 0, y0: 0, x1: 320, y1: 240 };
         let mut login = Login::new(12345, "abcdef");
+        login.show_phone(); // now starts on Waiting; must transition before the test
 
         // Non-digits are swallowed.
         let (h, a) = login.handle_key(KeyEvent::new(Key::Char('a')), &t, r);

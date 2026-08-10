@@ -274,8 +274,10 @@ fn maybe_inflate(bytes: &[u8]) -> Result<Vec<u8>> {
 /// Wrap a query in `initConnection` and `invokeWithLayer`.
 ///
 /// Required on the first call of every connection and harmless afterwards. Without it the
-/// server answers `CONNECTION_LAYER_INVALID` — which is at least a legible error, unlike
-/// most of what goes wrong here.
+/// server answers `CONNECTION_NOT_INITED`, which arrives as an ordinary RPC error on a
+/// session that is otherwise working perfectly — a live handshake on the handset completed,
+/// stayed up, and then answered that to `auth.sendCode`, which reads as a bad request
+/// rather than a missing preamble.
 pub fn init_connection(api_id: i32, device: &str, system: &str, app: &str, query: &[u8])
     -> Vec<u8>
 {
@@ -293,6 +295,322 @@ pub fn init_connection(api_id: i32, device: &str, system: &str, app: &str, query
         .string("en") // lang_code
         .raw(query);
     w.finish()
+}
+
+/// `messages.getDialogs#a0f4cb4f flags:# exclude_pinned:flags.0?true folder_id:flags.1?int
+/// offset_date:int offset_id:int offset_peer:InputPeer limit:int hash:long = messages.Dialogs;`
+pub const MESSAGES_GET_DIALOGS: u32 = 0xa0f4_cb4f;
+/// `inputPeerEmpty#7f3b18ea = InputPeer;`
+pub const INPUT_PEER_EMPTY: u32 = 0x7f3b_18ea;
+
+/// The first page of the chat list.
+///
+/// When `offset_peer` is `None` the request is for the very first page — `offset_date` and
+/// `offset_id` are set to zero and `inputPeerEmpty` is used, which starts from the newest
+/// dialog. With a peer the server returns the page that comes after it, which is how
+/// scrolling down loads more chats without re-fetching the ones already held.
+///
+/// `hash` is zero: it is a checksum of the ids the client already holds, and answering
+/// `messages.dialogsNotModified` to a client that holds nothing would be a page of nothing.
+/// `limit` is small on purpose — this handset draws twelve rows and a page of a hundred
+/// dialogs is a megabyte of TL to walk on a 600 MHz in-order core.
+pub fn get_dialogs(
+    limit: i32,
+    offset_date: i32,
+    offset_id: i32,
+    offset_peer: Option<(crate::chats::Kind, i64, i64)>,
+) -> Vec<u8> {
+    let mut w = Writer::with_capacity(64);
+    w.ctor(MESSAGES_GET_DIALOGS)
+        .uint(0) // flags: not excluding pinned, no folder
+        .int(offset_date)
+        .int(offset_id);
+    match offset_peer {
+        Some((kind, id, access_hash)) => input_peer(&mut w, kind, id, access_hash),
+        None => { w.ctor(INPUT_PEER_EMPTY); }
+    }
+    w.int(limit)
+        .ulong(0); // hash
+    w.finish()
+}
+
+/// `inputPeerUser#dde8a54c`, `inputPeerChat#35a95cb9`, `inputPeerChannel#27bcbbfc`.
+pub const INPUT_PEER_USER: u32 = 0xdde8_a54c;
+pub const INPUT_PEER_CHAT: u32 = 0x35a9_5cb9;
+pub const INPUT_PEER_CHANNEL: u32 = 0x27bc_bbfc;
+/// `messages.getHistory#4423e6c5`
+pub const MESSAGES_GET_HISTORY: u32 = 0x4423_e6c5;
+/// `messages.sendMessage#fef48f62`
+pub const MESSAGES_SEND_MESSAGE: u32 = 0xfef4_8f62;
+
+/// `upload.getFile#be5335be`
+pub const UPLOAD_GET_FILE: u32 = 0xbe53_35be;
+/// `inputPhotoFileLocation#40181ffe`
+pub const INPUT_PHOTO_FILE_LOCATION: u32 = 0x4018_1ffe;
+/// `inputDocumentFileLocation#bad07584`
+pub const INPUT_DOCUMENT_FILE_LOCATION: u32 = 0xbad0_7584;
+/// `upload.file#096a18d5`
+pub const UPLOAD_FILE: u32 = 0x096a_18d5;
+/// `upload.fileCdnRedirect#f18cda44`
+pub const UPLOAD_FILECDN: u32 = 0xf18c_da44;
+
+/// `messages.getMessages#63c66506`
+pub const MESSAGES_GET_MESSAGES: u32 = 0x63c66506;
+/// `channels.getMessages#ad8c9a23`
+pub const CHANNELS_GET_MESSAGES: u32 = 0xad8c_9a23;
+/// `inputChannel#f35aec28`
+pub const INPUT_CHANNEL: u32 = 0xf35a_ec28;
+/// `inputMessageID#a676a322`
+pub const INPUT_MESSAGE_ID: u32 = 0xa676a322;
+
+/// Write a peer in the form a request takes.
+///
+/// A `Peer` is what the server sends; an `InputPeer` is what it accepts, and the difference
+/// is the access hash — proof that the client learned the id legitimately. A chat has none.
+fn input_peer(w: &mut Writer, kind: crate::chats::Kind, id: i64, access_hash: i64) {
+    use crate::chats::Kind;
+    match kind {
+        Kind::User => {
+            w.ctor(INPUT_PEER_USER).long(id).long(access_hash);
+        }
+        Kind::Chat => {
+            w.ctor(INPUT_PEER_CHAT).long(id);
+        }
+        Kind::Channel => {
+            w.ctor(INPUT_PEER_CHANNEL).long(id).long(access_hash);
+        }
+    }
+}
+
+/// A page of a conversation, newest first.
+///
+/// `offset_id` is exclusive and counts backwards: zero means "from the newest", and any
+/// other value means "older than this message". That is what makes scrolling up cheap —
+/// the client asks for the next page by handing back the oldest id it already holds,
+/// instead of a page number the server would have to count to.
+pub fn get_history(
+    kind: crate::chats::Kind,
+    id: i64,
+    access_hash: i64,
+    offset_id: i32,
+    limit: i32,
+) -> Vec<u8> {
+    let mut w = Writer::with_capacity(64);
+    w.ctor(MESSAGES_GET_HISTORY);
+    input_peer(&mut w, kind, id, access_hash);
+    w.int(offset_id)
+        .int(0) // offset_date
+        .int(0) // add_offset
+        .int(limit)
+        .int(0) // max_id
+        .int(0) // min_id
+        .ulong(0); // hash
+    w.finish()
+}
+
+/// Send a text message.
+///
+/// `random_id` is the client's own id for it, and the server uses it to discard duplicates:
+/// a message resent because the answer was lost arrives once. It must therefore be *the
+/// same* across a resend and different across separate messages — a counter would repeat
+/// after a reinstall, so it comes from the random source.
+pub fn send_message(
+    kind: crate::chats::Kind,
+    id: i64,
+    access_hash: i64,
+    text: &str,
+    random_id: i64,
+) -> Vec<u8> {
+    let mut w = Writer::with_capacity(64 + text.len());
+    w.ctor(MESSAGES_SEND_MESSAGE).uint(0); // flags: nothing optional
+    input_peer(&mut w, kind, id, access_hash);
+    w.string(text).long(random_id);
+    w.finish()
+}
+
+/// The largest chunk a single `upload.getFile` should ask for here.
+///
+/// Not the protocol's 1 MiB ceiling. `transport::MAX_FRAME` is exactly 1 MiB and treats
+/// anything larger as an unrecoverable desynchronisation, and a 1 MiB payload plus the
+/// `rpc_result` header, the message header, the padding and the `msg_key` is over it — so
+/// asking for the maximum did not download a large photo, it dropped the connection.
+///
+/// 128 KiB satisfies the alignment rules (a multiple of 4096, and 1 MiB divides evenly by
+/// it, so a chunk never straddles a 1 MiB boundary) and leaves the frame budget with room
+/// to spare. It also bounds the peak: the reply, the copy out of it and the assembled file
+/// are all live at once on a 4 MB heap.
+pub const CHUNK: i32 = 128 * 1024;
+
+/// Download part of a photo.
+///
+/// `thumb_size` must be the `type` of one of the photo's `sizes` — `"m"`, `"x"`, `"y"` and
+/// so on. It is **not** optional for a photo: an empty string is accepted by
+/// `inputDocumentFileLocation` but refused here with `LOCATION_INVALID`, which is why this
+/// used to fail for every photo in every chat. See `chats::SizeOption`.
+pub fn get_file_photo(
+    id: i64,
+    access_hash: i64,
+    file_reference: &[u8],
+    thumb_size: &str,
+    offset: i64,
+    limit: i32,
+) -> Vec<u8> {
+    let mut w = Writer::with_capacity(64 + file_reference.len() + thumb_size.len());
+    w.ctor(UPLOAD_GET_FILE)
+        .uint(0) // flags: no precise, no cdn_supported
+        .ctor(INPUT_PHOTO_FILE_LOCATION)
+        .long(id)
+        .long(access_hash)
+        .bytes(file_reference)
+        .string(thumb_size)
+        .long(offset)
+        .int(limit);
+    w.finish()
+}
+
+/// Download part of a document (voice message, video, file).
+///
+/// Here `thumb_size` genuinely is optional: empty means the document itself, and a size
+/// type means one of its `thumbs`.
+pub fn get_file_document(
+    id: i64,
+    access_hash: i64,
+    file_reference: &[u8],
+    thumb_size: &str,
+    offset: i64,
+    limit: i32,
+) -> Vec<u8> {
+    let mut w = Writer::with_capacity(64 + file_reference.len() + thumb_size.len());
+    w.ctor(UPLOAD_GET_FILE)
+        .uint(0)
+        .ctor(INPUT_DOCUMENT_FILE_LOCATION)
+        .long(id)
+        .long(access_hash)
+        .bytes(file_reference)
+        .string(thumb_size)
+        .long(offset)
+        .int(limit);
+    w.finish()
+}
+
+/// `auth.exportAuthorization#e5bfffcd`
+pub const AUTH_EXPORT_AUTHORIZATION: u32 = 0xe5bf_ffcd;
+/// `auth.importAuthorization#a57a7dad`
+pub const AUTH_IMPORT_AUTHORIZATION: u32 = 0xa57a_7dad;
+/// `auth.exportedAuthorization#b434e2b8`
+pub const AUTH_EXPORTED_AUTHORIZATION: u32 = 0xb434_e2b8;
+
+/// Ask the *current* data centre for a token that authorises us on another one.
+///
+/// This is the first half of reaching a file that does not live where the session does.
+/// A photo carries a `dc_id`, and `upload.getFile` on the wrong data centre answers
+/// `FILE_MIGRATE_x` — there is no fallback that serves it anyway. So a client that only
+/// ever holds one connection can download only the media that happens to share its home
+/// data centre, which is a minority of it.
+pub fn export_authorization(dc_id: i32) -> Vec<u8> {
+    let mut w = Writer::with_capacity(8);
+    w.ctor(AUTH_EXPORT_AUTHORIZATION).int(dc_id);
+    w.finish()
+}
+
+/// The second half, sent on a freshly handshaken connection to the target data centre.
+///
+/// Until this succeeds the new connection has an auth key but no *user* — it is
+/// authenticated, not authorised, and `upload.getFile` on it returns `AUTH_KEY_UNREGISTERED`.
+pub fn import_authorization(id: i64, bytes: &[u8]) -> Vec<u8> {
+    let mut w = Writer::with_capacity(24 + bytes.len());
+    w.ctor(AUTH_IMPORT_AUTHORIZATION).long(id).bytes(bytes);
+    w.finish()
+}
+
+/// Read `auth.exportedAuthorization#b434e2b8 id:long bytes:bytes`.
+pub fn parse_exported_authorization(body: &[u8]) -> Option<(i64, Vec<u8>)> {
+    let mut r = Reader::new(body);
+    if r.ctor().ok()? != AUTH_EXPORTED_AUTHORIZATION {
+        return None;
+    }
+    let id = r.long().ok()?;
+    let bytes = r.bytes().ok()?.to_vec();
+    Some((id, bytes))
+}
+
+/// Fetch specific messages by id, used to get a fresh `file_reference` after the previous
+/// one expired. The reply is a `messages.Messages` — parse it with `chats::parse_history`.
+///
+/// **A channel needs [`get_channel_messages`] instead.** `messages.getMessages` is for
+/// users and small groups; asking it for a channel's messages returns an empty result,
+/// because a channel's id space is separate and the method has no `channel` to scope by.
+/// That is not a corner case here: a `file_reference` expires roughly daily, and channels
+/// are where most of the media in a Telegram account lives, so the recovery path that used
+/// this for everything was broken precisely where it was needed.
+pub fn get_messages(ids: &[i32]) -> Vec<u8> {
+    let mut w = Writer::with_capacity(12 + ids.len() * 8);
+    w.ctor(MESSAGES_GET_MESSAGES)
+        .ctor(tl::VECTOR)
+        .uint(ids.len() as u32);
+    for &id in ids {
+        w.ctor(INPUT_MESSAGE_ID).int(id);
+    }
+    w.finish()
+}
+
+/// The same, scoped to a channel.
+pub fn get_channel_messages(channel_id: i64, access_hash: i64, ids: &[i32]) -> Vec<u8> {
+    let mut w = Writer::with_capacity(32 + ids.len() * 8);
+    w.ctor(CHANNELS_GET_MESSAGES)
+        .ctor(INPUT_CHANNEL)
+        .long(channel_id)
+        .long(access_hash)
+        .ctor(tl::VECTOR)
+        .uint(ids.len() as u32);
+    for &id in ids {
+        w.ctor(INPUT_MESSAGE_ID).int(id);
+    }
+    w.finish()
+}
+
+/// Refresh messages in whichever peer they belong to.
+///
+/// The dispatch is here rather than at the call site because getting it wrong is silent:
+/// the wrong method returns an empty list, not an error, so the download simply never
+/// retries and the user sees the original failure again.
+pub fn refresh_messages(
+    kind: crate::chats::Kind,
+    id: i64,
+    access_hash: i64,
+    ids: &[i32],
+) -> Vec<u8> {
+    match kind {
+        crate::chats::Kind::Channel => get_channel_messages(id, access_hash, ids),
+        crate::chats::Kind::User | crate::chats::Kind::Chat => get_messages(ids),
+    }
+}
+
+/// Extract the raw bytes from an `upload.file` reply.
+///
+/// The body is `upload.file#096a18d5 type:storage.FileType mtime:int bytes:bytes`.
+/// Returns `None` on `upload.fileCdnRedirect`, which this build does not handle.
+pub fn parse_file(body: &[u8]) -> Option<Vec<u8>> {
+    let mut r = Reader::new(body);
+    let ctor = r.ctor().ok()?;
+    match ctor {
+        UPLOAD_FILE => {
+            // `type:storage.FileType` is a *boxed* constructor — four bytes of id, one of
+            // `storage.fileJpeg#7efe0e`, `storage.filePng#a4f63c0` and eight more. Reading
+            // it as a TL string, which is what this did, takes the first byte as a length:
+            // for a JPEG that is 0x0e, so it consumed 15 bytes padded to 16 instead of 4,
+            // and every field after it was read from inside the image. Every download
+            // either failed to parse or produced bytes no codec would accept.
+            let _file_type = r.ctor().ok()?;
+            let _mtime = r.int().ok()?;
+            Some(r.bytes().ok()?.to_vec())
+        }
+        UPLOAD_FILECDN => {
+            // CDN redirects need a different path. For now, refuse gracefully.
+            None
+        }
+        _ => None,
+    }
 }
 
 pub fn get_config() -> Vec<u8> {
@@ -535,6 +853,172 @@ mod tests {
             got,
             vec![Update::RpcError { req_msg_id: 7, code: 420, text: String::from("FLOOD_WAIT_42") }]
         );
+    }
+
+    /// `storage.FileType` constructors, from api.tl lines 79-88. The ones whose low byte
+    /// would be read as a plausible TL string length are the interesting cases.
+    const STORAGE_FILE_TYPES: &[(u32, &str)] = &[
+        (0x0007_efe0, "storage.fileJpeg"),
+        (0x0a4f_63c0, "storage.filePng"),
+        (0xcae1_aadf, "storage.fileGif"),
+        (0x1081_464c, "storage.fileWebp"),
+        (0xaa96_3b05, "storage.fileUnknown"),
+        (0x40bc_6f52, "storage.filePartial"),
+    ];
+
+    fn upload_file_reply(file_type: u32, payload: &[u8]) -> Vec<u8> {
+        // `upload.file#96a18d5 type:storage.FileType mtime:int bytes:bytes`
+        let mut w = Writer::new();
+        w.ctor(UPLOAD_FILE).ctor(file_type).int(1_700_000_000).bytes(payload);
+        w.finish()
+    }
+
+    #[test]
+    fn a_downloaded_file_survives_its_own_header() {
+        // The bug this pins: `type` is a boxed four-byte constructor, and reading it as a
+        // TL string took its low byte as a length. For a JPEG that is 0x0e, so 16 bytes
+        // were consumed instead of 4 and the payload length was then read from inside the
+        // image. Every download failed, and nothing tested it.
+        //
+        // Every FileType, because the damage depended on the low byte: 0x0e read 14 bytes,
+        // 0xc0 read 192, and 0xdf read 223 — different failures from the same line.
+        let payload: Vec<u8> = (0u8..=255).collect();
+        for (id, name) in STORAGE_FILE_TYPES {
+            let got = parse_file(&upload_file_reply(*id, &payload));
+            assert_eq!(got.as_deref(), Some(&payload[..]), "{name} misparsed");
+        }
+    }
+
+    #[test]
+    fn an_empty_download_is_empty_rather_than_a_parse_failure() {
+        // What the server sends past the end of a file. It has to be distinguishable from
+        // "the reply made no sense", because one ends a chunk loop and the other is a bug.
+        assert_eq!(parse_file(&upload_file_reply(0x0007_efe0, &[])), Some(Vec::new()));
+    }
+
+    #[test]
+    fn a_long_download_round_trips_at_the_chunk_size() {
+        // Past 253 bytes a TL string switches to the three-byte length form. A chunk is
+        // 128 KiB, so that path is the only one ever used in practice.
+        let payload = vec![0x5au8; CHUNK as usize];
+        let got = parse_file(&upload_file_reply(0x0007_efe0, &payload)).unwrap();
+        assert_eq!(got.len(), CHUNK as usize);
+        assert!(got.iter().all(|b| *b == 0x5a));
+    }
+
+    #[test]
+    fn a_cdn_redirect_is_refused_rather_than_misread() {
+        let mut w = Writer::new();
+        w.ctor(UPLOAD_FILECDN);
+        assert_eq!(parse_file(&w.finish()), None);
+    }
+
+    #[test]
+    fn a_photo_request_carries_the_size_type_it_was_given() {
+        // An empty thumb_size is what the server answers LOCATION_INVALID to, so the
+        // string has to reach the wire intact.
+        let body = get_file_photo(0x1122_3344_5566_7788, 0x99, b"\x01\x02\x03", "x", 0, CHUNK);
+        let mut r = Reader::new(&body);
+        assert_eq!(r.ctor().unwrap(), UPLOAD_GET_FILE);
+        assert_eq!(r.uint().unwrap(), 0); // flags
+        assert_eq!(r.ctor().unwrap(), INPUT_PHOTO_FILE_LOCATION);
+        assert_eq!(r.long().unwrap(), 0x1122_3344_5566_7788);
+        assert_eq!(r.long().unwrap(), 0x99);
+        assert_eq!(r.bytes().unwrap(), b"\x01\x02\x03");
+        assert_eq!(r.bytes().unwrap(), b"x");
+        assert_eq!(r.long().unwrap(), 0);
+        assert_eq!(r.int().unwrap(), CHUNK);
+    }
+
+    #[test]
+    fn the_chunk_size_obeys_the_alignment_rules() {
+        // Both are required by the API: the offset and limit must be multiples of 4 KiB,
+        // and a chunk must not straddle a 1 MiB boundary — which holds for any limit that
+        // divides 1 MiB evenly.
+        assert_eq!(CHUNK % 4096, 0);
+        assert_eq!((1024 * 1024) % CHUNK, 0);
+        // And it must leave room inside a frame for the headers wrapped around it, which
+        // is what asking for the full 1 MiB did not.
+        assert!((CHUNK as usize) < crate::transport::MAX_FRAME);
+    }
+
+    #[test]
+    fn a_chunk_offset_stays_within_one_megabyte_block() {
+        // offset / 1MiB == (offset + limit - 1) / 1MiB, for every chunk of a large file.
+        const MB: i64 = 1024 * 1024;
+        let mut offset = 0i64;
+        while offset < 8 * MB {
+            let last = offset + CHUNK as i64 - 1;
+            assert_eq!(offset / MB, last / MB, "chunk at {offset} straddles a boundary");
+            offset += CHUNK as i64;
+        }
+    }
+
+    #[test]
+    fn an_exported_authorization_round_trips() {
+        // The token that turns a handshaken connection to another data centre into an
+        // authorised one. Getting the two fields the wrong way round would produce an
+        // importAuthorization the server rejects with no useful text.
+        let mut w = Writer::new();
+        w.ctor(AUTH_EXPORTED_AUTHORIZATION).long(0x1234_5678_9abc_def0u64 as i64).bytes(&[9, 8, 7]);
+        let (id, bytes) = parse_exported_authorization(&w.finish()).unwrap();
+        assert_eq!(id, 0x1234_5678_9abc_def0u64 as i64);
+        assert_eq!(bytes, vec![9, 8, 7]);
+
+        // And the request it goes into.
+        let body = import_authorization(id, &bytes);
+        let mut r = Reader::new(&body);
+        assert_eq!(r.ctor().unwrap(), AUTH_IMPORT_AUTHORIZATION);
+        assert_eq!(r.long().unwrap(), id);
+        assert_eq!(r.bytes().unwrap(), &[9, 8, 7]);
+    }
+
+    #[test]
+    fn a_wrong_constructor_is_not_read_as_an_authorization() {
+        // An rpc_error arriving where the token was expected must not be mined for two
+        // fields that happen to parse — importing garbage would look like a server fault.
+        let mut w = Writer::new();
+        w.ctor(RPC_ERROR).int(400).string("DC_ID_INVALID");
+        assert_eq!(parse_exported_authorization(&w.finish()), None);
+    }
+
+    #[test]
+    fn export_asks_for_the_data_centre_it_was_given() {
+        let body = export_authorization(4);
+        let mut r = Reader::new(&body);
+        assert_eq!(r.ctor().unwrap(), AUTH_EXPORT_AUTHORIZATION);
+        assert_eq!(r.int().unwrap(), 4);
+    }
+
+    #[test]
+    fn refreshing_a_channel_uses_the_channel_method() {
+        use crate::chats::Kind;
+
+        // A channel is scoped by an inputChannel; a user or a group is not. Sending
+        // messages.getMessages for a channel returns an empty list rather than an error, so
+        // the file_reference recovery silently did nothing — and channels are where most of
+        // an account's media lives.
+        let ch = refresh_messages(Kind::Channel, 777, 0x5555, &[42]);
+        let mut r = Reader::new(&ch);
+        assert_eq!(r.ctor().unwrap(), CHANNELS_GET_MESSAGES);
+        assert_eq!(r.ctor().unwrap(), INPUT_CHANNEL);
+        assert_eq!(r.long().unwrap(), 777);
+        assert_eq!(r.long().unwrap(), 0x5555);
+        assert_eq!(r.ctor().unwrap(), tl::VECTOR);
+        assert_eq!(r.uint().unwrap(), 1);
+        assert_eq!(r.ctor().unwrap(), INPUT_MESSAGE_ID);
+        assert_eq!(r.int().unwrap(), 42);
+
+        // And the other two kinds keep the plain method, with no peer in front of the ids.
+        for kind in [Kind::User, Kind::Chat] {
+            let body = refresh_messages(kind, 777, 0x5555, &[42]);
+            let mut r = Reader::new(&body);
+            assert_eq!(r.ctor().unwrap(), MESSAGES_GET_MESSAGES, "{kind:?}");
+            assert_eq!(r.ctor().unwrap(), tl::VECTOR);
+            assert_eq!(r.uint().unwrap(), 1);
+            assert_eq!(r.ctor().unwrap(), INPUT_MESSAGE_ID);
+            assert_eq!(r.int().unwrap(), 42);
+        }
     }
 
     #[test]

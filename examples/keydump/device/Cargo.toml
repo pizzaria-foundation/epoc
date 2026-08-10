@@ -1,0 +1,28 @@
+# Its own workspace root, for the same reason examples/keyprobe/device is: a crate that
+# defines #[panic_handler] cannot be built for the host at all, because cargo links the
+# test harness against std, which already defines one.
+[workspace]
+
+[package]
+name = "keydump-device"
+description = "Diagnostic: reads the handset's own ABNT2 qwerty keymap out of ptiengine"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+rust-version = "1.85"
+publish = false
+
+[lib]
+crate-type = ["staticlib"]
+
+[dependencies]
+symbian-app = { path = "../../../crates/symbian-app" }
+symbian-ui = { path = "../../../crates/symbian-ui" }
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true
+debug = false
+overflow-checks = false

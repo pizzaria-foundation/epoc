@@ -57,6 +57,71 @@ def default_charset():
     return sorted(cps)
 
 
+# Emoji, as a separate atlas rather than more glyphs in the text ones.
+#
+# Two reasons, and the second is the load-bearing one. Emoji have no bold: Noto Emoji
+# ships a single weight, so putting them in both ui11 and ui11b would store two
+# byte-identical copies. And a chat client needs them in *text* — a Telegram display
+# name is as likely to contain one as a message is — so the alternative to sharing is
+# paying twice. `symbian_gfx::WithFallback` chains the two atlases at run time, which
+# is the same trick the --font chain does at build time, moved later.
+#
+# It stays a subset for the reason the Latin charset does: three atlases are linked into
+# the image and .rodata is already the largest thing in it. All 1,496 codepoints Noto
+# Emoji covers would be ~250 KB at 11px, which is most of a binary.
+#
+# What is in it, and why those:
+#
+#   Emoticons (1F600-1F64F)  the 80 faces and gestures. The block a sticker's `alt`
+#                            draws from more than any other, and what people type.
+#   Hands and eyes (1F440-1F44F)  thumbs up and down are the two most-sent emoji on
+#                            the platform, and 👀/👏/👌 are close behind.
+#   Hearts (1F490-1F49F)     the coloured hearts, plus 💯 and 💩 next door.
+#   Singles                  Telegram's own default reaction set, which is the closest
+#                            thing to a measured frequency list for this application.
+def emoji_charset():
+    cps = set()
+    cps |= set(range(0x1F600, 0x1F650))      # Emoticons: faces and gestures
+    cps |= set(range(0x1F440, 0x1F450))      # eyes, ears, hands, thumbs
+    cps |= set(range(0x1F490, 0x1F4A0))      # hearts and flowers
+    # Telegram's default reactions, and the handful of dingbats that live in older
+    # blocks rather than in the emoji planes.
+    cps |= {
+        0x2764,                              # red heart
+        0x2B50, 0x2705, 0x274C,              # star, check, cross
+        0x26A1,                              # high voltage
+        0x2603,                              # snowman
+        0x270D,                              # writing hand
+        0x263A,                              # smiling face
+        0x270C, 0x261D, 0x270A, 0x270B,      # victory, point up, fist, raised hand
+        0x1F525, 0x1F389, 0x1F4AF, 0x1F4A9,  # fire, party, hundred, pile of poo
+        0x1F4A5,                             # collision
+        0x1F914, 0x1F923, 0x1F970, 0x1F92F,  # thinking, rofl, smiling hearts, exploding
+        0x1F92C, 0x1F929, 0x1F92E, 0x1F921,  # cursing, star-struck, vomiting, clown
+        0x1F971, 0x1F974, 0x1F913, 0x1F917,  # yawning, woozy, nerd, hugging
+        0x1F30A, 0x1F3C6, 0x1F494, 0x1F353,  # wave, trophy, broken heart, strawberry
+        0x1F37E, 0x1F48B, 0x1F595, 0x1F634,  # bottle, kiss mark, middle finger, sleeping
+        0x1F47B, 0x1F383, 0x1F91D, 0x1F385,  # ghost, pumpkin, handshake, santa
+        0x1F384, 0x1F485, 0x1F5FF, 0x1F192,  # tree, nail polish, moai, COOL
+        0x1F498, 0x1F984, 0x1F48A, 0x1F47E,  # cupid, unicorn, pill, alien monster
+        0x1F937, 0x1F62D, 0x1F60D, 0x1F621,  # shrug, loudly crying, heart eyes, angry
+    }
+    # The media-row glyphs the client draws in its own labels, rather than as user
+    # content. These are here and not in default_charset for a blunt reason: none of the
+    # three text fonts has them, and neither does U+266A EIGHTH NOTE, which the voice
+    # label used to ask for and which therefore drew nothing at all.
+    cps |= {
+        0x1F3A4,                             # microphone: a voice message
+        0x1F3B5,                             # musical note: an audio file
+        0x1F5BC,                             # framed picture: a photo
+        0x1F4CE,                             # paperclip: any other document
+    }
+    return sorted(cps)
+
+
+CHARSETS = {"default": default_charset, "emoji": emoji_charset}
+
+
 def coverage(path):
     """The set of codepoints a font really has.
 
@@ -164,10 +229,14 @@ def main():
     ap.add_argument("--size", type=int, required=True, help="pixel size")
     ap.add_argument("--out", required=True)
     ap.add_argument("--ascent", type=int, default=None,
-                    help="override ascent; use to force a tighter line box")
+                    help="override ascent; use to force a tighter line box. Also how a "
+                         "fallback atlas is aligned: bearings are measured from this, so "
+                         "an emoji atlas must be given the ascent of the text atlas it "
+                         "will be chained to, or every glyph sits off the baseline")
+    ap.add_argument("--charset", choices=sorted(CHARSETS), default="default")
     args = ap.parse_args()
 
-    data, info = build(args.font, args.size, default_charset(), args.ascent)
+    data, info = build(args.font, args.size, CHARSETS[args.charset](), args.ascent)
     with open(args.out, "wb") as f:
         f.write(data)
 

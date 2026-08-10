@@ -66,7 +66,49 @@ pub const SHIM_EV_RESOLVED: i32 = 24;
 pub const SHIM_EV_NET_READY: i32 = 25;
 /// A worker-thread job finished; `status` is what `rust_work` returned.
 pub const SHIM_EV_WORK_DONE: i32 = 30;
+/// An image decode finished. `a` and `b` are the decoded width and height — what the
+/// codec could deliver, which is bounded by the request but rarely equal to it, since
+/// the ICL only reduces by powers of two.
+pub const SHIM_EV_IMAGE_DONE: i32 = 40;
+/// A clip finished opening. `a` is its duration in milliseconds.
+pub const SHIM_EV_AUDIO_OPENED: i32 = 41;
+/// Playback ended. `status` is `SHIM_OK` at the natural end, `SHIM_ERR_CANCEL` when
+/// stopped, and a real error otherwise; `d` carries the platform's raw code.
+pub const SHIM_EV_AUDIO_DONE: i32 = 42;
+/// A subscribed Publish & Subscribe property changed. `a` is the key within the app's
+/// category, `c` is the freshly read integer value. Emitted by `shim_prop`'s subscriber.
+/// A headless daemon uses this as its stop signal — whoever launched it sets the property,
+/// this arrives.
+pub const SHIM_EV_PROP: i32 = 53;
 pub const SHIM_EV_QUIT: i32 = 90;
+
+/// The Publish & Subscribe key an app publishes its present-efficiency telemetry under, in
+/// its **own** UID3 category ([`shim_own_uid3`]). Writing your own category needs no
+/// capability, and the dev bridge reads it back in the same process — so this is the cheap,
+/// no-disk-I/O channel for the `[gfx]` metric, cheap enough to publish from the frame it
+/// measures. The value is the percentage of blit cost the dirty-rect present *saved*
+/// (0–100). Key 0 is the daemon stop flag, so telemetry starts at 1.
+pub const PS_KEY_GFX: u32 = 1;
+
+/// The Publish & Subscribe key an app publishes its `rust_step` watchdog under, in its own
+/// UID3 category (same free-write/free-read reasoning as [`PS_KEY_GFX`]). The value packs the
+/// worst *handle-phase* time in the high 16 bits and the worst *draw-phase* time in the low
+/// 16 (both milliseconds) — a long step freezes the whole phone, and the split says whether
+/// the cause is event/input work or rendering.
+pub const PS_KEY_STEP: u32 = 2;
+
+/// Publish & Subscribe key for the receive-path breakdown (a fine cut of the step's handle
+/// phase): worst decrypt time in the high 16 bits, worst unwrap (inflate + TL parse) in the
+/// low 16 (both milliseconds). Says whether a network-processing stall is the offloadable
+/// crypto or the allocation-heavy parse.
+pub const PS_KEY_RECV: u32 = 3;
+
+/// Publish & Subscribe key for the receive **handle** split at the protocol-driver level:
+/// worst `feed` time (decode + parse of an incoming batch) in the high 16 bits, worst
+/// `process` time (draining steps / building the model) in the low 16 (both ms). The safe,
+/// driver-level cut — no per-packet work, no change to the portable protocol crate.
+pub const PS_KEY_NET: u32 = 4;
+
 
 /// Abstract key ids, mirroring `TShimKey` in `shim_app.cpp`.
 ///
@@ -88,6 +130,16 @@ pub mod key {
     pub const CALL: i32 = 0x11000B;
     pub const END: i32 = 0x11000C;
 }
+
+// ---------------------------------------------------------------- keyboard --
+// Which mechanism turns a physical key into a character.
+
+/// The shim's own scan-code table; tested on hardware. Does not produce the Fn
+/// symbol layer.
+pub const SHIM_KEYBOARD_SCAN: i32 = 0;
+/// Symbian's front-end processor. Produces dead-key composition (á, ã, ê) and the
+/// full Fn/Chr symbol layer.
+pub const SHIM_KEYBOARD_FEP: i32 = 1;
 
 /// Modifier bits in `ShimEvent::b`.
 pub mod modifier {
@@ -199,6 +251,8 @@ extern "C" {
     /// `SHIM_OK` if the named DLL loads on this device, else the Symbian error
     /// (`KErrNotFound` is -1). `name` is UTF-16, e.g. `libcrypto.dll`.
     pub fn shim_dll_present(name: *const u16, len: i32) -> i32;
+    /// This process's own UID3, used as its Publish & Subscribe telemetry category.
+    pub fn shim_own_uid3() -> u32;
     pub fn shim_entropy(out: *mut u8, len: i32) -> i32;
 
     // files
@@ -244,10 +298,85 @@ extern "C" {
     pub fn shim_timer_cancel(handle: i32);
     pub fn shim_now_us() -> u64;
     pub fn shim_unix_time() -> i64;
+    pub fn shim_utc_offset() -> i32;
+
+    // image
+    pub fn shim_image_probe(path: *const u16, path_len: i32, w: *mut i32, h: *mut i32) -> i32;
+    pub fn shim_image_decode_start(
+        path: *const u16,
+        path_len: i32,
+        max_w: i32,
+        max_h: i32,
+        handle: *mut i32,
+    ) -> i32;
+    pub fn shim_image_decode_start_mem(
+        data: *const u8,
+        len: i32,
+        max_w: i32,
+        max_h: i32,
+        handle: *mut i32,
+    ) -> i32;
+    pub fn shim_image_result(
+        handle: i32,
+        out: *mut u16,
+        out_cap: i32,
+        w: *mut i32,
+        h: *mut i32,
+    ) -> i32;
+    pub fn shim_image_describe(handle: i32, out: *mut i32, cap: i32) -> i32;
+    pub fn shim_image_close(handle: i32);
+
+    // audio
+    pub fn shim_audio_open_file(path: *const u16, path_len: i32) -> i32;
+    pub fn shim_audio_play() -> i32;
+    pub fn shim_audio_pause() -> i32;
+    pub fn shim_audio_stop() -> i32;
+    pub fn shim_audio_position_ms() -> i32;
+    pub fn shim_audio_duration_ms() -> i32;
+    pub fn shim_audio_set_volume(percent: i32) -> i32;
+    pub fn shim_audio_close() -> i32;
 
     // diagnostics
     pub fn shim_panic(file: *const u8, file_len: u32, line: u32) -> !;
     pub fn shim_debug(text: *const u16, len: i32);
+
+    // keyboard
+    pub fn shim_keyboard_mode(mode: i32) -> i32;
+    pub fn shim_keyboard_mode_get() -> i32;
+
+    // directory create + listing
+    pub fn shim_mkdir(path: *const u16, path_len: i32) -> i32;
+    pub fn shim_dir_list(path: *const u16, path_len: i32, buf: *mut u16, cap: i32, count: *mut i32) -> i32;
+
+    // app-lifecycle monitor (USE_APPMON) — window-group + focus changes
+    pub fn shim_process_start(path: *const u16, path_len: i32) -> i32;
+    /// Whether a process built from the given UID3 is currently running. Returns 1 for
+    /// running, 0 for not, negative on error.
+    pub fn shim_process_running(uid3: u32) -> i32;
+
+    // memory readings (USE_MEM) — device-wide RAM and this process's own heap, in KiB.
+    /// Free device RAM in KiB, or a negative Symbian error. The figure to watch for pressure.
+    pub fn shim_mem_free_kb() -> i32;
+    /// Total device RAM in KiB, or a negative error.
+    pub fn shim_mem_total_kb() -> i32;
+    /// Bytes this process has allocated, in KiB. There is no way to ask this of another
+    /// process, so no caller can attribute RAM per app: the figures are device-wide, plus
+    /// this process's own heap.
+    pub fn shim_heap_used_kb() -> i32;
+
+    // task control (USE_TASK) — close/kill/foreground/enumerate apps by UID3.
+    /// Ask the app with this UID3 to close cooperatively (`TApaTask::EndTask`). No
+    /// capability. `SHIM_ERR_NOT_FOUND` if no running task has the UID.
+    pub fn shim_prop_define(category: u32, key: u32) -> i32;
+    /// Set the integer value of a property.
+    pub fn shim_prop_set(category: u32, key: u32, value: i32) -> i32;
+    /// Read the integer value of a property into `*out`.
+    pub fn shim_prop_get(category: u32, key: u32, out: *mut i32) -> i32;
+    /// Subscribe to a property; every change posts a [`SHIM_EV_PROP`] carrying the key and
+    /// the freshly read value. One outstanding subscription per key.
+    pub fn shim_prop_subscribe(category: u32, key: u32) -> i32;
+    /// Cancel the subscription started by [`shim_prop_subscribe`].
+    pub fn shim_prop_unsubscribe(category: u32, key: u32);
 }
 
 // Host stubs, so this crate compiles and the workspace tests run. They abort
@@ -300,6 +429,9 @@ mod host_stubs {
     }
     pub unsafe fn shim_dll_present(_name: *const u16, _len: i32) -> i32 {
         SHIM_ERR_NOT_READY
+    }
+    pub unsafe fn shim_own_uid3() -> u32 {
+        0
     }
     pub unsafe fn shim_entropy(out: *mut u8, len: i32) -> i32 {
         /* The host stub is the one place a fake entropy source is defensible, and it is
@@ -419,10 +551,117 @@ mod host_stubs {
     pub unsafe fn shim_unix_time() -> i64 {
         0
     }
+    pub unsafe fn shim_utc_offset() -> i32 {
+        0
+    }
+    pub unsafe fn shim_image_probe(_p: *const u16, _l: i32, _w: *mut i32, _h: *mut i32) -> i32 {
+        SHIM_ERR_NOT_SUPPORTED
+    }
+    pub unsafe fn shim_image_decode_start(
+        _p: *const u16,
+        _l: i32,
+        _mw: i32,
+        _mh: i32,
+        _h: *mut i32,
+    ) -> i32 {
+        SHIM_ERR_NOT_SUPPORTED
+    }
+    pub unsafe fn shim_image_decode_start_mem(
+        _d: *const u8,
+        _l: i32,
+        _mw: i32,
+        _mh: i32,
+        _h: *mut i32,
+    ) -> i32 {
+        SHIM_ERR_NOT_SUPPORTED
+    }
+    pub unsafe fn shim_image_result(
+        _h: i32,
+        _o: *mut u16,
+        _cap: i32,
+        _w: *mut i32,
+        _ht: *mut i32,
+    ) -> i32 {
+        SHIM_ERR_NOT_SUPPORTED
+    }
+    pub unsafe fn shim_image_describe(_h: i32, _o: *mut i32, _c: i32) -> i32 {
+        SHIM_ERR_NOT_SUPPORTED
+    }
+    pub unsafe fn shim_image_close(_h: i32) {}
+    pub unsafe fn shim_audio_open_file(_p: *const u16, _l: i32) -> i32 {
+        SHIM_ERR_NOT_SUPPORTED
+    }
+    pub unsafe fn shim_audio_play() -> i32 {
+        SHIM_ERR_NOT_SUPPORTED
+    }
+    pub unsafe fn shim_audio_pause() -> i32 {
+        SHIM_ERR_NOT_SUPPORTED
+    }
+    pub unsafe fn shim_audio_stop() -> i32 {
+        SHIM_ERR_NOT_SUPPORTED
+    }
+    pub unsafe fn shim_audio_position_ms() -> i32 {
+        0
+    }
+    pub unsafe fn shim_audio_duration_ms() -> i32 {
+        0
+    }
+    pub unsafe fn shim_audio_set_volume(_p: i32) -> i32 {
+        SHIM_ERR_NOT_SUPPORTED
+    }
+    pub unsafe fn shim_audio_close() -> i32 {
+        SHIM_ERR_NOT_SUPPORTED
+    }
     pub unsafe fn shim_panic(_f: *const u8, _l: u32, _line: u32) -> ! {
         nope!("shim_panic")
     }
     pub unsafe fn shim_debug(_t: *const u16, _l: i32) {}
+    pub unsafe fn shim_keyboard_mode(_mode: i32) -> i32 {
+        0
+    }
+    pub unsafe fn shim_keyboard_mode_get() -> i32 {
+        SHIM_KEYBOARD_SCAN
+    }
+    pub unsafe fn shim_mkdir(_p: *const u16, _pl: i32) -> i32 {
+        SHIM_ERR_NOT_READY
+    }
+    pub unsafe fn shim_dir_list(_p: *const u16, _pl: i32, _b: *mut u16, _c: i32, count: *mut i32) -> i32 {
+        if !count.is_null() {
+            core::ptr::write(count, 0);
+        }
+        SHIM_ERR_NOT_READY
+    }
+    pub unsafe fn shim_process_start(_p: *const u16, _pl: i32) -> i32 {
+        SHIM_ERR_NOT_READY
+    }
+    pub unsafe fn shim_process_running(_uid3: u32) -> i32 {
+        SHIM_ERR_NOT_READY
+    }
+    pub unsafe fn shim_mem_free_kb() -> i32 {
+        SHIM_ERR_NOT_READY
+    }
+    pub unsafe fn shim_mem_total_kb() -> i32 {
+        SHIM_ERR_NOT_READY
+    }
+    pub unsafe fn shim_heap_used_kb() -> i32 {
+        SHIM_ERR_NOT_READY
+    }
+    pub unsafe fn shim_prop_define(_c: u32, _k: u32) -> i32 {
+        SHIM_ERR_NOT_READY
+    }
+    pub unsafe fn shim_prop_set(_c: u32, _k: u32, _v: i32) -> i32 {
+        SHIM_ERR_NOT_READY
+    }
+    pub unsafe fn shim_prop_get(_c: u32, _k: u32, out: *mut i32) -> i32 {
+        if !out.is_null() {
+            core::ptr::write(out, 0);
+        }
+        SHIM_ERR_NOT_READY
+    }
+    pub unsafe fn shim_prop_subscribe(_c: u32, _k: u32) -> i32 {
+        SHIM_ERR_NOT_READY
+    }
+    pub unsafe fn shim_prop_unsubscribe(_c: u32, _k: u32) {}
 }
 
 #[cfg(not(target_vendor = "symbian"))]

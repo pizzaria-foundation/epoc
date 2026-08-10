@@ -45,6 +45,8 @@
 #include <e32std.h>
 #include <es_sock.h>
 #include <in_sock.h>
+#include <apgtask.h>
+#include <coemain.h>
 #include <commdbconnpref.h>
 #include <es_enum.h>
 
@@ -91,6 +93,7 @@ public:
     /* Sockets and the resolver open against this, which is what binds them to the
      * bearer we brought up rather than to whatever default route exists. */
     RConnection& Conn() { return iConnection; }
+    TBool IsUp() const { return iUp; }
 
 private:
     CShimNet(TInt aHandle, TInt aIap);
@@ -103,6 +106,17 @@ private:
     TInt iHandle;
     TInt iIap;
     TBool iOpen;
+    /* Whether Start (or Attach) actually succeeded.
+     *
+     * RSocket::Open against an RConnection that was never started does not return an
+     * error -- esock panics the client, which on this platform means the application
+     * disappears with no message and no report file. That is what "the app does not even
+     * open when there is no network" was: attach found nothing to join, the caller opened
+     * a socket on the dead connection anyway, and the process died before the window
+     * server ever drew anything. */
+    TBool iUp;
+    /* Whether this connection put the application in the background to show a dialog. */
+    TBool iSentBack;
     /* The access point of the connection we joined, reported back so the caller can
      * persist it -- the same value a negotiated Start reports through GetIntSetting. */
     TInt iAttachedIap;
@@ -118,7 +132,7 @@ RConnection* ConnFor(TInt aHandle);
 
 CShimNet::CShimNet(TInt aHandle, TInt aIap)
     : CActive(EPriorityStandard), iHandle(aHandle), iIap(aIap), iOpen(EFalse),
-      iAttachedIap(0)
+      iUp(EFalse), iSentBack(EFalse), iAttachedIap(0)
     {
     }
 
@@ -196,6 +210,26 @@ TInt CShimNet::AttachToExisting()
     return KErrNone;
     }
 
+/* Move this application to the front or the back.
+ *
+ * Returns whether it actually happened. `CCoeEnv::Static()` is NULL on any thread without
+ * a control environment, and the previous version dereferenced it without asking -- on the
+ * GUI thread that is always fine, and "always" is the word that makes a null check look
+ * unnecessary right up until something calls this from somewhere else. */
+static TBool MoveApp(TBool aToFront)
+    {
+    CCoeEnv* env = CCoeEnv::Static();
+    if (!env)
+        return EFalse;
+    TApaTask task(env->WsSession());
+    task.SetWgId(env->RootWin().Identifier());
+    if (aToFront)
+        task.BringToForeground();
+    else
+        task.SendToBackground();
+    return ETrue;
+    }
+
 void CShimNet::Start()
     {
     if (iIap == SHIM_IAP_ATTACH)
@@ -220,6 +254,12 @@ void CShimNet::Start()
         }
     else if (iIap == SHIM_IAP_PROMPT)
         {
+        /* On S60 3rd Edition the CommsDat dialog sometimes opens behind the
+         * application window. Sending the app to the background before the
+         * dialog appears is the reliable fix — the same one Nokia's own
+         * connection examples use. */
+        iSentBack = MoveApp(EFalse);
+
         iPrefs.SetDialogPreference(ECommDbDialogPrefPrompt);
         iConnection.Start(iPrefs, iStatus);
         }
@@ -240,11 +280,9 @@ void CShimNet::Start()
 void CShimNet::RunL()
     {
     TInt iap = 0;
+    iUp = (iStatus.Int() == KErrNone);
     if (iStatus.Int() == KErrNone)
         {
-        /* Which access point the OS actually settled on. Reported so the caller can
-         * store it and skip the prompt next time; a failure to read it is not worth
-         * failing the connection over, so `a` simply stays zero. */
         _LIT(KIapId, "IAP\\Id");
         TUint32 id = 0;
         if (iConnection.GetIntSetting(KIapId, id) == KErrNone)
@@ -252,6 +290,19 @@ void CShimNet::RunL()
         else if (iAttachedIap != 0)
             iap = iAttachedIap;
         }
+
+    /* Back to the foreground only if this connection is the reason we left it.
+     *
+     * It used to be unconditional, which meant the attach path -- the common one, with no
+     * dialog and nothing to hide behind -- pulled the application to the front every time
+     * a connection came up. An application that steals focus for no reason is a bug even
+     * when nothing crashes. */
+    if (iSentBack)
+        {
+        MoveApp(ETrue);
+        iSentBack = EFalse;
+        }
+
     ShimPushSimple(SHIM_EV_NET_READY, iHandle, iStatus.Int(), iap);
     }
 
@@ -261,6 +312,7 @@ void CShimNet::DoCancel()
      * that has not completed leaves the interface alone. */
     iConnection.Close();
     iOpen = EFalse;
+    iUp = EFalse;
     }
 
 /* --------------------------------------------------------------------- DNS -- */
@@ -641,7 +693,7 @@ void CShimSocket::ConstructL(TInt aHandle, TInt aConn)
     iCtl = new (ELeave) CSockCtl(iSocket, aHandle);
     iReader = new (ELeave) CSockReader(iSocket, aHandle, iDatagram);
     iWriter = new (ELeave) CSockWriter(iSocket, aHandle, iDatagram);
-    }
+}
 
 /* ---- slot bookkeeping ---- */
 
@@ -666,6 +718,14 @@ RConnection* ConnFor(TInt aHandle)
     if (aHandle < 0 || aHandle >= KMaxNets || !gNets[aHandle])
         return NULL;
     return &gNets[aHandle]->Conn();
+    }
+
+/* True only once the connection has come up. See CShimNet::iUp. */
+TBool ConnIsUp(TInt aHandle)
+    {
+    if (aHandle < 0 || aHandle >= KMaxNets || !gNets[aHandle])
+        return EFalse;
+    return gNets[aHandle]->IsUp();
     }
 
 } /* namespace */
@@ -783,6 +843,10 @@ int32_t shim_dns_resolve(int32_t conn, const uint16_t* host, int32_t len,
     {
     if (!host || len <= 0 || !handle)
         return SHIM_ERR_ARGUMENT;
+    /* Same guard as OpenSocket, for the same reason: an RHostResolver opened against a
+     * connection that never came up panics the client rather than failing. */
+    if (conn >= 0 && !ConnIsUp(conn))
+        return SHIM_ERR_NOT_READY;
     *handle = 0;
     const TInt slot = AllocSlot(gResolvers, KMaxResolvers);
     if (slot < 0)
@@ -802,6 +866,11 @@ static int32_t OpenSocket(int32_t conn, int32_t* handle, TBool aDatagram)
     if (!handle)
         return SHIM_ERR_ARGUMENT;
     *handle = 0;
+    /* Refused rather than attempted. A socket opened on a connection that never came up
+     * panics the client inside esock, and a panic is not something a caller can report --
+     * the application is simply gone. An error it can act on is worth the check. */
+    if (conn >= 0 && !ConnIsUp(conn))
+        return SHIM_ERR_NOT_READY;
     const TInt slot = AllocSlot(gSockets, KMaxSockets);
     if (slot < 0)
         return SHIM_ERR_IN_USE;

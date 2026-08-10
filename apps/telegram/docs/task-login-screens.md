@@ -109,8 +109,8 @@ again" is telling someone to wait an unknown length of time.
 The simulator draws every screen on the host:
 
 ```
-cargo run -p preview          # renders each screen to preview-out/*.png
-cargo run -p sim -- telegram  # interactive, arrow keys and typing
+cargo run -p tg --example preview   # renders each screen to preview-out/*.png
+cargo run -p tg --example sim  # interactive, arrow keys and typing
 ```
 
 `crates/symbian-ui/src/testing.rs` has the helpers the existing screen tests use. There is
@@ -146,7 +146,7 @@ Read `docs/device-notes.md` and one existing module before starting. Two habits 
 ## Definition of done
 
 - [ ] `cargo test --workspace` green, with new tests for the screens and the flow
-- [ ] `cargo run -p preview` renders all three, and they fit 320×240
+- [ ] `cargo run -p tg --example preview` renders all three, and they fit 320×240
 - [ ] the framebuffer-bounds test covers them
 - [ ] `tools/symbuild apps/telegram` builds and the import count is unchanged
 - [ ] a login with a real number reaches at least `CodeSent`

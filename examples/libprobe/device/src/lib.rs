@@ -53,6 +53,16 @@ const PROBES: &[Probe] = &[
     Probe { dll: "libz.dll", gives: "inflate" },
     Probe { dll: "libm.dll", gives: "libm" },
     Probe { dll: "libpthread.dll", gives: "threads" },
+    // Not Open C, and not optional in the same way — ptiengine.dll is the platform's
+    // own keymap engine, the layer underneath the FEP. We want it for one purpose and
+    // one only: to *read* the device's ABNT2 QWERTY keymap out of it, once, with
+    // examples/keydump, and bake the answer into a static table. Nothing that ships
+    // imports it.
+    //
+    // Asked here first because keydump links it statically, and a static import of a
+    // missing DLL does not fail gracefully — the loader refuses the process and the icon
+    // just does nothing. Better to learn that from a number than from a silent app.
+    Probe { dll: "ptiengine.dll", gives: "device keymap" },
     // The two the SDK's own GUI apps link, as a control: these must come back
     // present, and if they do not then the query itself is broken rather than the
     // device being bare.
@@ -60,7 +70,7 @@ const PROBES: &[Probe] = &[
     Probe { dll: "avkon.dll", gives: "(control: must be OK)" },
 ];
 
-const CAP: usize = 8;
+const CAP: usize = 9;
 
 pub struct LibProbe {
     results: [i32; CAP],

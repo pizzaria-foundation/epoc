@@ -9,6 +9,10 @@ rust-version.workspace = true
 [dependencies]
 symbian-gfx = { workspace = true }
 symbian-ui = { workspace = true }
+# The same dead-key composition the device uses. Shared rather than reimplemented: a
+# simulator that composed accents its own way would be a simulator that cannot reproduce
+# an accent bug, which is the reason it did not have them at all before.
+symbian-keys = { workspace = true }
 
 # Host-only and never reaches the device. An app declares this crate under
 # [dev-dependencies] and puts its runner in examples/, so the device build never sees

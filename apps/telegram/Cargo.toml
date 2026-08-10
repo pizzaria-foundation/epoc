@@ -15,10 +15,24 @@ crate-type = ["rlib"]
 [features]
 default = []
 std = ["symbian-ui/std"]
+# The dev bridge, off by default: a signed release build must not ship a service
+# that accepts file writes from anything on the LAN. `tools/symbuild` turns it on
+# when EPOCADB_HOST is set in api.conf. The bridge itself lives in the SDK now
+# (`crates/symbian-app/src/devbridge.rs`); this only forwards the switch.
+dev-bridge = ["symbian-app/dev-bridge"]
+
+# Host-only: the simulator and the contact sheets. Neither reaches the device build, which
+# is the point of them living here rather than under [dependencies].
+[dev-dependencies]
+symbian-sim = { workspace = true }
+symbian-preview = { workspace = true }
+symbian-gfx = { workspace = true }
 
 [dependencies]
 symbian-ui = { workspace = true }
 symbian = { workspace = true }
+# For the dev bridge, which is a module of the SDK rather than of this app.
+symbian-app = { workspace = true }
 symbian-sys = { workspace = true }
 symbian-crypto = { workspace = true }
 tg-proto = { workspace = true }

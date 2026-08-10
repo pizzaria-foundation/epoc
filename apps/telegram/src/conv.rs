@@ -28,6 +28,33 @@ struct Laid {
     /// Trailing space below this bubble; smaller when the next message is from the
     /// same sender.
     gap: i32,
+    /// Extra height for a media placeholder, above the text. Includes [`MEDIA_GAP`].
+    media_h: i32,
+}
+
+impl Laid {
+    /// Height of the media band itself, without the gap under it.
+    fn media_band_h(&self) -> i32 {
+        (self.media_h - MEDIA_GAP).max(0)
+    }
+
+    /// Where the timestamp row starts, measured from the bubble's inner top.
+    ///
+    /// A method rather than two expressions inside the drawing, because it has to agree
+    /// with where the text was actually left — and it did not. The inline branch counted
+    /// text lines from `inner.y0` and forgot the media band above them, so on a media
+    /// message with little or no text the timestamp and the delivery tick were drawn
+    /// straight over the label. Every photo, voice and sticker row showed it.
+    fn meta_offset(&self, line_height: i32) -> i32 {
+        let lines = self.lines.len() as i32;
+        if self.time_inline {
+            // Shares the last text line.
+            self.media_h + (lines - 1).max(0) * line_height
+        } else {
+            // Its own line, under everything.
+            self.media_h + lines * line_height
+        }
+    }
 }
 
 /// Wrapping is expensive enough that we do it once per (width, message-count)
@@ -49,6 +76,10 @@ const BUBBLE_GAP_SAME: i32 = 2;
 /// Bubbles stop at this fraction of the width so the other party's alignment stays
 /// legible even for a long message.
 const BUBBLE_MAX_PCT: i32 = 74;
+/// Padding above and below the media placeholder's own label.
+const MEDIA_VPAD: i32 = 3;
+/// Space between the placeholder and the text under it.
+const MEDIA_GAP: i32 = 2;
 
 impl Transcript {
     pub fn build(chat: &Chat, theme: &Theme<'_>, avail_w: i32) -> Self {
@@ -70,6 +101,14 @@ impl Transcript {
                 lines.push(Line { start: 0, end: 0, width: 0 });
             }
 
+            // The placeholder band plus the gap below it. One number, read by both the
+            // layout and the drawing, so they cannot drift apart.
+            let media_h = if m.media.is_some() {
+                body.line_height() + MEDIA_VPAD * 2 + MEDIA_GAP
+            } else {
+                0
+            };
+
             // Width of the trailing metadata: time, plus ticks when outgoing.
             let meta_w = small.measure(&m.time)
                 + if m.outgoing { small.measure(m.state.glyph()) + 3 } else { 0 };
@@ -89,7 +128,8 @@ impl Transcript {
             let height = BUBBLE_VPAD * 2
                 + lines.len() as i32 * body.line_height()
                 + extra_h
-                + gap;
+                + gap
+                + media_h;
 
             laid.push(Laid {
                 lines,
@@ -97,6 +137,7 @@ impl Transcript {
                 height,
                 time_inline,
                 gap,
+                media_h,
             });
         }
 
@@ -132,11 +173,19 @@ pub struct Conversation {
     pub composer: TextField,
     pub focus: Focus,
     transcript: Option<Transcript>,
+    /// Set briefly when the user taps a media message, so the screen can show feedback.
+    pub note: Option<alloc::string::String>,
 }
 
 pub enum ConvAction {
     Back,
     Send(alloc::string::String),
+    /// Scroll reached the top of the transcript; request the page above.
+    LoadMore,
+    /// The user pressed Select on a message with media.
+    OpenMedia(usize),
+    /// Re-fetch the newest page of this conversation.
+    Refresh,
     None,
 }
 
@@ -149,6 +198,7 @@ impl Conversation {
             composer: TextField::with_limit(4096),
             focus: Focus::Composer,
             transcript: None,
+            note: None,
         }
     }
 
@@ -165,6 +215,13 @@ impl Conversation {
 
         let stale = self.transcript.as_ref().is_none_or(|t| t.is_stale(chat, avail));
         if stale {
+            // Save which message is at the top of the viewport so we can restore it
+            // after the rebuild. Without this, new messages prepended by lazy loading
+            // shift everything down and the user jumps to a different point.
+            let saved_top = self.transcript.as_ref()
+                .and_then(|t| ListState::row_at(t, self.state.scroll));
+            let saved_selected = self.state.selected;
+
             let t = Transcript::build(chat, theme, avail);
             // A fresh conversation opens at the newest message, which is what a
             // chat client must always do.
@@ -175,7 +232,18 @@ impl Conversation {
                 self.state.scroll_to_end(t, transcript_area.height());
             } else {
                 let t = self.transcript.as_ref().unwrap();
-                self.state.clamp(t, transcript_area.height());
+                // Restore the position: find the same message index in the new layout
+                // and set scroll to its top. The selected index is restored as well.
+                if let Some(idx) = saved_top {
+                    if idx < t.len() {
+                        self.state.selected = saved_selected.min(t.len().saturating_sub(1));
+                        self.state.scroll = ListState::row_top(t, self.state.selected);
+                    } else {
+                        self.state.clamp(t, transcript_area.height());
+                    }
+                } else {
+                    self.state.clamp(t, transcript_area.height());
+                }
             }
         }
         (transcript_area, composer)
@@ -193,7 +261,25 @@ impl Conversation {
 
         match ev.key {
             Key::Softkey(Softkey::Right) => return (Handled::Consumed, ConvAction::Back),
-            Key::Softkey(Softkey::Middle) | Key::Enter | Key::Call => {
+            // Re-fetch this conversation. Nothing here is pushed, so a reply that arrived
+            // while the screen was open is invisible until something asks for it.
+            Key::Softkey(Softkey::Left) => {
+                self.note = Some(alloc::string::String::from("atualizando…"));
+                return (Handled::Consumed, ConvAction::Refresh);
+            }
+            Key::Softkey(Softkey::Middle) | Key::Enter | Key::Call | Key::Select => {
+                // In Transcript focus, open media or ignore — never send text.
+                if self.focus == Focus::Transcript {
+                    if let Some(msg) = chat.messages.get(self.state.selected) {
+                        if let Some(media) = &msg.media {
+                            let label = media_label(media, theme.fonts.body);
+                            self.note = Some(alloc::format!("abrindo {label}…"));
+                            return (Handled::Consumed, ConvAction::OpenMedia(self.state.selected));
+                        }
+                    }
+                    return (Handled::Consumed, ConvAction::None);
+                }
+                // Composer focus: send if not empty.
                 if !self.composer.is_empty() {
                     return (Handled::Consumed, ConvAction::Send(self.composer.take()));
                 }
@@ -205,12 +291,40 @@ impl Conversation {
                 self.focus = Focus::Transcript;
                 return (Handled::Consumed, ConvAction::None);
             }
+            // Up at the top of the transcript asks for older messages. Checked
+            // before the focus dispatch so ListState's handle_key — which would
+            // consume it without moving — does not shadow the trigger.
+            Key::Up
+                if self.focus == Focus::Transcript
+                    && self.state.selected == 0
+                    && self.state.scroll == 0 =>
+            {
+                // The window holds the newest hundred and drops the rest, so above them
+                // there is nothing to fetch — asking would spend a request on a page that
+                // is discarded on arrival. Say so instead of appearing to hang.
+                if chat.windowed && !chat.complete {
+                    self.note = Some(alloc::string::String::from("inicio do que esta guardado"));
+                    return (Handled::Consumed, ConvAction::None);
+                }
+                return (Handled::Consumed, ConvAction::LoadMore);
+            }
             Key::Down if self.focus == Focus::Transcript => {
                 let t = self.transcript.as_ref().unwrap();
                 if self.state.selected + 1 >= t.len() {
                     self.focus = Focus::Composer;
                     return (Handled::Consumed, ConvAction::None);
                 }
+            }
+            // Left/Right in Transcript: move one message, not a page jump.
+            Key::Left if self.focus == Focus::Transcript => {
+                let t = self.transcript.as_ref().unwrap();
+                self.state.move_selection(-1, t, vp);
+                return (Handled::Consumed, ConvAction::None);
+            }
+            Key::Right if self.focus == Focus::Transcript => {
+                let t = self.transcript.as_ref().unwrap();
+                self.state.move_selection(1, t, vp);
+                return (Handled::Consumed, ConvAction::None);
             }
             _ => {}
         }
@@ -233,7 +347,8 @@ impl Conversation {
         let p = &theme.palette;
 
         chrome::clear(c, theme);
-        chrome::title_bar(c, frame.title, theme, &chat.name, None);
+        let sub = if chat.loading { Some("carregando…") } else { self.note.as_deref() };
+        chrome::title_bar(c, frame.title, theme, &chat.name, sub);
 
         let bar = self.state.scrollbar(t, area.height());
         let gutter = chrome::scrollbar_gutter(theme, bar.is_some());
@@ -277,8 +392,102 @@ impl Conversation {
         }
 
         let send = if self.composer.is_empty() { None } else { Some("Enviar") };
-        chrome::softkey_bar(c, frame.softkeys, theme, [Some("Opções"), send, Some("Voltar")]);
+        chrome::softkey_bar(c, frame.softkeys, theme, [Some("Atualizar"), send, Some("Voltar")]);
     }
+}
+
+/// Whether the atlas can actually draw every character of `s`.
+///
+/// A missing codepoint is not a visible box here: `mkfont.py` deliberately drops glyphs the
+/// source font does not have rather than shipping `.notdef`, so the row is charged
+/// `fallback_advance` and *nothing is painted*. A label made of characters outside the
+/// atlas therefore renders as blank space, which reads as a bug in the layout rather than
+/// as a missing font.
+///
+/// This matters for exactly one thing: a sticker's `alt` is an emoji, and the device
+/// atlases carry ASCII, Latin-1, Cyrillic and a handful of punctuation — no emoji at all.
+/// See `tools/mkfont.py`'s `default_charset`.
+fn renderable(font: &dyn symbian_ui::Font, s: &str) -> bool {
+    !s.is_empty() && s.chars().all(|c| font.glyph(c).is_some())
+}
+
+/// What a media row says before anything is loaded.
+///
+/// A label, never a picture: nothing is fetched *or decoded* until the user presses Select,
+/// including previews that arrived inside the message. So the label has to carry enough to
+/// decide with — how long the voice note runs, how large the file is — and to say that
+/// there is something to open.
+fn media_label(media: &crate::model::Media, font: &dyn symbian_ui::Font) -> alloc::string::String {
+    use crate::model::Media;
+    // A glyph for the kind, and the word when the glyph is not in the atlas. The mark this
+    // used to draw was U+266A EIGHTH NOTE, which is in *none* of the three text fonts nor
+    // in Noto Emoji — so every voice row rendered as "[ 0:07]" with a hole in it, and only
+    // a rendered screenshot showed it. `mark` therefore never assumes.
+    let mark = |glyph: char, word: &str| -> alloc::string::String {
+        if font.glyph(glyph).is_some() {
+            alloc::string::String::from(glyph)
+        } else {
+            alloc::string::String::from(word)
+        }
+    };
+    match media {
+        Media::Photo { size, .. } => {
+            let m = mark('\u{1F5BC}', "Foto");
+            if *size > 0 {
+                alloc::format!("[{m} {}]", size_fmt(*size))
+            } else {
+                alloc::format!("[{m}]")
+            }
+        }
+        // The emoji from documentAttributeSticker, but only when the atlas has it. It
+        // almost never does, and the alternative to checking is a bubble that draws an
+        // empty box.
+        Media::Sticker { alt, .. } => {
+            if renderable(font, alt) {
+                alloc::format!("[{alt}]")
+            } else {
+                alloc::string::String::from("[Sticker]")
+            }
+        }
+        // A microphone for a voice note, a note for a music file: the same distinction the
+        // `voice` flag makes in the protocol, which is why reading that flag mattered.
+        Media::Voice { duration, .. } => {
+            alloc::format!("[{} {}]", mark('\u{1F3A4}', "Voz"), mmss(*duration))
+        }
+        Media::Audio { filename, duration, .. } => {
+            let m = mark('\u{1F3B5}', "Audio");
+            if filename.is_empty() {
+                alloc::format!("[{m} {}]", mmss(*duration))
+            } else {
+                alloc::format!("[{m} {filename} · {}]", mmss(*duration))
+            }
+        }
+        Media::File { filename, size, .. } => {
+            let m = mark('\u{1F4CE}', "Arquivo");
+            if filename.is_empty() {
+                alloc::format!("[{m} {}]", size_fmt(*size))
+            } else {
+                alloc::format!("[{m} {filename} · {}]", size_fmt(*size))
+            }
+        }
+        Media::Unknown => alloc::string::String::from("[Midia]"),
+    }
+}
+
+/// `M:SS`, or `H:MM:SS` for anything over an hour.
+fn mmss(seconds: i32) -> alloc::string::String {
+    let s = seconds.max(0);
+    if s >= 3600 {
+        alloc::format!("{}:{:02}:{:02}", s / 3600, (s % 3600) / 60, s % 60)
+    } else {
+        alloc::format!("{}:{:02}", s / 60, s % 60)
+    }
+}
+
+fn size_fmt(bytes: i64) -> alloc::string::String {
+    if bytes < 1024 { return alloc::format!("{bytes}") }
+    if bytes < 1024 * 1024 { return alloc::format!("{} KB", bytes / 1024) }
+    alloc::format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
 }
 
 fn draw_bubble(
@@ -314,6 +523,26 @@ fn draw_bubble(
 
     let inner = bubble.inset_xy(BUBBLE_HPAD, BUBBLE_VPAD);
     let mut y = inner.y0;
+
+    if let Some(media) = &m.media {
+        // A label, and nothing else. No thumbnail is drawn here even when the message
+        // brought one inline: loading is the user's decision, and a transcript that
+        // decoded a preview per row would spend the codec's four slots and the heap on
+        // pictures nobody asked to see.
+        let label = media_label(media, body);
+        let lw = body.measure(&label);
+        // The height the layout reserved, less the gap it also budgeted for. Taken from
+        // `laid` rather than recomputed: the two used to disagree by two pixels, with the
+        // layout reserving `line_height + 8` and the drawing using `+ 6`, and nothing would
+        // have caught it growing into a real overlap.
+        let ph = Rect::from_xywh(inner.x0, y, inner.width(), laid.media_band_h());
+        // Subtle fill behind the placeholder so it reads as a distinct target.
+        symbian_ui::paint::band(c, ph, &theme.palette.chrome);
+        let lx = ph.x0 + (ph.width() - lw) / 2;
+        let ly = ph.y0 + (ph.height() - body.line_height()) / 2 + body.ascent();
+        c.draw_text(symbian_ui::Point::new(lx.max(ph.x0 + 4), ly), &label, body, fg);
+        y = ph.y1 + MEDIA_GAP;
+    }
     for l in &laid.lines {
         let text = &m.text[l.start..l.end];
         c.draw_text(Point::new(inner.x0, y + body.ascent()), text, body, fg);
@@ -322,11 +551,7 @@ fn draw_bubble(
 
     // Metadata: dimmed against the bubble fill rather than the page background.
     let meta_col = if m.outgoing { p.accent_text.with_alpha(0xB0) } else { p.dim };
-    let meta_y = if laid.time_inline {
-        inner.y0 + (laid.lines.len() as i32 - 1) * body.line_height()
-    } else {
-        y
-    };
+    let meta_y = inner.y0 + laid.meta_offset(body.line_height());
     let meta_row = Rect::new(inner.x0, meta_y, inner.x1, meta_y + body.line_height());
 
     let mut right = inner.x1;
@@ -355,7 +580,9 @@ fn draw_bubble(
 mod tests {
     use super::*;
     use crate::model::Store;
-    use symbian_ui::{BitmapFont, Fonts, Size};
+    // `Font` for its `glyph`: the sticker-label test asserts the atlas genuinely lacks the
+    // emoji it is falling back from, so the fixture cannot drift away from the device.
+    use symbian_ui::{BitmapFont, Font as _, Fonts, Size};
 
     fn theme_with<'a>(f: &'a BitmapFont<'a>) -> Theme<'a> {
         Theme::dark(Fonts { body: f, strong: f, small: f, title: f })
@@ -481,6 +708,145 @@ mod tests {
             _ => panic!("expected a send"),
         }
         assert!(conv.composer.is_empty(), "composer must clear after sending");
+    }
+
+    #[test]
+    fn the_timestamp_never_lands_on_top_of_the_media_label() {
+        // What the preview caught: the inline-timestamp row was measured from the top of the
+        // bubble's text, ignoring the media band above it — so on a photo, voice or sticker
+        // row the time and the delivery tick were drawn straight over the label. Visible on
+        // every single media message.
+        let data = atlas();
+        let f = BitmapFont::new(&data).unwrap();
+        let t = theme_with(&f);
+        let store = Store::mock();
+        let screen = Rect::from_size(Size::new(320, 240));
+        let chat = &store.chats[0];
+        let tr = Transcript::build(chat, &t, screen.width());
+
+        let lh = t.fonts.body.line_height();
+        let mut checked = 0;
+        for (i, m) in chat.messages.iter().enumerate() {
+            let laid = &tr.laid[i];
+            if m.media.is_none() {
+                assert_eq!(laid.media_h, 0, "no media, no reserved band");
+                continue;
+            }
+            checked += 1;
+            assert!(laid.media_band_h() > 0, "a media row reserves a band");
+            assert!(
+                laid.meta_offset(lh) >= laid.media_band_h(),
+                "message {i}: timestamp at {} overlaps a band ending at {}",
+                laid.meta_offset(lh),
+                laid.media_band_h(),
+            );
+            // And everything still fits inside the height the layout claimed, which is what
+            // the scroll arithmetic upstream trusts.
+            assert!(
+                laid.meta_offset(lh) + lh + BUBBLE_VPAD * 2 + laid.gap <= laid.height,
+                "message {i} overflows its own bubble",
+            );
+        }
+        assert!(checked >= 3, "the mock must carry media rows to test; found {checked}");
+    }
+
+    #[test]
+    fn a_sticker_label_does_not_rely_on_an_emoji_the_atlas_lacks() {
+        // The device atlases carry ASCII, Latin-1 and Cyrillic — no emoji. A missing glyph
+        // paints nothing and only advances, so putting the sticker's `alt` in the label
+        // unconditionally would draw an empty box that reads as a layout bug.
+        let data = atlas();
+        let f = BitmapFont::new(&data).unwrap();
+        let sticker = crate::model::Media::Sticker {
+            id: 1,
+            access_hash: 2,
+            file_reference: alloc::vec::Vec::new(),
+            dc_id: 2,
+            alt: alloc::string::String::from("\u{1F600}"),
+            preview: None,
+        };
+        // The test atlas covers 0x20..0x500, which excludes U+1F600 just as the real ones do.
+        assert!(f.glyph('\u{1F600}').is_none(), "the fixture matches the device here");
+        assert_eq!(media_label(&sticker, &f), "[Sticker]");
+
+        // And when the emoji *is* drawable, it is used — so adding emoji to the atlas is all
+        // it would take, with no change here.
+        let ascii = crate::model::Media::Sticker {
+            id: 1,
+            access_hash: 2,
+            file_reference: alloc::vec::Vec::new(),
+            dc_id: 2,
+            alt: alloc::string::String::from(":)"),
+            preview: None,
+        };
+        assert_eq!(media_label(&ascii, &f), "[:)]");
+    }
+
+    #[test]
+    fn a_media_bubble_shows_a_label_and_never_a_picture() {
+        // Loading is the user's decision. Even a message carrying a complete inline JPEG
+        // draws a label, because decoding one per visible row would spend the codec's four
+        // slots and the heap on pictures nobody asked to see.
+        let data = atlas();
+        let f = BitmapFont::new(&data).unwrap();
+        let with_preview = crate::model::Media::Photo {
+            id: 1,
+            access_hash: 2,
+            file_reference: alloc::vec::Vec::new(),
+            dc_id: 2,
+            thumb_size: alloc::string::String::from("m"),
+            size: 12_000,
+            preview: Some(alloc::vec![0xFF, 0xD8, 0xFF, 0xE0]),
+        };
+        let label = media_label(&with_preview, &f);
+        assert!(label.starts_with("[Foto"), "still a label: {label}");
+        assert!(label.contains("KB"), "and it says what opening would cost: {label}");
+    }
+
+    #[test]
+    fn the_left_softkey_refreshes_without_disturbing_back_or_send() {
+        // There is no push in this client, so a screen is only as fresh as its last request.
+        // The left softkey was empty on every screen; the right one is Back and must stay
+        // Back, because that is where S60 puts it.
+        let data = atlas();
+        let f = BitmapFont::new(&data).unwrap();
+        let t = theme_with(&f);
+        let store = Store::mock();
+        let screen = Rect::from_size(Size::new(320, 240));
+        let mut conv = Conversation::new(0);
+
+        let (h, a) = conv.handle_key(
+            KeyEvent::new(Key::Softkey(Softkey::Left)), &store.chats[0], &t, screen,
+        );
+        assert!(matches!(h, Handled::Consumed));
+        assert!(matches!(a, ConvAction::Refresh));
+        assert!(conv.note.is_some(), "the user gets told something is happening");
+
+        // And the other two are unchanged.
+        let (_, a) = conv.handle_key(
+            KeyEvent::new(Key::Softkey(Softkey::Right)), &store.chats[0], &t, screen,
+        );
+        assert!(matches!(a, ConvAction::Back));
+    }
+
+    #[test]
+    fn refreshing_does_not_send_the_composer_text() {
+        // The composer and the refresh share a screen; asking for new messages must not
+        // post what is half-typed.
+        let data = atlas();
+        let f = BitmapFont::new(&data).unwrap();
+        let t = theme_with(&f);
+        let store = Store::mock();
+        let screen = Rect::from_size(Size::new(320, 240));
+        let mut conv = Conversation::new(0);
+        for ch in "rascunho".chars() {
+            conv.handle_key(KeyEvent::new(Key::Char(ch)), &store.chats[0], &t, screen);
+        }
+        let (_, a) = conv.handle_key(
+            KeyEvent::new(Key::Softkey(Softkey::Left)), &store.chats[0], &t, screen,
+        );
+        assert!(matches!(a, ConvAction::Refresh));
+        assert_eq!(conv.composer.text(), "rascunho", "the draft survives");
     }
 
     #[test]

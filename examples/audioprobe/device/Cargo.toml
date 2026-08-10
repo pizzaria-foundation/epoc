@@ -1,0 +1,26 @@
+# Its own workspace root, for the same reason as imgprobe's: a crate defining
+# #[panic_handler] cannot build for the host, because the test harness links std, which
+# already has one.
+[workspace]
+
+[package]
+name = "audioprobe-device"
+description = "Device entry point for audioprobe"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["staticlib"]
+
+[dependencies]
+audioprobe = { path = ".." }
+symbian-app = { path = "../../../crates/symbian-app" }
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true
+debug = false
+overflow-checks = false

@@ -6,10 +6,26 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
+[features]
+default = []
+# The dev bridge, off by default: a release build must not ship a service that accepts file
+# writes from anything on the LAN. `tools/symbuild` turns it on when EPOCADB_HOST is set in
+# api.conf, via DEV_BRIDGE_FEATURE in app.conf.
+dev-bridge = ["dep:epocadb"]
+
 [dependencies]
 symbian-gfx = { workspace = true }
+# For the log sink, sockets, files and Publish & Subscribe that the dev bridge uses. The
+# edge points down: `symbian` knows nothing about this crate, and registers the bridge's
+# sink through a function pointer rather than by naming it.
+symbian = { workspace = true }
+epocadb = { workspace = true, optional = true }
 symbian-sys = { workspace = true }
 symbian-ui = { workspace = true }
+# The keyboard layout and dead-key composition. Here rather than in symbian-ui because
+# this crate owns the event pump, and composition is a property of the *stream* of events
+# rather than of any widget: the toolkit still sees ordinary `Key::Char`s.
+symbian-keys = { workspace = true }
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_vendor, values("symbian"))'] }

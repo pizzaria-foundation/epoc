@@ -79,6 +79,37 @@ impl Error {
     pub fn is_missing(self) -> bool {
         matches!(self, Error::NotFound | Error::PathNotFound)
     }
+
+    /// True when the platform has no plugin for what was asked.
+    ///
+    /// Worth naming because it is the whole of the sticker story: a Telegram sticker is
+    /// WebP, WebP is from 2010, and S60 3rd Edition is from 2008. The handset answers
+    /// `KErrNotSupported` and the caller must fall back to something it can draw —
+    /// which is a different decision from a corrupt file or a missing one.
+    pub fn is_unsupported(self) -> bool {
+        matches!(self, Error::Platform(sys::SHIM_ERR_NOT_SUPPORTED))
+    }
+
+    /// The `e32err.h` code this came from — the inverse of [`Error::from_code`].
+    ///
+    /// For a log. `Display` would say it in words, but pulling `core::fmt` into an image
+    /// to print one integer is not a trade worth making, and the number is what a Symbian
+    /// header can be searched for anyway.
+    pub fn code(self) -> i32 {
+        match self {
+            Error::NotFound => sys::SHIM_ERR_NOT_FOUND,
+            Error::PathNotFound => -12,
+            Error::AlreadyExists => sys::SHIM_ERR_ALREADY_EXISTS,
+            Error::NoMemory => sys::SHIM_ERR_NO_MEMORY,
+            Error::AccessDenied => sys::SHIM_ERR_ACCESS_DENIED,
+            Error::InUse => sys::SHIM_ERR_IN_USE,
+            Error::Argument => sys::SHIM_ERR_ARGUMENT,
+            Error::Overflow => sys::SHIM_ERR_OVERFLOW,
+            Error::NotReady => sys::SHIM_ERR_NOT_READY,
+            Error::UnexpectedEof => -25,
+            Error::Platform(c) => c,
+        }
+    }
 }
 
 impl fmt::Display for Error {

@@ -50,6 +50,19 @@ pub const OP_KDF: i32 = 2;
 /// The largest operand this facility carries, matching `symbian_crypto::bignum::MAX_BYTES`.
 pub const MAX_OPERAND: usize = 256;
 
+/// The widest exponent, which is **one byte more** than the widest modulus.
+///
+/// There is no arithmetic reason for an exponent to fit the modulus — the ladder walks its
+/// bytes and never reduces it — and SRP relies on that: its third exponentiation raises to
+/// `a + u*x`, where `a` is as wide as the prime. That sum needs one more byte to hold the
+/// carry, so it is 257 bytes *every time*, not occasionally.
+///
+/// Capping it at `MAX_OPERAND` made that submission fail on every two-factor login. The
+/// failure was a refused job rather than a wrong answer, so nothing crashed and nothing was
+/// logged: the work went into a queue, was retried, was refused again, and the screen sat
+/// on "verificando a senha" until the user gave up.
+pub const MAX_EXPONENT: usize = MAX_OPERAND + 1;
+
 /// A modular exponentiation to run off the GUI thread. All operands big-endian.
 pub struct ModPow<'a> {
     pub base: &'a [u8],
@@ -68,7 +81,7 @@ impl ModPow<'_> {
         let n = 6 + self.base.len() + self.exp.len() + self.modulus.len();
         if n > out.len()
             || self.base.len() > MAX_OPERAND
-            || self.exp.len() > MAX_OPERAND
+            || self.exp.len() > MAX_EXPONENT
             || self.modulus.len() > MAX_OPERAND
         {
             return Err(Error::Argument);
@@ -168,7 +181,7 @@ impl Default for Job {
 impl Job {
     pub fn new() -> Self {
         Job {
-            input: vec![0u8; 6 + 3 * MAX_OPERAND].into_boxed_slice(),
+            input: vec![0u8; 6 + 2 * MAX_OPERAND + MAX_EXPONENT].into_boxed_slice(),
             output: vec![0u8; MAX_OPERAND].into_boxed_slice(),
             busy: false,
             result_len: 0,
@@ -242,6 +255,35 @@ impl Job {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_exponent_one_byte_wider_than_the_modulus_is_accepted() {
+        // SRP's third exponentiation raises to `a + u*x`. `a` is as wide as the prime, so
+        // the sum carries into a 257th byte — always, by construction, not occasionally.
+        //
+        // Rejecting it made every two-factor login stop dead: the job was refused rather
+        // than answered wrongly, so there was no crash and no error, just a screen that
+        // said "verificando a senha" forever.
+        let base = [7u8; MAX_OPERAND];
+        let exp = [3u8; MAX_EXPONENT];
+        let modulus = [0xFFu8; MAX_OPERAND];
+        let job = ModPow { base: &base, exp: &exp, modulus: &modulus };
+        let mut buf = [0u8; 6 + 2 * MAX_OPERAND + MAX_EXPONENT];
+        let n = job.encode(&mut buf).expect("the SRP exponent must fit");
+        assert_eq!(n, 6 + base.len() + exp.len() + modulus.len());
+
+        let (b, e, m) = decode_modpow(&buf[..n]).expect("and decode again");
+        assert_eq!(b, &base[..]);
+        assert_eq!(e, &exp[..], "the exponent lost its extra byte");
+        assert_eq!(m, &modulus[..]);
+    }
+
+    #[test]
+    fn the_job_buffer_holds_the_widest_job_there_is() {
+        // The buffer and the limits have to agree, and they are declared in two places.
+        let job = Job::new();
+        assert!(job.input.len() >= 6 + 2 * MAX_OPERAND + MAX_EXPONENT);
+    }
 
     #[test]
     fn a_modpow_round_trips_through_the_packing() {

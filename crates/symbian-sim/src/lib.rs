@@ -31,7 +31,8 @@
 //! does*, and the moment a question is about speed it has to go back to the phone.
 
 use minifb::{Key as MKey, KeyRepeat, Window, WindowOptions};
-use symbian_gfx::{BitmapFont, Canvas, Rect, Size, E72_SCREEN};
+use symbian_gfx::{BitmapFont, Canvas, Rect, Size, WithFallback, E72_SCREEN};
+use symbian_keys::Stroke;
 use symbian_ui::{App, Fonts, Handled, Key, KeyEvent, Modifiers, Palette, Softkey, Theme};
 
 /// 3x. At 1x a 320x240 window is a postage stamp on a modern display and every judgement
@@ -116,6 +117,13 @@ struct Sim<A: App> {
     /// The window's buffer: `xrgb` at SCALE, nearest-neighbour.
     out: Vec<u32>,
     dirty: bool,
+    /// The keyboard, for its dead-key composition state.
+    ///
+    /// `PassThrough` and not `Abnt2E72`: the measured table is keyed by Symbian scan
+    /// codes, and minifb reports desktop keys. So the simulator does its own resolution in
+    /// [`abnt_key`] and shares the half that matters — the composition rules — which is
+    /// exactly what `translate_resolved` is public for.
+    keyboard: symbian_keys::Keyboard,
 }
 
 impl<A: App> Sim<A> {
@@ -128,6 +136,7 @@ impl<A: App> Sim<A> {
             xrgb: vec![0u32; n],
             out: vec![0u32; n * SCALE * SCALE],
             dirty: true,
+            keyboard: symbian_keys::Keyboard::new(symbian_keys::Layout::PassThrough),
         }
     }
 
@@ -174,12 +183,19 @@ impl<A: App> Sim<A> {
 /// can fail in a way the caller could act on.
 pub fn run<A: App>(app: A) -> Result<(), String> {
     let (d11, d11b, d9) = (load_all("ui11")?, load_all("ui11b")?, load_all("ui9")?);
+    let demoji = load_all("uiemoji11")?;
     let f11 = BitmapFont::new(&d11).map_err(|e| format!("ui11.sbf: {e:?}"))?;
     let f11b = BitmapFont::new(&d11b).map_err(|e| format!("ui11b.sbf: {e:?}"))?;
     let f9 = BitmapFont::new(&d9).map_err(|e| format!("ui9.sbf: {e:?}"))?;
-    // The device links exactly these three and reuses the bold one for titles, so the
-    // simulator does too. Using nicer fonts here would flatter the result.
-    let fonts = Fonts { body: &f11, strong: &f11b, small: &f9, title: &f11b };
+    let femoji = BitmapFont::new(&demoji).map_err(|e| format!("uiemoji11.sbf: {e:?}"))?;
+    // Exactly what the device links, chained exactly as `symbian_app::with_theme` chains
+    // it — including the emoji fallback behind body and strong but not behind small.
+    // Using nicer fonts here, or a wider emoji set than the phone has, would flatter the
+    // result: the point of this window is that a glyph missing on the handset is missing
+    // here too.
+    let body = WithFallback::new(f11, femoji);
+    let strong = WithFallback::new(f11b, femoji);
+    let fonts = Fonts { body: &body, strong: &strong, small: &f9, title: &strong };
 
     let mut sim = Sim::new(app);
 
@@ -232,6 +248,12 @@ keys
         // calls, so a key that does the wrong thing here does the wrong thing there.
         for k in window.get_keys_pressed(KeyRepeat::Yes) {
             if let Some(key) = nav_key(k) {
+                // A pending accent has no business surviving a keystroke that is not text,
+                // except the arrows — the same rule the device's event pump applies, and
+                // sharing the rule is the point of sharing the crate.
+                if !matches!(key, Key::Up | Key::Down | Key::Left | Key::Right) {
+                    sim.keyboard.cancel();
+                }
                 let ev = KeyEvent { key, mods, repeat: false };
                 if sim.app.handle_key(ev, &theme, screen) == Handled::Consumed {
                     sim.dirty = true;
@@ -239,17 +261,31 @@ keys
             }
         }
         // minifb hands over already-translated characters, which is the same stream the
-        // window server produces on the device — including the shift layer.
+        // window server produces on the device — including the shift layer. What it does
+        // not do is compose dead keys, and neither does the device without a FEP, so both
+        // run through the same `symbian_keys` composition.
         if !ctrl {
-            let typed: Vec<char> = window
+            let typed: Vec<(char, bool)> = window
                 .get_keys_pressed(KeyRepeat::Yes)
                 .iter()
-                .filter_map(|k| ascii_of(*k, shift))
+                .filter_map(|k| {
+                    abnt_key(*k, shift).or_else(|| ascii_of(*k, shift).map(|c| (c, false)))
+                })
                 .collect();
-            for ch in typed {
-                let ev = KeyEvent { key: Key::Char(ch), mods, repeat: false };
-                if sim.app.handle_key(ev, &theme, screen) == Handled::Consumed {
-                    sim.dirty = true;
+            for (ch, dead) in typed {
+                // One press can produce two characters: `´` then `q` is `´q`, because a
+                // mark that cannot combine must not vanish.
+                let stroke = sim.keyboard.translate_resolved(ch, dead);
+                let (a, b) = match stroke {
+                    Stroke::None => (None, None),
+                    Stroke::One(c) => (Some(c), None),
+                    Stroke::Two(x, y) => (Some(x), Some(y)),
+                };
+                for c in [a, b].into_iter().flatten() {
+                    let ev = KeyEvent { key: Key::Char(c), mods, repeat: false };
+                    if sim.app.handle_key(ev, &theme, screen) == Handled::Consumed {
+                        sim.dirty = true;
+                    }
                 }
             }
         }
@@ -287,12 +323,51 @@ keys
     Ok(())
 }
 
+/// The dead keys and `Ç`, mapped onto desktop keys.
+///
+/// # Why the simulator has these at all
+///
+/// The target handset is Brazilian and its keyboard is ABNT2: the accents are dead keys,
+/// and `ç` has a key of its own. Without them here, an accent bug was only ever
+/// reproducible on the phone — which is how "`~` then `a` types `a`" survived long enough
+/// to make "não" untypeable in a shipped app.
+///
+/// # Why these particular desktop keys
+///
+/// Chosen to echo where they sit on an ABNT2 PC keyboard, which is the keyboard most
+/// people testing this actually have: `Ç` on the US semicolon position, the accent keys to
+/// the right of it. Not a claim about the E72's own key positions — those live in the
+/// measured table in `symbian_keys::layout_abnt2` and are keyed by Symbian scan codes,
+/// which a desktop does not have.
+///
+/// # What the handset does not have
+///
+/// No trema. The measured dump (`examples/keydump/keymap-brpt.txt`) reports exactly two dead
+/// keys carrying four marks — `´` `` ` `` `~` `^` — and no `¨`, so `ü` cannot be typed on
+/// this keyboard at all. This offers the same four and no more: a simulator that could type
+/// a character the phone cannot is a simulator that hides a bug rather than surfacing one.
+/// `symbian_keys::compose` still knows `¨`, for a layout that has it.
+///
+/// Returns `(character, is_dead_key)`.
+fn abnt_key(k: MKey, shift: bool) -> Option<(char, bool)> {
+    use symbian_keys::{ACUTE, CIRCUMFLEX, GRAVE, TILDE};
+    Some(match (k, shift) {
+        (MKey::Semicolon, false) => ('ç', false),
+        (MKey::Semicolon, true) => ('Ç', false),
+        (MKey::LeftBracket, false) => (ACUTE, true),
+        (MKey::LeftBracket, true) => (GRAVE, true),
+        (MKey::RightBracket, false) => (TILDE, true),
+        (MKey::RightBracket, true) => (CIRCUMFLEX, true),
+        _ => return None,
+    })
+}
+
 /// minifb reports physical keys, not characters, so the shift layer is applied here.
 ///
-/// Only the characters a chat needs: letters, digits, space and a little punctuation.
-/// This is the one place the simulator genuinely differs from the device, where the
-/// window server has a full keymap — so an input bug that depends on an unusual
-/// character has to be reproduced on the phone.
+/// Only the characters a chat needs: letters, digits, space and a little punctuation, plus
+/// the ABNT2 keys in [`abnt_key`]. What is here is still narrower than the device's own
+/// keymap, so an input bug that depends on an unusual character is worth confirming on the
+/// phone — but accents are no longer in that category.
 fn ascii_of(k: MKey, shift: bool) -> Option<char> {
     let base = match k {
         MKey::A => 'a', MKey::B => 'b', MKey::C => 'c', MKey::D => 'd',
@@ -401,4 +476,83 @@ fn write_png(path: &str, canvas: &[u16], w: usize, h: usize) -> std::io::Result<
     chunk(&mut png, b"IEND", &[]);
 
     std::fs::File::create(path)?.write_all(&png)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every dead key the simulator can produce must be one `symbian_keys::compose` knows.
+    ///
+    /// The failure this catches is silent and total: a mark the composer has never heard of
+    /// arms itself and then swallows the next letter, so typing `~a` produces nothing at
+    /// all. A single wrong constant in [`abnt_key`] would do it.
+    #[test]
+    fn every_dead_key_the_simulator_offers_can_compose() {
+        for k in [MKey::Semicolon, MKey::LeftBracket, MKey::RightBracket] {
+            for shift in [false, true] {
+                let Some((ch, dead)) = abnt_key(k, shift) else { continue };
+                if !dead {
+                    continue;
+                }
+                assert!(
+                    symbian_keys::is_mark(ch),
+                    "{k:?} (shift {shift}) offers {ch:?} as a dead key, which compose.rs \
+                     does not know — it would arm and then eat the next letter"
+                );
+            }
+        }
+    }
+
+    /// The simulator can type what Portuguese needs. This is the check that would have
+    /// failed before the simulator had any of this, and it fails on the host in a second
+    /// rather than on a phone after a Bluetooth install.
+    #[test]
+    fn portuguese_can_be_typed() {
+        let mut kb = symbian_keys::Keyboard::new(symbian_keys::Layout::PassThrough);
+        let mut out = String::new();
+        // "não" — tilde is RightBracket, then n, a, o.
+        for (k, shift) in [
+            (MKey::N, false),
+            (MKey::RightBracket, false),
+            (MKey::A, false),
+            (MKey::O, false),
+        ] {
+            let (ch, dead) = abnt_key(k, shift)
+                .or_else(|| ascii_of(k, shift).map(|c| (c, false)))
+                .expect("every key in this sequence is mapped");
+            match kb.translate_resolved(ch, dead) {
+                Stroke::None => {}
+                Stroke::One(c) => out.push(c),
+                Stroke::Two(a, b) => {
+                    out.push(a);
+                    out.push(b);
+                }
+            }
+        }
+        assert_eq!(out, "não");
+
+        // "você" — v, o, c-cedilla is Semicolon, then circumflex (shift RightBracket), e.
+        let mut out = String::new();
+        for (k, shift) in [
+            (MKey::V, false),
+            (MKey::O, false),
+            (MKey::Semicolon, false),
+            (MKey::RightBracket, true),
+            (MKey::E, false),
+        ] {
+            let (ch, dead) = abnt_key(k, shift)
+                .or_else(|| ascii_of(k, shift).map(|c| (c, false)))
+                .expect("every key in this sequence is mapped");
+            match kb.translate_resolved(ch, dead) {
+                Stroke::None => {}
+                Stroke::One(c) => out.push(c),
+                Stroke::Two(a, b) => {
+                    out.push(a);
+                    out.push(b);
+                }
+            }
+        }
+        assert_eq!(out, "voçê");
+    }
 }

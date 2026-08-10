@@ -69,6 +69,90 @@ exist on FP2.
 **`DrawNow` plus an explicit `WsSession().Flush()`.** Without the flush, the frame sits in
 the client-side command buffer until it fills, and appears late.
 
+## The pump starved every active object at its own priority
+
+**This is the most expensive bug in this file, and it was in the SDK, not in the device.**
+
+`CShimAppUi::ConstructL` created the pump as `CIdle::NewL(EPriorityIdle)`, and the pump's
+callback returns `ETrue`, which re-arms it on every pass. So the pump is not merely
+low-priority: it is **permanently ready** at that priority, with no moment at which the
+scheduler lacks something to run.
+
+Symbian dispatches the highest-priority ready object and, among equals, the one added
+first. A permanently-ready object at `EPriorityIdle` therefore does not go last — it
+**starves every object at that priority added after it**. Not slowly. Never.
+
+`CImageDecoder` drives decoding from active objects inside the plugin, and on the E72's
+vendor JPEG codec those sit at idle priority. So every image decode issued from
+`rust_step` — which runs from the pump's own `RunL` — was queued behind a permanently-ready
+object and never ran. No panic, no error, no completion: `Convert` issued, `IsActive()`
+still true a minute later.
+
+The fix is one line: `CIdle::NewL(CActive::EPriorityIdle - 1)`. The pump should be the
+lowest-priority object in the process, and "strictly below the documented floor" says that
+without inventing a magnitude.
+
+**It generalises.** Anything asynchronous whose active objects land at idle priority would
+have met the same silent fate — the audio work planned next among them.
+
+### The measurement that proved it, and how nearly it was missed
+
+`examples/imgprobe` runs the same decode seven ways. Two rows settled it, and neither was
+a row anyone designed for the purpose:
+
+| | |
+|---|---|
+| row A, issued from `rust_app_start()` | **241 ms**, `status=0` |
+| row B, issued from a timer's `RunL` | never completed |
+
+Row B differs from row A only in the destination *field* used — and on this image
+`iOverallSizeInPixels` and `iFrameCoordsInPixels.Size()` are both 240×320, so the two rows
+were byte-identical in configuration. The only real difference was **when** each was
+started: `rust_app_start()` is called from `ConstructL` *before* the pump is created, so a
+decode begun there queues its plugin's objects ahead of the pump and runs; anything begun
+later queues behind it and does not.
+
+The answer was in the first two lines of the first report, in the column nobody was
+reading.
+
+### What is known about the destination, and what is not
+
+With the pump fixed, a photo decodes using the shipped examples' recipe — frame rect,
+`EColor16M`, no options, `FileNewL`, `EPriorityStandard`, exactly what
+`sdk/s60cppexamples/OcrExample/` and `sdk/s60cppexamples/OpenGLEx/` do.
+
+**Whether `EColor64K`, a reduced destination, or `DataNewL` also work is unknown.** They
+were each blamed in turn while the pump was the cause, so every conclusion drawn about them
+was drawn from a rigged experiment. The frame reports `iFlags = 0x15` (`EColor` +
+`EFullyScaleable` + `ECanDither`) and `iFrameDisplayMode = EColor16M`; the ICL guide says
+`ECanDither` means the mode may be chosen and `EFullyScaleable` means any size may be
+asked for. That is what the documentation permits, and it is still not a measurement.
+Rows C, D and F of the probe would answer it, and would let the 24bpp→RGB565 conversion in
+`CopyOut` go away.
+
+**`KErrUnderflow` is separately real.** It means call `ContinueConvert` until `KErrNone`,
+and it can arrive for a whole image: `CImageDecoderPlugin::HandleProcessFrameResult` turns
+"the codec consumed no bytes this pass" into an underflow the plugin never asked for.
+Neither Nokia example handles it, so it is easy to inherit wrong by copying them.
+
+### The method, which is the actual lesson
+
+Six rounds of build → Bluetooth → install → ask-the-user, each varying one property on a
+hypothesis the handset then refuted, each costing somebody an afternoon and yielding one
+bit. The authoritative documentation — the complete Symbian OS v9.3 Developer Library, ICL
+guide and both worked examples — was in `vendor/research/s60/s60doc/` and
+`sdk/s60cppexamples/` the whole time; the search that "established" it was unavailable was
+a web search.
+
+`examples/imgprobe` should have been the first thing built, not the seventh.
+
+**Its own first version was the same mistake in miniature.** All seven rows ran in one
+process, so when a row starved the GUI thread it took down the six-second timeout meant to
+give up on it, and five rows were lost. A probe whose measurements can kill each other is
+not an instrument. It now runs **one row per launch**, with the index on disk and advanced
+*before* the row is attempted, so a row that wedges the phone costs one relaunch and is
+recorded by the absence of a result under its own breadcrumb.
+
 ## The keyboard
 
 This one took three probe builds, and each round the wrong thing was blamed.
@@ -86,26 +170,154 @@ editor.
 reads is the input mode on the focused editor's state object, `CAknEdwinState`, through
 `SetCurrentInputMode`.
 
-**So the shim translates, by choice.** An earlier version of this page said the FEP path was
+**So we translate, by choice.** An earlier version of this page said the FEP path was
 *impossible* because `CAknEdwinState` was absent from the public SDK. That was false — see
 the grep note below — and the correction matters, because "we had no option" and "we picked
 this" are different claims and only one of them was true.
 
 Taking the FEP means implementing `MCoeFepAwareTextEditor`, twelve pure virtuals, and giving
 the FEP authority over a caret and text buffer the Rust toolkit already owns. Two components
-holding one buffer is the bug, not the wiring. And the translation below is tested on
-hardware, which beats a tidier untested alternative.
+holding one buffer is the bug, not the wiring.
 
-What that costs, stated rather than glossed: the FEP would supply the **whole** Fn layer.
-Fn+Q should give `!` and gives `q`, because only the twelve digit keys are in the table.
-Fixing it our way needs a second, larger, device-specific table; fixing it the FEP's way
-needs the interface above. Neither is done.
+### The keyboard was American and the handset is Brazilian
 
-The trigger is self-identifying and needs no state: for a
-letter key the window server *does* translate, so `iCode` differs from `iScanCode` (`'e'`
-0x65 vs `'E'` 0x45). For these twelve it does not. `iCode == iScanCode` plus a scan code in
-the table identifies exactly those twelve, and a device without the overlay is unaffected
-because its scan codes never match.
+The twelve-row translation above lived in `shim_app.cpp` and worked, and it was still the
+wrong shape, because the handset's keyboard is **ABNT2**. Three things followed:
+
+- **No accents at all.** On an ABNT2 keyboard the accent keys are dead keys. Composition is
+  the FEP's job, so with no FEP the window server hands them over as *non-character* key
+  codes — `~` arrives as `EKeyF21`, 0xF82A — and the letter arrives separately. Nothing
+  joined them. `~` then `a` typed `a`, and "não", "você" and "ção" could not be written.
+- **No Chr/Fn symbol layer** past the twelve digits, so **`+` could not be typed**, in an
+  app that asks for a phone number with a country code.
+- **No notion of a layout**, so there was nowhere to put a fix that would not also break
+  every handset nobody has held.
+
+**The keymap now comes out of the phone.** `examples/keydump` links `ptiengine.dll` and asks
+`CPtiEngine::MappingDataForKey` for every QWERTY key in all four cases
+(`EPtiCaseLower/Upper/ChrLower/ChrUpper`) under `ELangBrazilianPortuguese`, plus
+`GetNumericModeKeysForQwertyL` for the digits-and-`+` bindings. `tools/mkkeymap.py` turns
+that dump into a static table in `crates/symbian-keys`.
+
+`ptiengine` is **not the FEP**. It is the keymap database underneath it: a lookup function,
+with no opinion about our caret or our buffer. Asking it what a key means commits us to
+nothing, and we ask exactly once — offline, into a generated table — so nothing that ships
+imports the DLL or allocates the engine. The import lives in a throwaway probe, which is the
+rule this page already states: *if a facility might not resolve, it belongs in its own
+binary, where failing to load costs a probe rather than the report.* `examples/libprobe`
+answers whether `ptiengine.dll` is there first.
+
+**No scan-code bridge is needed.** `TPtiKey`'s QWERTY values *are* `TStdScanCode` values:
+`PtiDefs.h` has `EPtiKeyQwertyA = 0x41`, which is `EStdKeyA`, and names the punctuation keys
+directly (`EPtiKeyQwertyComma = EStdKeyComma`). And `TPtiKey` names *positions*, not
+characters — the header's own example is that unshifted `EPtiKeyQwertyHash` gives `#` in
+English and `+` in Danish. That is why enumerating the standard keys reaches Ç and the
+accents even though the enum has no name for either: an ABNT2 keyboard is the same grid with
+different characters on it. The English dump is taken alongside as a control, and two
+identical dumps mean the engine never switched language.
+
+**What the measured dump says**, kept at `examples/keydump/keymap-brpt.txt`:
+
+| scan | key | unshifted | shifted |
+|---|---|---|---|
+| 0x7A | `´` | dead, acute | dead, grave |
+| 0x7E | `~` | dead, tilde | dead, circumflex |
+| 0x79 | `Ç` | `ç` | `Ç` |
+| 0x7D | `.` | `.` | `:` |
+| 0x82 | `,` | `,` | `;` |
+| 0x49 | `I` | `i` | `+` on Fn |
+
+Four marks and no trema, so `ü` cannot be typed on this keyboard at all.
+
+The Chr/Fn layer does **not** come from `MappingDataForKey`: asked for `EPtiCaseChrLower` it
+returns the same data as `EPtiCaseLower`, so taking it at face value would put the letter in
+the Chr column and make Fn+R type `r`. It comes from `GetNumericModeKeysForQwertyL`, and what
+that returns is a better description of this handset anyway — the E72's Fn layer is not a
+general symbol layer, it is the printed phone keypad plus what a phone number needs: the ten
+digits, `*`, `#`, `+`, and `p`/`w`.
+
+**What moved to Rust, and why.** The whole keymap and the dead-key composition are now in
+`crates/symbian-keys`, and `shim_app.cpp` holds no keymap at all. It keeps the job only it
+can do — receive a `TKeyEvent`, report `iCode`/`iScanCode`/`iModifiers`, and return a
+`TKeyResponse`. Three reasons, in order of what they cost while the table was in C++: a
+correct ABNT2 table is dozens of rows with four cases each and has to be generated from a
+measurement; nothing in C++ here can be unit-tested, and a keyboard is all edge cases; and
+the simulator can share a Rust table, so an accent bug is now reproducible in a window
+instead of only on the phone.
+
+The table is keyed by scan code, which retired a guard the C++ needed. It used to test
+`iCode == iScanCode` to tell "the window server did not translate this" from "it did",
+because its table was keyed by *character* and a real `R` key could collide with the overlaid
+`1`. A scan code identifies one physical key, so there is no collision to guard against.
+
+`Layout::PassThrough` is the default for anything unmeasured and reproduces the old
+behaviour exactly: use the character the window server produced. A key the ABNT2 table does
+not claim falls through the same way, which is what keeps a handset nobody has held working.
+
+**Nothing had to change in `OfferKeyEventL`.** The expectation was that a dead key would
+arrive as a non-character code above 0xF800, which this file would have to recognise and
+consume so Avkon did not also act on it. It does not: the code is `0xF001..0xF005`, inside
+the printable gate, so it already goes out as `SHIM_EV_KEY_CHAR` and is already consumed. A
+table of dead-key scan codes was written for that job and then deleted — unreachable, and
+worse than useless, because it named a mechanism the handset does not use.
+
+### Two things that read backwards
+
+Both cost a wrong turn, and both are the kind of thing this page exists for.
+
+**The dead-key marker is not `KPtiKeyDataDeadKeySeparator`.** That constant (0xFFFF) is real
+and marks something else — sections of the dead-key *table* blob. What appears in a key's
+mapping is `0xF000..0xF005`, and the platform's own test is
+`CPtiQwertyKeyMappings::IsDeadKeyCode`, inline in `PtiKeyMappings.h`. Looking for the
+constant whose name says "dead key" found zero dead keys on a keyboard that has four. The
+mark itself is the code unit *after* the marker, which is better than the index alone: it
+means the mark comes from the device rather than from reading the plastic.
+
+**A plausible `iCode` can be the US keymap leaking through.** keyprobe shows an unshifted
+press of scan 0x7A arriving as `chr 002E '.'`. Read as "this key types a full stop", that
+looks like proof the dump is wrong and the acute belongs elsewhere — and acting on it
+replaced the acute with a period on a shipped build. The truth is the opposite: 0x7A is
+`EStdKeyFullStop`, the *US* period key, and a window server with no FEP has no Brazilian
+character to hand over, so it falls back to the US keymap. That fallback **is** the
+"keyboard is kind of American" bug, not evidence about the key. The dump settles it by
+listing the real period and comma separately, on 0x7D and 0x82 — two period keys and no
+acute key is not a layout any keyboard has.
+
+So dead keys resolve two ways, because the handset offers them two ways: by scan code and
+case from the table, and by dead-key code when the window server sends one. A test fails if
+the two ever disagree, since otherwise which character you got would depend on which path a
+press happened to take.
+
+### Filling the table: the three device runs
+
+1. **`examples/libprobe`.** Confirm `ptiengine.dll` loads. If it does not, `keydump` will
+   not start and will not say why — a static import of a missing DLL stops the loader with
+   no error, no log and no report file.
+2. **`examples/keydump`.** Install, launch, read the screen. `err 0` with a non-zero `dead
+   br` count and a `'+' binding` means the dump is good. `dead br 0`, or `br == en`, means
+   the engine did not switch language and the dump describes the wrong keyboard — the app
+   says so on its own bottom line. Fetch `keymap.txt` from `C:\private\E123456C\` over
+   `epocadb` or `tools/btrecv.py`, then:
+
+       tools/mkkeymap.py --check keymap.txt          # read it before trusting it
+       tools/mkkeymap.py keymap.txt -o crates/symbian-keys/src/layout_abnt2.rs
+       cargo test -p symbian-keys                    # the generated table has invariants
+
+   `tools/testdata/keydump-synthetic.txt` is a fabricated file for testing the parser, and
+   says so in its own header. It must never generate a shipped table.
+3. **`examples/keyprobe`.** A sweep to check the dump against the hardware, because the two
+   disagree in one place and the disagreement is not visible from the dump alone. Press each
+   key and read `scan` and the code beside it. This is what caught the U key: it fires scan
+   0x2A, not the `EStdKeyNkpAsterisk` (0x85) inherited from the C++ table this replaced, and
+   nothing matched 0x85 so the U key typed `*`. `OVERLAY` in `tools/mkkeymap.py` is the only
+   place in the pipeline where a value is written by hand rather than parsed, so it is the
+   only place a mistake of that kind can hide.
+
+Then, on the phone, in a text field: `´`+`a` → `á`, `~`+`a` → `ã`, `^`+`e` → `ê`,
+`` ` ``+`a` → `à`, `´`+space → `´`, `´`+`q` → `´q`, the Ç key → `ç`, Shift+Ç → `Ç`, Fn+I →
+`+`. And the two regressions most likely to be caused by all of this: `.` and `,` must still
+type themselves, and the twelve overlaid keypad keys must still give letters without Fn and
+digits with it.
 
 **The Fn key was being dropped.** `EStdKeyLeftFunc` is scan code 0x18 and arrives as
 `EEventKeyDown`. The shim's handler began with `if (aType != EEventKey) return
@@ -121,6 +333,42 @@ holds `EModifierNumLock` (0x8000), `EModifierPureKeycode` (0x100000) and
 word, and any key the shim does not recognise is reported as `Key::Raw` rather than
 dropped, because a silently discarded event is how the Fn key stayed invisible for two
 rounds.
+
+## A panic that says where it was
+
+A Rust panic reaches `User::Panic(category, number)` through `shim_panic`, with the category
+being the tail of the source file name and the number its line. Both facts are therefore
+already known at the moment of death — and on this handset the dialog does not reliably show
+them, so they died with the process. With no debugger and no console, a reproducible crash
+then cost one round trip per guess.
+
+`shim_panic` now writes the location to **`C:\Data\panic.txt`** before panicking, appended
+so a second crash does not erase the first — order matters when one panic is a consequence of
+another. Its own `RFs` session rather than the shim's, because the shim's may be exactly what
+broke; a reentrancy flag, so a fault inside the writer cannot become the crash it was meant to
+explain; and every error ignored, for the same reason. `WriteUserData` and `C:\Data\` rather
+than the data cage, because a breadcrumb nobody can carry off the phone is not a breadcrumb.
+
+**It paid for itself on the first crash.** "Scrolling to the end of the chat list closes the
+app" had already survived one round of reading code and eliminating hypotheses — an empty
+page, the pagination arithmetic, the list widget's bounds, the `messages.dialogsSlice` parse,
+all of which turned out to be fine and now have tests saying so. The breadcrumb read
+`chats.rs:659`, and the cause was visible immediately.
+
+It was `channelForbidden` — a channel the account had lost access to. Field indices are
+positional and belong to a **constructor**, not to a kind: `channel` carries `access_hash` at
+index 31 and `channelForbidden` has eight fields in total. The parser picked id and title per
+constructor, correctly, and then the access hash per *kind*, so any chat list containing one
+read index 31 of an eight-field value. The page that happened to contain one was the second,
+which is the only reason the end of the list came into it at all.
+
+Two lessons, in the order they cost something:
+
+- **A crash that describes itself is worth more than any amount of reading.** Four hypotheses
+  were eliminated by inspection before the one-line answer arrived. The tests written along
+  the way are worth keeping; the rounds spent producing them were not necessary.
+- **A symptom's trigger is not its cause.** "At the end of the list" was a true and complete
+  description of when it happened, and it pointed at pagination, which was innocent.
 
 ## Capabilities and the filesystem
 
@@ -485,3 +733,81 @@ failing with `br-connection-page-timeout`, since the push often works anyway.
 AppArc's own SID, not yours, and `import` is its writable drop-box. Installing to
 `\private\10003a3f\apps\` instead works on the emulator and fails silently on a device:
 the classic "installs fine but never shows up".
+
+## libopus decodes on this handset with no C library at all
+
+**Measured**, by linking the decode path on its own and reading what was left undefined —
+not by reasoning about what fixed-point ought to avoid:
+
+```
+$ arm-none-symbianelf-ld -r --gc-sections -e run opusref.o libopus.a -o out.o
+$ arm-none-symbianelf-nm -u out.o
+  U __aeabi_idiv  U __aeabi_idivmod  U __aeabi_uidiv
+  U free  U malloc
+  U memcpy  U memmove  U memset
+$ arm-none-symbianelf-size out.o
+   text 109666
+```
+
+Three findings, each of which changed a decision:
+
+**No libm.** Not one floating-point function survives `FIXED_POINT=1` plus
+`DISABLE_FLOAT_API`. This mattered because there is no C library here at all — the cross
+compiler ships only the freestanding headers (`stddef.h`, `stdarg.h`, `limits.h`,
+`float.h`) and `sdk/epoc32/include` is Symbian's C++ API. `vendor/libopus/compat/math.h`
+therefore *declares* `sqrt`, `pow` and the rest and deliberately defines none of them: a
+hand-written `sqrt` that is slightly wrong yields audio that plays and sounds bad, which
+is far harder to attribute than a missing symbol. The link proves none is reachable.
+
+**107 KB of text** for the whole decode path after `--gc-sections`. That is the real
+price of playing voice messages, and it is worth stating because the naive check does not
+show it: linking the client against `libopus.a` without calling anything adds *nothing*,
+because the linker drops it all. `nm | grep -c opus` on the binary read 0 while the build
+looked like a success.
+
+**`malloc` and `free` are still referenced** despite `opus_decoder_init` into caller-owned
+memory and `VAR_ARRAYS` for scratch. They are defined in `shim_alloc.cpp` against the same
+`User::Alloc` heap as everything else, because a second allocator would make the handset's
+memory figures meaningless. `calloc` is *not* defined — the link does not ask for it, and
+a missing symbol names its caller while a silently satisfied one does not.
+
+The gotcha that cost a build: `-DOPUS_ARM_ASM=0` does **not** disable the ARM assembly.
+Upstream guards on `#if defined(OPUS_ARM_ASM)`, so defining it to zero switches the
+assembly *on* and then fails to find headers. It must be absent.
+
+## A package with no registration resource installs and never appears
+
+`audioprobe` built, packaged, transferred over Bluetooth and installed — reporting success
+at every step — and was not in the menu. The cause was an absent
+`data/<name>_reg.rss`, so no `_reg.rsc` was compiled into
+`\private\10003a3f\import\apps\`, which is the exact path that puts an application in the
+S60 menu.
+
+The failure is silent on both sides, which is what makes it expensive: nothing in the
+build, the package or the installer says anything is missing. `tools/symbuild` now refuses
+to build without one. Same symptom, different cause, already documented in the shipped
+`.rss` comments: installing to `\private\10003a3f\apps\` instead of `import\apps\` works
+on the emulator and fails silently on a device.
+
+## Audio playback, measured
+
+Row A of `examples/audioprobe` on the E72: an 8 kHz mono PCM16 WAV written by the
+application opened, reported its duration as 900 ms against a 900 ms clip, played, and was
+heard. So the platform did not substitute the sample rate, and
+`CMdaAudioPlayerUtility::OpenFileL` accepts a RIFF/WAVE file this repository generates.
+
+Two things the SDK's own examples do not say, both from the reference and both load
+bearing:
+
+- **`Stop()` does not deliver `MapcPlayComplete`.** A state machine that waits for the
+  callback after stopping waits forever with no error. `shim_audio.cpp` pushes the event
+  at the call site instead; both shipped Nokia examples set their state there too.
+- **The default priority preference is `EMdaPriorityPreferenceTimeAndQuality`, which
+  fails** rather than degrades when something else holds the device. A ringtone would turn
+  a voice message into silence with no message. The shim asks for
+  `EMdaPriorityPreferenceTime`, which permits degraded output — the right trade for
+  speech, and what `AudioStreamExample` uses.
+
+Playback needs **no capability**. `UserEnvironment` is for recording; `MultimediaDD`
+appears on the priority-taking overloads but its own documentation says it grants
+*precedence*, not access, and the SDK's `CLFExample` plays audio under `capability none`.

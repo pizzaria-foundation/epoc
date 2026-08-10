@@ -114,6 +114,13 @@ pub enum Progress {
 }
 
 enum Phase {
+    /// Waiting for the bearer. **There is no socket yet.**
+    ///
+    /// Opening one against an `RConnection` that has not come up does not fail — esock
+    /// panics the client, and a panicked application on this platform simply vanishes: no
+    /// message, no report file, nothing on screen. That is what "it does not even open
+    /// when there is no network" was.
+    Bearer,
     Connecting,
     Running,
     Dead,
@@ -122,14 +129,20 @@ enum Phase {
 pub struct Link {
     net: ShimNet,
     bearer: Bearer,
-    sock: TcpStream,
+    /// `None` until the bearer is up. See [`Phase::Bearer`].
+    sock: Option<TcpStream>,
     client: Client,
     rng: PlatformRng,
     job: Job,
     /// Whether the job in flight belongs to the caller rather than to the handshake.
     work_is_caller: bool,
+    /// Whether the bearer has been retried after a TCP connect failure.
+    /// See the `NetProgress::Failed` arm in [`Self::on_event`].
+    retried_bearer: bool,
     phase: Phase,
     dc: u8,
+    /// Whether the session was loaded from disk rather than handshaked afresh.
+    resumed: bool,
     /// Steps the client produced that have not been carried out yet.
     ///
     /// A queue because one event can produce several — a container of updates, or a send
@@ -138,6 +151,52 @@ pub struct Link {
     todo: Vec<Step>,
     /// Scratch for draining the socket.
     buf: [u8; RX],
+    /// Whether `initConnection` has gone out on this connection. See [`Link::call`].
+    inited: bool,
+    /// The body and tag of the last call, so it can be retried when the clock is
+    /// corrected without asking the login machine to regenerate it.
+    last_call: Option<(Vec<u8>, u32)>,
+    /// Whether the clock has already been corrected once on this connection. See the
+    /// `BadMessage` arm: correcting twice means the correction is not working.
+    clock_fixed: bool,
+    /// How many times the last request has been resent. See [`Link::resend_last`].
+    resends: u8,
+    /// Wire events worth logging, drained by the driver after every tick.
+    ///
+    /// Returned rather than logged here, so the driver decides the category: the same note
+    /// means `[net]` from the home link and `[dc]` from the file link, and only the caller
+    /// knows which one it is draining.
+    notes: Vec<(&'static str, Note)>,
+}
+
+/// What a note carries besides its name.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum Note {
+    /// Nothing; the name is the whole message.
+    Flag,
+    Num(i64),
+    /// Hex, for bytes that were supposed to parse and did not.
+    Text(String),
+}
+
+fn save_iap(iap: u32) -> symbian::Result<()> {
+    if iap == 0 { return Ok(()); }
+    let mut fs = ShimFs;
+    let dir = symbian::fs::private_path(&mut fs)?;
+    let path = symbian::fs::Utf16Path::join(dir.as_units(), "iap.bin")?;
+    symbian::fs::write_atomic(&mut fs, &path, &iap.to_le_bytes())
+}
+
+fn load_iap() -> Option<u32> {
+    let mut fs = ShimFs;
+    let dir = symbian::fs::private_path(&mut fs).ok()?;
+    let path = symbian::fs::Utf16Path::join(dir.as_units(), "iap.bin").ok()?;
+    let data = symbian::fs::read(&mut fs, &path).ok()??;
+    if data.len() == 4 {
+        Some(u32::from_le_bytes(data[..4].try_into().ok()?))
+    } else {
+        None
+    }
 }
 
 impl Link {
@@ -165,16 +224,29 @@ impl Link {
         let mut net = ShimNet;
         let mut rng = PlatformRng(Random::new()?);
 
-        // Join whatever is already up. If nothing is, this fails with NotFound and the
-        // caller has to bring a bearer up -- which is a real answer, unlike the path this
-        // replaced, which reported success and then never connected.
-        let bearer = Bearer::attach(&mut net)?;
-        let mut sock = TcpStream::open(&mut net, &bearer, RX, TX)?;
-        sock.connect(&mut net, dc_address(dc), DC_PORT)?;
+        let saved_iap = saved.as_ref().and_then(|s| if s.iap != 0 { Some(s.iap) } else { None })
+            .or_else(load_iap);
+        // Try joining an existing route first — silent, no dialog, near-instant.
+        // Only fall back to the prompt or a saved IAP when nothing is online.
+        let bearer = Bearer::attach(&mut net)
+            .or_else(|_| Bearer::start(&mut net, saved_iap))?;
+        let addr = dc_address(dc);
 
         let usable = saved.filter(|s| s.dc == dc);
+        let resumed = usable.is_some();
         let (client, first) = match usable {
-            Some(s) => (Client::resume(s.auth, s.time_offset, &mut rng), None),
+            Some(s) => (
+                Client::resume(s.auth, s.time_offset, &mut rng),
+                // `Step::Ready` by hand, because a resumed client is ready the moment it is
+                // built and never produces one — that step only comes out of a handshake
+                // finishing.
+                //
+                // Without it nothing ever reports `Progress::Authenticated`: the status line
+                // stays on whatever the connection last said, and the driver never flushes
+                // the request the user made while it was connecting. Typing a phone number
+                // into a resumed session did exactly nothing, forever.
+                Some(Step::Ready),
+            ),
             None => {
                 let (c, step) = Client::connect(&mut rng);
                 (c, Some(step))
@@ -184,15 +256,28 @@ impl Link {
         Ok(Link {
             net,
             bearer,
-            sock,
+            sock: None,
             client,
             rng,
             job: Job::new(),
             work_is_caller: false,
-            phase: Phase::Connecting,
+            retried_bearer: false,
+            phase: Phase::Bearer,
             dc,
+            resumed,
             todo: first.into_iter().collect(),
             buf: [0u8; RX],
+            inited: false,
+            last_call: None,
+            clock_fixed: false,
+            resends: 0,
+            notes: alloc::vec![
+                ("dc address, low octet", Note::Num((addr.0 & 0xff) as i64)),
+                (
+                if resumed { "resumed a stored session" } else { "no stored session, handshaking" },
+                Note::Flag,
+            ),
+            ],
         })
     }
 
@@ -217,13 +302,28 @@ impl Link {
                 auth: auth.clone(),
                 salt: auth.salt,
                 time_offset: self.client.time_offset().unwrap_or(0),
+                iap: self.bearer.iap().unwrap_or(0),
             },
         )
     }
 
     /// Throw the stored session away.
+    ///
+    /// And, when the reason means this account is no longer reachable from this handset,
+    /// everything cached about it. `UnknownKey` deliberately does not: it is what a data
+    /// centre migration and a server-side key rotation look like, and both keep the same
+    /// account — wiping the chat list there would cost a full `getDialogs` over GPRS to
+    /// rebuild something that was still correct.
     pub fn forget(why: session_store::Invalidate) -> symbian::Result<()> {
         let mut fs = ShimFs;
+        if matches!(
+            why,
+            session_store::Invalidate::LoggedOut
+                | session_store::Invalidate::Revoked
+                | session_store::Invalidate::Unregistered
+        ) {
+            crate::store_cache::clear(&mut fs);
+        }
         session_store::clear(&mut fs, why)
     }
 
@@ -237,7 +337,9 @@ impl Link {
     /// The old link is closed here rather than left to `Drop`, because both would otherwise
     /// hold a socket at once and the shim has eight.
     pub fn migrate(&mut self, dc: u8) -> symbian::Result<()> {
-        self.sock.close(&mut self.net);
+        if let Some(sock) = self.sock.as_mut() {
+            sock.close(&mut self.net);
+        }
         self.bearer.stop(&mut self.net);
 
         // Any stored key was for the previous data centre and is now useless. Discarding it
@@ -253,6 +355,16 @@ impl Link {
         self.client.is_ready()
     }
 
+    /// Whether the session was loaded from disk rather than built from a fresh handshake.
+    pub fn was_resumed(&self) -> bool {
+        self.resumed
+    }
+
+    /// The bearer handle, if the bearer is up. For opening supplementary sockets.
+    pub fn bearer_handle(&self) -> Option<i32> {
+        if self.bearer.is_up() { Some(self.bearer.handle()) } else { None }
+    }
+
     /// Run an exponentiation on the worker, for a caller with its own state machine.
     ///
     /// SRP needs three of these and the handshake needs two, and the shim's worker takes
@@ -264,7 +376,12 @@ impl Link {
             return false;
         }
         let ok = self.job.submit(&ModPow { base, exp, modulus }).is_ok();
-        self.work_is_caller = ok;
+        // Only on success. Assigning `ok` unconditionally clears the flag when the job is
+        // refused — and a refusal means work is already in flight, so clearing it sends
+        // *that* result down the handshake path instead of back to the caller.
+        if ok {
+            self.work_is_caller = true;
+        }
         ok
     }
 
@@ -280,7 +397,9 @@ impl Link {
             .job
             .submit_kdf(&symbian::work::Kdf { password, salt1, salt2 })
             .is_ok();
-        self.work_is_caller = ok;
+        if ok {
+            self.work_is_caller = true;
+        }
         ok
     }
 
@@ -297,15 +416,49 @@ impl Link {
         self.client.auth_key()
     }
 
-    pub fn time_offset(&self) -> Option<i32> {
+    pub fn time_offset(&self) -> Option<i64> {
         self.client.time_offset()
     }
 
     /// Make a call. Only valid once [`Progress::Authenticated`] has been seen.
-    pub fn call(&mut self, body: &[u8], tag: u32, unix_time: i64) -> Option<Progress> {
-        let (_, step) = self.client.call(body, tag, unix_time, 0, &mut self.rng).ok()?;
-        self.todo.push(step);
-        self.drain(unix_time)
+    /// Send a request. `false` when the session is not up yet and the caller must wait.
+    ///
+    /// The `false` matters. This used to return `Option` and be called with `?` discarded,
+    /// so a request made before the handshake finished vanished — and since the handshake
+    /// takes about four seconds on this handset, that is what happens to anyone who types a
+    /// phone number quickly. The screen sat on "sending the code" with nothing in flight.
+    pub fn call(&mut self, body: &[u8], tag: u32, unix_time: i64) -> bool {
+        if !self.client.is_ready() {
+            return false;
+        }
+        // The first request on a connection has to carry `initConnection`, or the server
+        // answers CONNECTION_NOT_INITED and nothing else on that connection ever works.
+        //
+        // Wrapped around the real request rather than sent ahead of it as its own
+        // `help.getConfig`: that would be a whole extra round trip, and on this handset a
+        // round trip to Telegram is 600 ms of the four seconds a login takes.
+        //
+        // Per *connection*, not per auth key — a resumed session on a fresh socket needs it
+        // again, which is why the flag lives here and starts false in `open`.
+        let wrapped;
+        let body = if self.inited {
+            body
+        } else {
+            self.inited = true;
+            self.note("wrapping the first call in initConnection", Note::Flag);
+            wrapped = wrap_first(body);
+            &wrapped
+        };
+        // Store a copy so a clock correction can retry without the caller knowing.
+        self.last_call = Some((body.to_vec(), tag));
+        match self.client.call(body, tag, unix_time, 0, &mut self.rng) {
+            Ok((_, step)) => {
+                self.todo.push(step);
+                self.drain(unix_time);
+                true
+            }
+            Err(_) => false,
+        }
     }
 
     /// Feed a raw shim event.
@@ -313,6 +466,124 @@ impl Link {
     /// `unix_time` is the caller's clock, needed because MTProto stamps every message and
     /// this layer has no business calling `shim_unix_time` on the protocol's behalf — the
     /// application already knows what time it thinks it is.
+    /// Take everything the wire has done since the last call, for the log.
+    pub fn take_notes(&mut self) -> Vec<(&'static str, Note)> {
+        core::mem::take(&mut self.notes)
+    }
+
+    /// Write, when there is something to write to.
+    ///
+    /// Before the bearer is up there is no socket, and a caller reaching for one is a bug
+    /// rather than a condition to handle — but it is a bug that used to be a panic, so it
+    /// answers with an error.
+    fn write_out(&mut self, bytes: &[u8]) -> symbian::Result<()> {
+        match self.sock.as_mut() {
+            Some(sock) => sock.write(&mut self.net, bytes).map(|_| ()),
+            None => Err(symbian::Error::NotReady),
+        }
+    }
+
+    /// The read side of the same. A free function in all but name, so the socket and the
+    /// scratch buffer can be borrowed at once.
+    fn read_into(
+        sock: Option<&mut TcpStream>,
+        net: &mut ShimNet,
+        buf: &mut [u8],
+    ) -> symbian::Result<usize> {
+        match sock {
+            Some(sock) => sock.read(net, buf),
+            None => Err(symbian::Error::NotReady),
+        }
+    }
+
+    /// Events that arrive while the bearer is still coming up.
+    ///
+    /// The socket is opened here and nowhere else, and only after the platform has said the
+    /// connection is up. A failure at this point means nothing was already online and the
+    /// user declined to bring anything up — `Bearer` has already offered the access point
+    /// dialog by then, which is what every other program on the handset does.
+    fn on_bearer_event(&mut self, ev: &sys::ShimEvent) -> Progress {
+        match self.bearer.on_event(&mut self.net, ev) {
+            Ok(false) => Progress::Step("aguardando rede"),
+            Ok(true) => {
+                let iap = self.bearer.iap().unwrap_or(0);
+                self.note("bearer up, iap", Note::Num(iap as i64));
+                // Save the access point immediately so the next launch skips the dialog.
+                let _ = save_iap(iap);
+                let mut sock = match TcpStream::open(&mut self.net, &self.bearer, RX, TX) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        self.note("socket open failed", Note::Num(e.code() as i64));
+                        return self.die("não consegui abrir o socket");
+                    }
+                };
+                let addr = dc_address(self.dc);
+                self.note("connecting to dc", Note::Num(self.dc as i64));
+                if let Err(e) = sock.connect(&mut self.net, addr, DC_PORT) {
+                    self.note("connect failed", Note::Num(e.code() as i64));
+                    return self.die("não consegui alcançar o servidor");
+                }
+                self.sock = Some(sock);
+                self.phase = Phase::Connecting;
+                Progress::Step("conectando ao Telegram")
+            }
+            Err(e) => {
+                self.note("bearer failed", Note::Num(e.code() as i64));
+                self.die("sem conexão de rede")
+            }
+        }
+    }
+
+    fn note(&mut self, what: &'static str, n: Note) {
+        // Bounded: a long session must not turn the note buffer into the leak. Twenty is
+        // more than one tick ever produces, so in practice nothing is ever dropped.
+        if self.notes.len() < 20 {
+            self.notes.push((what, n));
+        }
+    }
+
+    /// The head of a buffer as hex.
+    ///
+    /// Every static check on the failing handshake came back correct — the framing queues,
+    /// the buffers are heap and survive a move, the target is `+strict-align`, and a live
+    /// probe showed the server answers `res_pq` even with a year of clock error. What is
+    /// left is what actually arrived, so this records it.
+    ///
+    /// Twenty-four bytes: the 20-byte unencrypted header plus the constructor that follows
+    /// it, which is exactly the boundary the parser trips over.
+    fn note_head(&mut self, what: &'static str, bytes: &[u8]) {
+        let mut hex = String::new();
+        for b in bytes.iter().take(24) {
+            const D: &[u8; 16] = b"0123456789abcdef";
+            hex.push(D[(b >> 4) as usize] as char);
+            hex.push(D[(b & 15) as usize] as char);
+        }
+        self.note(what, Note::Text(hex));
+    }
+
+    /// Name the deepest part of a failure, with its number where it has one.
+    ///
+    /// `describe` gives the screen a sentence. This gives the log the constructor id, which
+    /// is the thing that can be looked up in the schema.
+    fn note_error(&mut self, e: &tg_proto::client::Error) {
+        use tg_proto::client::Error as E;
+        use tg_proto::handshake::Error as H;
+        use tg_proto::tl::Error as T;
+        match e {
+            E::Handshake(H::Tl(t)) | E::Rpc(tg_proto::rpc::Error::Tl(t)) => match t {
+                T::Truncated => self.note("tl: truncated", Note::Flag),
+                T::BadLength => self.note("tl: bad length", Note::Flag),
+                T::UnknownConstructor(c) => self.note("tl: unknown ctor", Note::Num(*c as i64)),
+                T::Unexpected { want, got } => {
+                    self.note("tl: wanted ctor", Note::Num(*want as i64));
+                    self.note("tl: got ctor", Note::Num(*got as i64));
+                }
+            },
+            E::Server(c) => self.note("transport error", Note::Num(*c as i64)),
+            _ => {}
+        }
+    }
+
     pub fn on_event(&mut self, ev: &sys::ShimEvent, unix_time: i64) -> Progress {
         if matches!(self.phase, Phase::Dead) {
             return Progress::None;
@@ -321,7 +592,14 @@ impl Link {
         // The worker first: a completion here unblocks the handshake, and checking it
         // before the socket means a modpow finishing in the same tick as a packet arriving
         // is handled in the order the protocol expects.
-        if let Some(result) = self.job.on_event(ev) {
+        // Copied out immediately: the borrow is of the job's own buffer, and everything
+        // below — including saying in the log what just happened — needs the Link back.
+        let finished = match self.job.on_event(ev) {
+            None => None,
+            Some(Ok(bytes)) => Some(Ok(bytes.to_vec())),
+            Some(Err(e)) => Some(Err(e)),
+        };
+        if let Some(result) = finished {
             // Whose job was it?
             //
             // The Link owns the only worker, because the shim runs one at a time and two
@@ -329,10 +607,13 @@ impl Link {
             // SRP needs three plus a five-second derivation. Work the caller submitted comes
             // back as Progress::WorkDone; the handshake's is fed back in here.
             let theirs = core::mem::replace(&mut self.work_is_caller, false);
+            self.note(
+                if theirs { "worker done, caller's, bytes" } else { "worker done, handshake's, bytes" },
+                Note::Num(result.as_ref().map(|b| b.len() as i64).unwrap_or(-1)),
+            );
             return match result {
-                Ok(bytes) if theirs => Progress::WorkDone(bytes.to_vec()),
-                Ok(bytes) => {
-                    let out = bytes.to_vec();
+                Ok(bytes) if theirs => Progress::WorkDone(bytes),
+                Ok(out) => {
                     match self.client.on_modpow(&out, &mut self.rng) {
                         Ok(steps) => {
                             self.todo.extend(steps.into_iter().rev());
@@ -345,25 +626,37 @@ impl Link {
             };
         }
 
-        match self.sock.on_event(&mut self.net, ev) {
+        // The bearer, while there is no socket. Attaching answers through the event loop, a
+        // failure falls through to the access point dialog, and only a bearer that is
+        // actually up gets a socket opened on it.
+        let Some(sock) = self.sock.as_mut() else {
+            return self.on_bearer_event(ev);
+        };
+
+        match sock.on_event(&mut self.net, ev) {
             NetProgress::Connected => {
+                self.note("tcp connected", Note::Flag);
                 self.phase = Phase::Running;
-                // The transport greeting must precede everything, including the first
-                // handshake message, and it is not part of any frame.
                 let greeting = self.client.greeting();
-                if self.sock.write(&mut self.net, greeting).is_err() {
+                if self.write_out(greeting).is_err() {
                     return self.die("could not send the transport greeting");
                 }
-                self.drain(unix_time).unwrap_or(Progress::Step("connected"))
+                // `drain` answers for a fresh session (it has req_pq_multi to send) and for
+                // a resumed one (it has the hand-queued `Step::Ready`). The fallback is now
+                // only reachable if the queue is empty, which would be a bug rather than a
+                // state to describe — so it says so instead of naming a handshake that is
+                // not happening.
+                self.drain(unix_time).unwrap_or(Progress::Step("conectado, sem nada a enviar"))
             }
             NetProgress::Received(_) => {
-                let n = match self.sock.read(&mut self.net, &mut self.buf) {
+                let n = match Self::read_into(self.sock.as_mut(), &mut self.net, &mut self.buf) {
                     Ok(n) => n,
                     Err(_) => return self.die("read failed"),
                 };
                 // The borrow has to end before `feed` touches `self`, hence the copy. It is
                 // a few kilobytes against a protocol that just spent 815 ms on arithmetic.
                 let chunk: Vec<u8> = self.buf[..n].to_vec();
+                self.note("rx bytes", Note::Num(n as i64));
                 match self.client.feed(&chunk, &mut self.rng) {
                     Ok(steps) => {
                         self.todo.extend(steps.into_iter().rev());
@@ -376,25 +669,64 @@ impl Link {
                         let _ = Self::forget(session_store::Invalidate::UnknownKey);
                         self.die("the server no longer knows this auth key")
                     }
-                    Err(_) => self.die("the server sent something unreadable"),
+                    Err(e) => {
+                        // The bytes first, then the name. A parse failure is only diagnosable
+                        // from what was parsed.
+                        self.note_head("rx head", &chunk);
+                        self.note_error(&e);
+                        self.die(describe(&e))
+                    }
                 }
             }
             NetProgress::Closed => self.die("the server closed the connection"),
-            NetProgress::Failed(_) => self.die("the connection failed"),
+            NetProgress::Sent(n) => {
+                self.note("tx completed, bytes", Note::Num(n as i64));
+                Progress::None
+            }
+            NetProgress::Failed(_) => {
+                if !self.retried_bearer {
+                    self.retried_bearer = true;
+                    self.sock = None;
+                    self.bearer.stop(&mut self.net);
+                    match Bearer::start(&mut self.net, None) {
+                        Ok(b) => {
+                            self.bearer = b;
+                            self.phase = Phase::Bearer;
+                            return Progress::Step("escolha um ponto de acesso");
+                        }
+                        Err(e) => {
+                            self.note("bearer retry failed", Note::Num(e.code() as i64));
+                            return self.die("sem conexão de rede");
+                        }
+                    }
+                }
+                self.die("the connection failed")
+            }
             _ => Progress::None,
         }
     }
 
     /// Carry out queued steps until something is worth reporting.
     fn drain(&mut self, unix_time: i64) -> Option<Progress> {
+        // Nothing goes out before the socket exists. The queue keeps its contents and is
+        // drained by the `Connected` arm, which is also where the transport greeting is
+        // written — and the greeting has to precede everything in the queue.
+        if self.sock.is_none() {
+            return None;
+        }
         while let Some(step) = self.todo.pop() {
             match step {
                 Step::Send(bytes) => {
-                    if self.sock.write(&mut self.net, &bytes).is_err() {
+                    self.note("tx bytes", Note::Num(bytes.len() as i64));
+                    if self.write_out(&bytes).is_err() {
                         return Some(self.die("write failed"));
                     }
                 }
                 Step::ModPow { base, exp, modulus } => {
+                    self.note("handshake modpow, modulus bytes", Note::Num(modulus.len() as i64));
+                    // Stated, not assumed. This used to rely on the flag already being
+                    // false, which is true only as long as nothing else ever writes it.
+                    self.work_is_caller = false;
                     let job = ModPow { base: &base, exp: &exp, modulus: &modulus };
                     if self.job.submit(&job).is_err() {
                         return Some(self.die("the worker thread would not take the job"));
@@ -410,7 +742,7 @@ impl Link {
                     return Some(Progress::Authenticated);
                 }
                 Step::Update(u) => {
-                    if let Some(p) = self.on_update(u) {
+                    if let Some(p) = self.on_update(u, unix_time) {
                         self.flush_acks(unix_time);
                         return Some(p);
                     }
@@ -421,9 +753,11 @@ impl Link {
         None
     }
 
-    fn on_update(&mut self, u: Update) -> Option<Progress> {
+    fn on_update(&mut self, u: Update, unix_time: i64) -> Option<Progress> {
         match u {
             Update::Result { req_msg_id, body, .. } => {
+                // Something got through, so the budget for the next request starts fresh.
+                self.resends = 0;
                 let tag = self.client.tag_of(req_msg_id)?;
                 Some(Progress::Reply { tag, body })
             }
@@ -439,17 +773,88 @@ impl Link {
                 Some(Progress::Failed { tag, code, text })
             }
             // The salt is adopted inside the client; nothing for the UI to say about it.
-            Update::NewSalt { .. } | Update::NewSession { .. } => None,
-            Update::BadMessage { code, .. } => {
-                // 16 and 17 mean the msg_id was outside the server's window, which on a
-                // handset means the clock. Not fatal, and not silently ignorable either.
-                Some(Progress::Step(if code == 16 || code == 17 {
-                    "the clock is out of step with the server"
-                } else {
-                    "the server rejected a message"
-                }))
+            // The salt is adopted inside the client, but adopting it is only half of it:
+            // `bad_server_salt` means the server *discarded* the message that used the old
+            // one. Not resending it loses the request silently — and a stored session is
+            // always more than an hour old, which is exactly how long a salt lasts, so this
+            // is the ordinary first request of a resumed login rather than a rare case.
+            Update::NewSalt { .. } => {
+                self.note("server salt replaced", Note::Flag);
+                self.resend_last(unix_time)
+            }
+            // A new session is the server telling us it lost state, not that it threw a
+            // message away. Nothing to resend.
+            Update::NewSession { .. } => None,
+            Update::BadMessage { bad_msg_id, code } => {
+                self.note("bad_msg_notification code", Note::Num(code as i64));
+                self.note("rejected our msg_id at", Note::Num((bad_msg_id >> 32) as i64));
+                if code != 16 && code != 17 {
+                    return Some(Progress::Step("o servidor recusou uma mensagem"));
+                }
+
+                // 16 and 17 are "your msg_id is outside my window", which on a handset means
+                // the clock. This one is 59 days behind, measured.
+                //
+                // Once. A second rejection after a correction is not a clock problem, and
+                // resending into it is an infinite loop that shows a reassuring status line
+                // while nothing progresses — which is exactly what it did.
+                if self.clock_fixed {
+                    return Some(self.die("o relógio do telefone está muito errado"));
+                }
+                self.clock_fixed = true;
+
+                if !self.client.correct_time() {
+                    return Some(self.die("o relógio do telefone está muito errado"));
+                }
+                self.note("clock corrected to", Note::Num(self.client.server_clock() as i64));
+                // Straight to disk. The stored session carries the offset, and a resumed
+                // one that carries the old wrong offset spends its first round trip
+                // rediscovering this — every launch, since nothing would ever write the
+                // corrected value.
+                let _ = self.persist();
+
+                let Some((body, tag)) = self.last_call.clone() else {
+                    return Some(Progress::Step("relogio ajustado"));
+                };
+                self.note("retrying after clock fix, tag", Note::Num(tag as i64));
+                match self.client.call(&body, tag, unix_time, 0, &mut self.rng) {
+                    Ok((_, Step::Send(bytes))) => {
+                        // Written here rather than queued: `drain` is not running, this is
+                        // inside the update loop it feeds.
+                        if self.write_out(&bytes).is_err() {
+                            return Some(self.die("write failed"));
+                        }
+                    }
+                    // Anything else means the client would not build the request again, and
+                    // silently doing nothing is what makes a status line lie.
+                    _ => return Some(self.die("não consegui reenviar depois de ajustar o relógio")),
+                }
+                Some(Progress::Step("relogio ajustado"))
             }
             _ => None,
+        }
+    }
+
+    /// Resend the last request, after the server threw it away.
+    ///
+    /// Bounded. A salt that keeps being replaced, or a server rejecting for some reason the
+    /// client cannot see, would otherwise be an endless resend behind a status line that
+    /// says everything is fine.
+    fn resend_last(&mut self, unix_time: i64) -> Option<Progress> {
+        let (body, tag) = self.last_call.clone()?;
+        if self.resends >= 3 {
+            return Some(self.die("o servidor recusou o pedido várias vezes"));
+        }
+        self.resends += 1;
+        self.note("resending, tag", Note::Num(tag as i64));
+        match self.client.call(&body, tag, unix_time, 0, &mut self.rng) {
+            Ok((_, Step::Send(bytes))) => {
+                if self.write_out(&bytes).is_err() {
+                    return Some(self.die("write failed"));
+                }
+                None
+            }
+            _ => Some(self.die("não consegui reenviar o pedido")),
         }
     }
 
@@ -459,15 +864,52 @@ impl Link {
     /// data and battery on the device least able to spare either.
     fn flush_acks(&mut self, unix_time: i64) {
         if let Some(Step::Send(bytes)) = self.client.pending_ack(unix_time, 0, &mut self.rng) {
-            let _ = self.sock.write(&mut self.net, &bytes);
+            let _ = self.write_out(&bytes);
         }
     }
 
     fn die(&mut self, why: &'static str) -> Progress {
         self.phase = Phase::Dead;
-        self.sock.close(&mut self.net);
+        if let Some(sock) = self.sock.as_mut() {
+            sock.close(&mut self.net);
+        }
         self.bearer.stop(&mut self.net);
         Progress::Disconnected(why)
+    }
+}
+
+/// Name what actually failed.
+///
+/// This was one string — "the server sent something unreadable" — for every error the whole
+/// stack can produce: transport framing, the handshake's eleven steps, the encrypted layer,
+/// the RPC unwrapping. On a device with no log that is the same as saying nothing, and it
+/// cost a trip to the handset to learn only that *something* was wrong.
+///
+/// The bearer investigation taught this exact lesson twice — name the error, print the
+/// number — and it did not get applied here.
+fn describe(e: &tg_proto::client::Error) -> &'static str {
+    use tg_proto::client::Error as E;
+    use tg_proto::handshake::Error as H;
+    match e {
+        E::Transport(_) => "erro de enquadramento",
+        E::Session(_) => "não consegui decifrar",
+        E::Rpc(_) => "resposta ilegível",
+        E::NotReady => "ainda não conectado",
+        E::Server(c) if *c == -404 => "o servidor esqueceu a chave",
+        E::Server(_) => "o servidor recusou",
+        E::Handshake(h) => match h {
+            H::Tl(_) => "handshake: TL ilegível",
+            H::Crypto(_) => "handshake: falha de cripto",
+            H::OutOfOrder => "handshake: resposta fora de ordem",
+            H::NonceMismatch => "handshake: nonce não confere",
+            H::NotFactorable(_) => "handshake: não fatorei o pq",
+            H::NoUsableKey => "handshake: nenhuma chave RSA nossa",
+            H::ServerRejected => "handshake: servidor recusou os dados",
+            H::UnknownDhPrime => "handshake: primo DH desconhecido",
+            H::BadDhParams => "handshake: parâmetros DH inválidos",
+            H::DhGenFailed => "handshake: geração da chave falhou",
+            H::KeyMismatch => "handshake: as chaves não batem",
+        },
     }
 }
 
@@ -508,19 +950,28 @@ pub fn work(opcode: i32, input: &[u8], out: &mut [u8]) -> i32 {
     }
 }
 
-/// Build the first call a connection makes.
+/// Wrap a request so it can be the first one on a connection.
 ///
-/// `initConnection` is required once per connection; `help.getConfig` needs no login and
-/// makes a good first request, since a reply to it proves the encrypted layer end to end
-/// before a phone number is involved.
-pub fn hello() -> Vec<u8> {
+/// Telegram wants to know the layer and who is asking before it will answer anything, and
+/// it says so with `CONNECTION_NOT_INITED` — which arrives as an ordinary RPC error on a
+/// perfectly healthy session, so it reads like the request was wrong rather than missing a
+/// preamble.
+pub fn wrap_first(query: &[u8]) -> Vec<u8> {
     rpc::init_connection(
         api_id(),
         "Nokia E72",
         "Symbian 9.3",
         env!("CARGO_PKG_VERSION"),
-        &rpc::get_config(),
+        query,
     )
+}
+
+/// The same wrapper around `help.getConfig`, for a connection with nothing else to say.
+///
+/// Not used by the login, which wraps its own first request instead of spending a round
+/// trip on this one.
+pub fn hello() -> Vec<u8> {
+    wrap_first(&rpc::get_config())
 }
 
 /* The application's credentials.
@@ -575,5 +1026,16 @@ mod tests {
     fn the_first_call_is_init_connection() {
         let out = hello();
         assert_eq!(&out[..4], &rpc::INVOKE_WITH_LAYER.to_le_bytes());
+    }
+
+    #[test]
+    fn wrapping_keeps_the_query_intact_at_the_end() {
+        // The server unwraps two layers and runs what is left, so the query has to survive
+        // byte for byte. A live session answered CONNECTION_NOT_INITED for want of this,
+        // and the error names the missing wrapper rather than anything about the request.
+        let query = rpc::get_config();
+        let out = wrap_first(&query);
+        assert_eq!(&out[..4], &rpc::INVOKE_WITH_LAYER.to_le_bytes());
+        assert!(out.ends_with(&query), "the query did not survive the wrapping");
     }
 }

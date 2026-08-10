@@ -1,0 +1,45 @@
+# SYNTHETIC — fabricated by hand, NOT a measurement.
+#
+# This exists to test tools/mkkeymap.py's parser: it exercises a dead key, a Ç, an
+# out-of-font character, a multi-unit mapping and the pt-BR/English pair. The character
+# assignments are plausible but invented, so it must never be used to generate a shipped
+# table. A real dump comes from examples/keydump running on the handset, and the only way
+# to tell them apart is this header — which is why it is here.
+
+# keydump 1 - the handset's own qwerty keymap, via CPtiEngine
+# K <ptikey> <case> <n> <ucs2>... ; 0xFFFF is the dead-key separator
+# N <char> <ptikey> <case-index>  ; numeric-mode bindings
+
+# language brazilian-portuguese id 76
+# activate rc 0
+K 0051 lower 1 0071
+K 0051 upper 1 0051
+K 0051 chr-lower 1 0021
+K 0041 lower 1 0061
+K 0041 upper 1 0041
+K 0045 lower 1 0065
+K 0045 upper 1 0045
+# The cedilla key: on an ABNT2 layout it lands on the semicolon position.
+K 007D lower 1 00E7
+K 007D upper 1 00C7
+# The acute dead key, on the apostrophe position: the 0xFFFF separator is the signal.
+K 007E lower 6 00B4 FFFF 00E1 00E9 00ED 00F3
+K 007E upper 4 0060 FFFF 00E0 00E8
+# A key whose chr layer is outside the font, which must be dropped and reported.
+K 0050 lower 1 0070
+K 0050 chr-lower 1 20AC
+# A multi-unit mapping with no separator: the first unit is what the key produces.
+K 0053 lower 2 0073 015B
+# numeric bindings 3
+N 002B 0055 2
+N 0030 0030 2
+N 0031 0031 2
+
+# language english id 1
+# activate rc 0
+K 0051 lower 1 0071
+K 0051 upper 1 0051
+K 007D lower 1 003B
+K 007E lower 1 0027
+# numeric bindings 1
+N 0031 0031 2

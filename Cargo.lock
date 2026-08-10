@@ -3,6 +3,17 @@
 version = 4
 
 [[package]]
+name = "audioprobe"
+version = "0.1.0"
+dependencies = [
+ "symbian",
+ "symbian-audio",
+ "symbian-gfx",
+ "symbian-sys",
+ "symbian-ui",
+]
+
+[[package]]
 name = "autocfg"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -66,6 +77,14 @@ name = "downcast-rs"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "75b325c5dbd37f80359721ad39aca5a29fb04c89279657cffdda8736d0c0b9d2"
+
+[[package]]
+name = "epocadb"
+version = "0.1.0"
+dependencies = [
+ "symbian",
+ "symbian-sys",
+]
 
 [[package]]
 name = "errno"
@@ -186,6 +205,16 @@ dependencies = [
  "cfg-if",
  "libc",
  "r-efi",
+]
+
+[[package]]
+name = "imgprobe"
+version = "0.1.0"
+dependencies = [
+ "symbian",
+ "symbian-gfx",
+ "symbian-sys",
+ "symbian-ui",
 ]
 
 [[package]]
@@ -332,6 +361,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 
 [[package]]
+name = "opus"
+version = "0.1.0"
+
+[[package]]
 name = "orbclient"
 version = "0.3.55"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -365,8 +398,8 @@ name = "preview"
 version = "0.1.0"
 dependencies = [
  "symbian-gfx",
+ "symbian-preview",
  "symbian-ui",
- "tg",
 ]
 
 [[package]]
@@ -518,14 +551,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 
 [[package]]
-name = "sim"
-version = "0.1.0"
-dependencies = [
- "symbian-sim",
- "tg",
-]
-
-[[package]]
 name = "slab"
 version = "0.4.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -549,9 +574,19 @@ dependencies = [
 name = "symbian-app"
 version = "0.1.0"
 dependencies = [
+ "epocadb",
+ "symbian",
  "symbian-gfx",
+ "symbian-keys",
  "symbian-sys",
  "symbian-ui",
+]
+
+[[package]]
+name = "symbian-audio"
+version = "0.1.0"
+dependencies = [
+ "opus",
 ]
 
 [[package]]
@@ -563,11 +598,24 @@ name = "symbian-gfx"
 version = "0.1.0"
 
 [[package]]
+name = "symbian-keys"
+version = "0.1.0"
+
+[[package]]
+name = "symbian-preview"
+version = "0.1.0"
+dependencies = [
+ "symbian-gfx",
+ "symbian-ui",
+]
+
+[[package]]
 name = "symbian-sim"
 version = "0.1.0"
 dependencies = [
  "minifb",
  "symbian-gfx",
+ "symbian-keys",
  "symbian-ui",
 ]
 
@@ -623,7 +671,11 @@ name = "tg"
 version = "0.1.0"
 dependencies = [
  "symbian",
+ "symbian-app",
  "symbian-crypto",
+ "symbian-gfx",
+ "symbian-preview",
+ "symbian-sim",
  "symbian-sys",
  "symbian-ui",
  "tg-proto",

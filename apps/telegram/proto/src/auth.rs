@@ -112,6 +112,20 @@ pub fn migrate_target(text: &str) -> Option<u8> {
     None
 }
 
+/// `FILE_MIGRATE_2`: the file lives on another data centre.
+///
+/// Deliberately not folded into [`migrate_target`], because the required response is the
+/// opposite one. The three there mean "your *session* belongs elsewhere", and the client
+/// answers by moving — abandoning the current connection and rebuilding it. This one means
+/// "this *file* is elsewhere" and the session must stay exactly where it is; moving it
+/// would sign the user out of the data centre their account is on.
+///
+/// It should be rare, because `photo.dc_id` and `document.dc_id` say where to go before
+/// asking. It is the fallback for the media those fields are missing from.
+pub fn file_migrate_target(text: &str) -> Option<u8> {
+    text.strip_prefix("FILE_MIGRATE_")?.parse().ok()
+}
+
 /// What the caller must do next.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Action {
@@ -160,6 +174,8 @@ pub struct Login {
     api_hash: String,
     /// From `auth.sentCode`, and required by `auth.signIn`.
     code_hash: String,
+    /// The code the user typed, kept so an interrupted sign-in can be re-sent.
+    code: String,
     /// Held between the user typing it and the key derivation consuming it.
     password: Vec<u8>,
     params: Option<PasswordParams>,
@@ -174,6 +190,7 @@ impl Login {
             api_id,
             api_hash: api_hash.to_string(),
             code_hash: String::new(),
+            code: String::new(),
             password: Vec::new(),
             params: None,
             srp: None,
@@ -210,6 +227,7 @@ impl Login {
 
     /// Submit what the user typed.
     pub fn submit_code(&mut self, code: &str) -> Action {
+        self.code = String::from(code);
         self.state = State::AwaitSignIn;
         Action::Call {
             body: rpc::auth_sign_in(&self.phone, &self.code_hash, code),
@@ -228,6 +246,53 @@ impl Login {
         // reused from whatever arrived with SESSION_PASSWORD_NEEDED.
         self.state = State::AwaitParams;
         Action::Call { body: rpc::account_get_password(), tag: tag::GET_PASSWORD }
+    }
+
+    /// Re-issue whatever this machine is waiting for, on a connection that has just come
+    /// back.
+    ///
+    /// A login is a dozen round trips and any of them can be interrupted — the handset drops
+    /// Wi-Fi, the user minimises the application, the watchdog forces a reconnect. Every one
+    /// of those left the machine waiting for a reply that would never arrive on a session
+    /// that no longer existed: the screen said "conectado" and nothing moved, forever.
+    ///
+    /// The SRP states all restart from `account.getPassword` rather than from where they
+    /// stopped. `srp_B` is issued per request and a proof built against a stale one is
+    /// rejected as a wrong password, which is the worst possible way for this to fail —
+    /// it accuses the user of mistyping.
+    ///
+    /// Returns `None` for the states where nothing is outstanding, so a caller can tell
+    /// "nothing to do" from "something was resent".
+    pub fn resume(&mut self) -> Option<Action> {
+        match self.state {
+            // Nothing asked for: either not started, or waiting on the person.
+            State::Idle | State::NeedPassword | State::Done => None,
+            State::AwaitCode => Some(Action::Call {
+                body: rpc::auth_send_code(&self.phone, self.api_id, &self.api_hash),
+                tag: tag::SEND_CODE,
+            }),
+            State::AwaitSignIn => {
+                // The code and its hash are still good; only the transport was lost.
+                Some(Action::Call {
+                    body: rpc::auth_sign_in(&self.phone, &self.code_hash, &self.code),
+                    tag: tag::SIGN_IN,
+                })
+            }
+            State::AwaitParams | State::AwaitKdf | State::AwaitSrp | State::AwaitCheck => {
+                if self.password.is_empty() {
+                    // The password was dropped, so there is nothing to redo it with. Ask
+                    // for it again rather than sit still.
+                    self.state = State::NeedPassword;
+                    return Some(Action::NeedPassword { hint: String::new() });
+                }
+                self.srp = None;
+                self.state = State::AwaitParams;
+                Some(Action::Call {
+                    body: rpc::account_get_password(),
+                    tag: tag::GET_PASSWORD,
+                })
+            }
+        }
     }
 
     /// Feed a successful reply.
@@ -356,6 +421,27 @@ impl Login {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_reconnect_during_the_password_restarts_from_the_parameters() {
+        // `srp_B` is issued per request, and a proof built against a stale one is rejected
+        // as a wrong password — the worst way for this to fail, because it accuses the user
+        // of mistyping. So every SRP state restarts from `account.getPassword` rather than
+        // from where it stopped.
+        let mut a = Login::new(1, "h");
+        a.submit_password(b"hunter2");
+        let act = a.resume().expect("something was outstanding");
+        let Action::Call { tag, .. } = act else { panic!("expected a call, got {act:?}") };
+        assert_eq!(tag, tag::GET_PASSWORD);
+    }
+
+    #[test]
+    fn a_machine_waiting_on_the_person_resumes_nothing() {
+        // A reconnect while the user is typing must not fire a request. `resume` is called
+        // on every `Authenticated`, including the first one of a fresh connection.
+        let mut a = Login::new(1, "h");
+        assert!(a.resume().is_none(), "an idle machine asked for something");
+    }
     use crate::crypto::testing::CountingRng;
     use crate::tl::{Reader, Writer};
 
@@ -385,6 +471,14 @@ mod tests {
         // Recognising only PHONE_MIGRATE works until someone logs in from a network
         // Telegram routes differently, and then the client loops on an error it treats as
         // fatal.
+        // FILE_MIGRATE is deliberately not one of them: it means the *file* is elsewhere,
+        // not the session, and answering it by moving the session would sign the user out
+        // of the data centre their account lives on.
+        assert_eq!(migrate_target("FILE_MIGRATE_2"), None);
+        assert_eq!(file_migrate_target("FILE_MIGRATE_2"), Some(2));
+        assert_eq!(file_migrate_target("PHONE_MIGRATE_4"), None);
+        assert_eq!(file_migrate_target("FILE_REFERENCE_EXPIRED"), None);
+
         assert_eq!(migrate_target("PHONE_MIGRATE_4"), Some(4));
         assert_eq!(migrate_target("NETWORK_MIGRATE_5"), Some(5));
         assert_eq!(migrate_target("USER_MIGRATE_1"), Some(1));

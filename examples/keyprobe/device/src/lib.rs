@@ -25,6 +25,7 @@
 
 extern crate alloc;
 
+use symbian_app::symbian_sys as sys;
 use symbian_ui::{App, Canvas, Handled, KeyEvent, Rect, RawEvent, Theme};
 
 symbian_app::entry!(KeyProbe::new());
@@ -48,15 +49,56 @@ struct Row {
 /// just happened.
 const CAP: usize = 10;
 
+const LOG_FILE: &str = "keylog.txt";
+
 pub struct KeyProbe {
     rows: [Row; CAP],
     len: usize,
     total: u32,
+    file_handle: i32,
 }
 
 impl KeyProbe {
     pub fn new() -> Self {
-        KeyProbe { rows: [Row::default(); CAP], len: 0, total: 0 }
+        KeyProbe { rows: [Row::default(); CAP], len: 0, total: 0, file_handle: 0 }
+    }
+
+    fn log_open(&mut self) -> i32 {
+        let mut path = [0u16; 256];
+        let mut plen: i32 = 0;
+        let rc = unsafe { sys::shim_private_path(path.as_mut_ptr(), 256, &mut plen) };
+        if rc != sys::SHIM_OK {
+            return 0;
+        }
+        for c in LOG_FILE.encode_utf16() {
+            let i = plen as usize;
+            if i < 256 {
+                path[i] = c;
+                plen += 1;
+            }
+        }
+        let mode = sys::SHIM_FILE_WRITE | sys::SHIM_FILE_CREATE | sys::SHIM_FILE_APPEND;
+        let mut handle: i32 = 0;
+        let rc = unsafe { sys::shim_file_open(path.as_ptr(), plen, mode, &mut handle) };
+        if rc != sys::SHIM_OK {
+            return 0;
+        }
+        // Write header line so the file is self-describing.
+        let header = b"kind  code   scan  mod  native    repeat\n";
+        unsafe { sys::shim_file_write(handle, header.as_ptr(), header.len() as i32); }
+        handle
+    }
+
+    fn log_row(&mut self, row: &Row) {
+        if self.file_handle == 0 {
+            self.file_handle = self.log_open();
+        }
+        if self.file_handle == 0 {
+            return;
+        }
+        let mut buf = [0u8; 80];
+        let n = format_row_file(row, &mut buf);
+        unsafe { sys::shim_file_write(self.file_handle, buf.as_ptr(), n as i32); }
     }
 }
 
@@ -74,7 +116,6 @@ impl App for KeyProbe {
     /// Every key event, raw. Consuming them is the point: a translated `KeyEvent` is
     /// exactly the view that hid the bug this tool was built to find.
     fn handle_raw(&mut self, ev: &RawEvent) -> Handled {
-        use symbian_app::symbian_sys as sys;
         const KEY_KINDS: [i32; 3] =
             [sys::SHIM_EV_KEY_CHAR, sys::SHIM_EV_KEY_DOWN, sys::SHIM_EV_KEY_UP];
         if !KEY_KINDS.contains(&ev.kind) {
@@ -88,6 +129,7 @@ impl App for KeyProbe {
             scan: ev.d,
             native: ev.native,
         };
+        self.log_row(&row);
         if self.len == CAP {
             self.rows.rotate_left(1);
             self.rows[CAP - 1] = row;
@@ -177,6 +219,31 @@ fn push_dec(buf: &mut [u8], at: &mut usize, v: u32) {
         *at += 1;
     }
 }
+/// Compact hex for the log file: kind code scan mod native repeat, one line per event.
+fn format_row_file(r: &Row, buf: &mut [u8; 80]) -> usize {
+    let mut n = 0;
+    push_str(buf, &mut n, match r.kind {
+        sys::SHIM_EV_KEY_CHAR => "CHR ",
+        sys::SHIM_EV_KEY_DOWN => "DWN ",
+        _ => "UP  ",
+    });
+    push_hex(buf, &mut n, r.a as u32, 4);
+    push_str(buf, &mut n, "  ");
+    push_hex(buf, &mut n, r.scan as u32, 4);
+    push_str(buf, &mut n, "  ");
+    push_hex(buf, &mut n, r.mods as u32, 2);
+    push_str(buf, &mut n, "  ");
+    push_hex(buf, &mut n, r.native as u32, 6);
+    push_str(buf, &mut n, "  ");
+    if r.repeats > 0 {
+        push_dec(buf, &mut n, r.repeats as u32);
+    } else {
+        push_str(buf, &mut n, "0");
+    }
+    push_str(buf, &mut n, "\n");
+    n
+}
+
 /// The line for one row, into a caller-owned buffer.
 ///
 /// `a` is printed as hex *and*, when it is a printable ASCII scalar, as the literal

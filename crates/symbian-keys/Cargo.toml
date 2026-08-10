@@ -1,0 +1,13 @@
+[package]
+name = "symbian-keys"
+description = "Physical-keyboard layouts and dead-key composition, platform-free"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+# No dependencies on purpose, not by luck. This crate is the one place that knows what
+# a key on a Brazilian E72 means, and the whole reason it is a crate rather than a
+# table in the C++ shim is that it has to be testable on the host and shared with the
+# simulator. A platform dependency here would take both of those away.
+[dependencies]

@@ -1,0 +1,14 @@
+[package]
+name = "symbian-preview"
+description = "Host-side contact sheets: render a screen to PNG so it can be looked at without a device"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+symbian-gfx = { workspace = true }
+symbian-ui = { workspace = true }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_vendor, values("symbian"))'] }

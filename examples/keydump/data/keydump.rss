@@ -1,0 +1,21 @@
+NAME KDMP
+
+#include <eikon.rh>
+#include <appinfo.rh>
+
+RESOURCE RSS_SIGNATURE { }
+RESOURCE TBUF { buf = ""; }
+RESOURCE EIK_APP_INFO { }
+
+RESOURCE LOCALISABLE_APP_INFO r_keydump_localisable_app_info
+    {
+    short_caption = "KeyDump";
+    caption_and_icon =
+        CAPTION_AND_ICON_INFO
+            {
+            caption = "Key Dump";
+            /* No icon: the shell draws a default, and a diagnostic tool does not
+             * need one. Saves the bmconv step entirely. */
+            number_of_icons = 0;
+            };
+    }

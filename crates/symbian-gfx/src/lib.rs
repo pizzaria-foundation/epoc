@@ -31,7 +31,7 @@ pub mod present;
 
 pub use canvas::{Align, Canvas, CanvasState};
 pub use color::{blend565, Color, Rgb565};
-pub use font::{BitmapFont, Fitted, Font, FontError, Glyph};
+pub use font::{BitmapFont, Fitted, Font, FontError, Glyph, WithFallback};
 pub use geom::{Edges, Point, Rect, Size};
 pub use present::{rgb565_to_xrgb8888, ScreenFormat};
 

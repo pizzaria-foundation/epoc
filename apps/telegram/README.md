@@ -44,7 +44,7 @@ own `target/`, and only ever builds for ARM.
 
 ```
 cargo test -p tg                       # the chat logic, on the host
-cargo run  -p preview                  # renders every screen to preview-out/*.png
+cargo run  -p tg --example preview     # renders every screen to preview-out/*.png
 tools/symbuild apps/telegram           # → apps/telegram/build/telegram.sis
 ```
 

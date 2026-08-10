@@ -1,0 +1,17 @@
+[package]
+name = "audioprobe"
+description = "Asks the handset's media framework which WAV formats it will actually play"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+symbian-ui = { path = "../../crates/symbian-ui" }
+symbian-gfx = { path = "../../crates/symbian-gfx" }
+symbian-sys = { path = "../../crates/symbian-sys" }
+symbian = { path = "../../crates/symbian" }
+
+[dev-dependencies]
+# Only to check that this probe's deliberately-separate WAV writer has not drifted from
+# the client's. See the note on wav_file.
+symbian-audio = { path = "../../crates/symbian-audio" }

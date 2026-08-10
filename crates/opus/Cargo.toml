@@ -1,0 +1,10 @@
+[package]
+name = "opus"
+description = "Safe decode-only wrapper over the vendored libopus"
+version = "0.1.0"
+edition = "2021"
+publish = false
+links = "opus"
+build = "build.rs"
+
+[dependencies]

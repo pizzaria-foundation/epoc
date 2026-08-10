@@ -29,6 +29,12 @@ pub struct Canvas<'a> {
     clip: Rect,
     /// Added to incoming local coordinates to reach surface coordinates.
     origin: Point,
+    /// Bounding box, in surface coordinates, of every pixel this canvas has
+    /// actually *changed the value of* — the region worth presenting. `None`
+    /// while nothing has changed. A write of the same value a pixel already held
+    /// (a `clear` to the same background as last frame) does not grow it, which
+    /// is what makes a dirty-rect present pay on a UI that redraws in full.
+    damage: Option<Rect>,
 }
 
 impl<'a> Canvas<'a> {
@@ -47,7 +53,7 @@ impl<'a> Canvas<'a> {
             buf.len(),
             stride * size.h as usize
         );
-        Self { buf, stride, size, clip: Rect::from_size(size), origin: Point::ZERO }
+        Self { buf, stride, size, clip: Rect::from_size(size), origin: Point::ZERO, damage: None }
     }
 
     /// Wrap a tightly packed buffer.
@@ -76,6 +82,34 @@ impl<'a> Canvas<'a> {
     #[inline]
     pub fn is_fully_clipped(&self) -> bool {
         self.clip.is_empty()
+    }
+
+    /// The bounding box, in surface coordinates, of every pixel whose value this
+    /// canvas actually changed. `None` means the frame drew nothing new — the
+    /// caller can skip the present entirely. Otherwise it is the smallest rect
+    /// that needs to reach the screen, which the shim's `present(x, y, w, h)`
+    /// expands and blits directly.
+    #[inline]
+    pub fn damage(&self) -> Option<Rect> {
+        self.damage
+    }
+
+    /// Forget accumulated damage, e.g. when reusing a canvas after a full present.
+    #[inline]
+    pub fn clear_damage(&mut self) {
+        self.damage = None;
+    }
+
+    /// Grow the damage box to include `r` (surface coordinates, already clipped).
+    #[inline]
+    fn mark_damage(&mut self, r: Rect) {
+        if r.is_empty() {
+            return;
+        }
+        self.damage = Some(match self.damage {
+            Some(d) => d.union(r),
+            None => r,
+        });
     }
 
     #[inline]
@@ -157,16 +191,33 @@ impl<'a> Canvas<'a> {
         }
         let src = color.to_rgb565().0;
 
+        // Write and detect change in one pass: a pixel already holding the target
+        // value contributes no damage, so a background repainted identically each
+        // frame costs a read but presents nothing. The old fast `slice::fill` gave
+        // up that information; on this target the read is cheap next to the present.
+        let mut changed = false;
         if a == 0xFF {
             for y in dst.y0..dst.y1 {
-                self.row(y, dst.x0, dst.x1).fill(src);
+                for px in self.row(y, dst.x0, dst.x1) {
+                    if *px != src {
+                        *px = src;
+                        changed = true;
+                    }
+                }
             }
         } else {
             for y in dst.y0..dst.y1 {
                 for px in self.row(y, dst.x0, dst.x1) {
-                    *px = blend565(*px, src, a);
+                    let nv = blend565(*px, src, a);
+                    if nv != *px {
+                        *px = nv;
+                        changed = true;
+                    }
                 }
             }
+        }
+        if changed {
+            self.mark_damage(dst);
         }
     }
 
@@ -285,11 +336,20 @@ impl<'a> Canvas<'a> {
         }
         // Where inside the source the clipped region begins.
         let skip = dst.origin() - target.translate(self.origin).origin();
+        let mut changed = false;
         for y in 0..dst.height() {
             let s0 = (skip.y + y) as usize * src_stride + skip.x as usize;
             let width = dst.width() as usize;
             let sy = &src[s0..s0 + width];
-            self.row(dst.y0 + y, dst.x0, dst.x1).copy_from_slice(sy);
+            for (px, &s) in self.row(dst.y0 + y, dst.x0, dst.x1).iter_mut().zip(sy) {
+                if *px != s {
+                    *px = s;
+                    changed = true;
+                }
+            }
+        }
+        if changed {
+            self.mark_damage(dst);
         }
     }
 
@@ -308,6 +368,7 @@ impl<'a> Canvas<'a> {
         let src = color.to_rgb565().0;
         let alpha = color.a() as u32;
 
+        let mut changed = false;
         for y in 0..dst.height() {
             let m0 = (skip.y + y) as usize * mask_stride + skip.x as usize;
             let width = dst.width() as usize;
@@ -319,8 +380,15 @@ impl<'a> Canvas<'a> {
                 }
                 // Fold the colour's own alpha into the mask coverage.
                 let c = if alpha == 0xFF { cov } else { ((cov as u32 * alpha) / 255) as u8 };
-                *px = blend565(*px, src, c);
+                let nv = blend565(*px, src, c);
+                if nv != *px {
+                    *px = nv;
+                    changed = true;
+                }
             }
+        }
+        if changed {
+            self.mark_damage(dst);
         }
     }
 
@@ -515,5 +583,67 @@ mod tests {
         c.fill_rect(Rect::from_size(size), Color::WHITE.with_alpha(0));
         drop(c);
         assert!(buf.iter().all(|&p| p == 0));
+    }
+
+    // ---- damage tracking (the dirty-rect present) --------------------------
+
+    #[test]
+    fn nothing_drawn_leaves_no_damage() {
+        let (mut buf, size) = surface(16, 16);
+        let c = Canvas::from_slice(&mut buf, size);
+        assert_eq!(c.damage(), None);
+    }
+
+    #[test]
+    fn a_fill_reports_exactly_its_rect_as_damage() {
+        let (mut buf, size) = surface(16, 16);
+        let mut c = Canvas::from_slice(&mut buf, size);
+        c.fill_rect(Rect::from_xywh(2, 3, 4, 5), Color::WHITE);
+        assert_eq!(c.damage(), Some(Rect::from_xywh(2, 3, 4, 5)));
+    }
+
+    #[test]
+    fn repainting_the_same_value_adds_no_damage() {
+        // This is the whole point: an app that clears to the same background each
+        // frame must not report the whole screen as dirty.
+        let (mut buf, size) = surface(16, 16);
+        let mut c = Canvas::from_slice(&mut buf, size);
+        c.fill_rect(Rect::from_size(size), Color::WHITE);
+        assert!(c.damage().is_some());
+        c.clear_damage();
+        c.fill_rect(Rect::from_size(size), Color::WHITE); // identical repaint
+        assert_eq!(c.damage(), None, "a no-op repaint should not be presented");
+    }
+
+    #[test]
+    fn only_the_pixels_that_change_bound_the_damage() {
+        // Fill the whole surface, forget that, then change one small rect. The
+        // damage is that rect, not the whole surface — even though the app "drew"
+        // over everything in between.
+        let (mut buf, size) = surface(16, 16);
+        let mut c = Canvas::from_slice(&mut buf, size);
+        c.fill_rect(Rect::from_size(size), Color::WHITE);
+        c.clear_damage();
+        c.fill_rect(Rect::from_size(size), Color::WHITE); // no-op
+        c.fill_rect(Rect::from_xywh(4, 4, 3, 3), Color::BLACK); // the real change
+        assert_eq!(c.damage(), Some(Rect::from_xywh(4, 4, 3, 3)));
+    }
+
+    #[test]
+    fn damage_is_the_union_of_every_change() {
+        let (mut buf, size) = surface(16, 16);
+        let mut c = Canvas::from_slice(&mut buf, size);
+        c.fill_rect(Rect::from_xywh(0, 0, 2, 2), Color::WHITE);
+        c.fill_rect(Rect::from_xywh(10, 10, 2, 2), Color::WHITE);
+        assert_eq!(c.damage(), Some(Rect::from_xywh(0, 0, 12, 12)));
+    }
+
+    #[test]
+    fn damage_is_clipped_to_what_was_actually_touched() {
+        // A fill spilling past the surface only damages the on-surface part.
+        let (mut buf, size) = surface(8, 8);
+        let mut c = Canvas::from_slice(&mut buf, size);
+        c.fill_rect(Rect::from_xywh(6, 6, 10, 10), Color::WHITE);
+        assert_eq!(c.damage(), Some(Rect::from_xywh(6, 6, 2, 2)));
     }
 }

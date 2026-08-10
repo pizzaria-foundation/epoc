@@ -1,6 +1,6 @@
 [package]
 name = "preview"
-description = "Host-side renderer: draws SDK screens to PNG so they can be inspected without a device"
+description = "The SDK's own contact sheets: the rasterizer, the icon set, the surface primitives"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -9,4 +9,4 @@ publish = false
 [dependencies]
 symbian-gfx = { workspace = true }
 symbian-ui = { workspace = true }
-tg = { workspace = true }
+symbian-preview = { workspace = true }

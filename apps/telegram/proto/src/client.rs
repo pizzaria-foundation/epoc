@@ -85,10 +85,21 @@ pub struct Client {
     /// and produced `msg_id`s 56 years ahead; the server answered `bad_msg_notification`
     /// code 16. No offline test could have caught it — both sides of every fixture shared
     /// the same wrong clock — and the live run found it in one line.
-    time_offset: Option<i32>,
+    time_offset: Option<i64>,
     /// What the server said its clock read, kept so the offset can be computed once a local
     /// time is available.
     server_time: i32,
+    /// The server's clock, from the `msg_id` of the last message it sent.
+    ///
+    /// MTProto derives every `msg_id` from the sender's unix time, so a decrypted server
+    /// message is an authenticated statement of what time the server thinks it is. That is
+    /// the only trustworthy source of it after the handshake, and it is free.
+    ///
+    /// Not `bad_msg_notification`'s `bad_msg_id`: that field holds the `msg_id` of the
+    /// *client's* rejected message, so reading the clock out of it hands the correction the
+    /// same wrong time it exists to fix. On a handset 59 days behind, that was an infinite
+    /// loop of correct, resend, rejected — the login sat on "relogio ajustado" forever.
+    last_server_msg_time: i32,
     /// Messages received and not yet acknowledged. Flushed by [`Client::pending_ack`].
     to_ack: Vec<u64>,
     /// Requests sent and not yet answered, so a reply can be attributed. The value is
@@ -107,6 +118,7 @@ impl Client {
             session_id: rng_u64(rng),
             time_offset: None,
             server_time: 0,
+            last_server_msg_time: 0,
             to_ack: Vec::new(),
             inflight: BTreeMap::new(),
         };
@@ -124,7 +136,7 @@ impl Client {
     /// a wrong offset is only usable if the handset's clock is within 30 seconds of the
     /// server's, and the server will say so with `bad_msg_notification` code 16 rather than
     /// failing silently.
-    pub fn resume<R: Rng>(auth: AuthKey, time_offset: i32, rng: &mut R) -> Self {
+    pub fn resume<R: Rng>(auth: AuthKey, time_offset: i64, rng: &mut R) -> Self {
         let session_id = rng_u64(rng);
         let server_time = auth.server_time;
         Client {
@@ -134,6 +146,7 @@ impl Client {
             session_id,
             time_offset: Some(time_offset),
             server_time,
+            last_server_msg_time: server_time,
             to_ack: Vec::new(),
             inflight: BTreeMap::new(),
         }
@@ -157,8 +170,35 @@ impl Client {
     ///
     /// Persist this next to the key. Without it a resumed session starts with whatever the
     /// handset's clock says, and a phone whose clock is a minute out cannot send anything.
-    pub fn time_offset(&self) -> Option<i32> {
+    pub fn time_offset(&self) -> Option<i64> {
         self.time_offset
+    }
+
+    /// Correct the clock when the server rejects a message with
+    /// `bad_msg_notification` 16/17. The server's `bad_msg_id` upper 32 bits
+    /// are the correct unix time; this overwrites the stored offset so the
+    /// next message uses it.
+    /// Adopt the server's clock, from the last message it sent.
+    ///
+    /// Takes no argument on purpose. It used to take one, and the one caller passed
+    /// `bad_msg_id >> 32` — the client's own rejected timestamp — which made the call a
+    /// no-op that looked like a fix. The only correct source is inside this type, so it is
+    /// the only thing that reads it.
+    ///
+    /// Returns false when there is nothing to adopt, so a caller can stop rather than
+    /// resend a message that will be rejected identically.
+    pub fn correct_time(&mut self) -> bool {
+        if self.last_server_msg_time == 0 || self.last_server_msg_time == self.server_time {
+            return false;
+        }
+        self.server_time = self.last_server_msg_time;
+        self.time_offset = None; // recomputed on next call
+        true
+    }
+
+    /// What the server's clock said, the last time it said anything.
+    pub fn server_clock(&self) -> i32 {
+        self.last_server_msg_time
     }
 
     /// The offset, computing it from `unix_time` on first use.
@@ -167,7 +207,7 @@ impl Client {
             Some(o) => o as i64,
             None => {
                 let o = self.server_time as i64 - unix_time;
-                self.time_offset = Some(o as i32);
+                self.time_offset = Some(o);
                 o
             }
         }
@@ -278,7 +318,12 @@ impl Client {
             }
             Phase::Ready(session) => {
                 let msg = session.decrypt(payload).map_err(Error::Session)?;
+                // Before anything is done with the contents: the header alone tells us what
+                // time the server thinks it is, and a `bad_msg_notification` inside is about
+                // to need exactly that.
+                let seen = (msg.msg_id >> 32) as i32;
                 let updates = rpc::unwrap(msg.msg_id, &msg.body).map_err(Error::Rpc)?;
+                self.last_server_msg_time = seen;
                 for u in updates {
                     if let Some(id) = u.needs_ack() {
                         self.to_ack.push(id);
@@ -432,6 +477,77 @@ mod tests {
         let Step::Send(bytes) = step else { panic!() };
         let seen = s.decrypt_as_client(&bytes[4..]).unwrap();
         assert_eq!(seen.salt, 0xfeed_face_cafe_beef);
+    }
+
+    #[test]
+    fn a_resumed_client_produces_no_step_and_that_is_the_trap() {
+        // `Client::connect` hands back the step that starts the handshake, and when that
+        // handshake finishes the client emits `Step::Ready`. `Client::resume` does neither:
+        // it is ready on construction, so nothing at all comes out of it.
+        //
+        // A caller that waits to be told it is connected therefore waits forever. That is
+        // what a resumed login did — the status line stayed on the last thing the socket
+        // said and the phone number went nowhere — and the fix is in `Link::open`, which
+        // queues a `Step::Ready` by hand for this branch.
+        let mut rng = CountingRng(0);
+        let (fresh, step) = Client::connect(&mut rng);
+        assert!(!fresh.is_ready());
+        assert!(matches!(step, Step::Send(_)), "connect must start the handshake");
+
+        let resumed = Client::resume(key(), 17, &mut rng);
+        assert!(resumed.is_ready(), "a resumed client is ready immediately");
+        // and there is no second return value here at all — nothing announces it.
+    }
+
+    #[test]
+    fn the_clock_is_read_from_the_server_not_from_the_rejected_message() {
+        // bad_msg_notification#a7eff811 bad_msg_id:long bad_msg_seqno:int error_code:int
+        //
+        // `bad_msg_id` is the msg_id of the message the *client* sent and the server threw
+        // out. Reading a clock from it hands the correction the same wrong time it exists
+        // to fix, so the correction is a no-op, the resend is rejected identically, and the
+        // login sits on "relogio ajustado" forever. That is what the handset did: its clock
+        // is 59 days behind, measured.
+        //
+        // The server's time is in the header of the message that carried the complaint.
+        const SERVER: i64 = 1_786_044_000; // what the server thinks it is
+        const CLIENT: i64 = 1_780_946_000; // 59 days behind, what the handset thinks
+
+        let mut rng = CountingRng(0);
+        let mut c = Client::resume(key(), 0, &mut rng);
+        let s = Session::new(&key(), c.session_id);
+
+        let mut w = Writer::new();
+        w.ctor(rpc::BAD_MSG_NOTIFICATION)
+            .ulong((CLIENT as u64) << 32) // the client's own rejected msg_id
+            .uint(0)
+            .int(16);
+        let wire = s
+            .encrypt_as_server((SERVER as u64) << 32, 2, &w.finish(), &mut rng)
+            .unwrap();
+        c.feed(&Transport::frame(&wire), &mut rng).unwrap();
+
+        assert_eq!(c.server_clock() as i64, SERVER, "read the wrong msg_id");
+        assert!(c.correct_time(), "there was a correction to make and it was not made");
+
+        // And the correction has to reach the wire: the next msg_id must be stamped with
+        // the server's clock rather than the handset's.
+        let (msg_id, _) = c.call(b"x", 1, CLIENT, 0, &mut rng).unwrap();
+        let stamped = (msg_id >> 32) as i64;
+        assert!(
+            (stamped - SERVER).abs() < 60,
+            "the retry went out at {stamped}, still on the handset's clock"
+        );
+    }
+
+    #[test]
+    fn correcting_twice_to_the_same_time_reports_that_it_did_nothing() {
+        // The caller uses this to stop. Without it a server that keeps rejecting for some
+        // other reason turns into an endless correct-and-resend that shows a status line
+        // saying the clock was fixed.
+        let mut rng = CountingRng(0);
+        let mut c = Client::resume(key(), 0, &mut rng);
+        assert!(!c.correct_time(), "corrected to nothing");
     }
 
     #[test]

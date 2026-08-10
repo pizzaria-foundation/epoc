@@ -87,11 +87,26 @@ void ShimRequestExit();
 /* ------------------------------------------------------------------- timers -- */
 void ShimTimersCleanup();
 
+/* Guarded by the same flag that puts the source file into the build, so an app that did not
+ * opt into a facility neither compiles it nor references its cleanup. */
+#ifdef SHIM_USE_PROP
+/* Cancel any outstanding P&S subscription and close the handles. */
+void ShimPropCleanup();
+#endif
+
 /* Close every open file and the file server session. Called from the app's
  * teardown for the same reason as the timers: a leaked RFile keeps a file server
  * handle alive past process exit, and the panic that follows names the file server
  * rather than us. */
 void ShimFilesCleanup();
+
+/* The shim's one file server session, opened on first use. Exposed so the image
+ * decoder does not open a second one per decode — and so it cannot repeat the bug
+ * it had, which was closing its own session while a CImageDecoder still held an
+ * RFile subsession on it. There is one session and nobody but ShimFilesCleanup
+ * closes it. */
+class RFs;
+TInt ShimFsSession(RFs*& aOut);
 
 /* Close every socket, resolver and bearer, and the socket server session. Sockets
  * before bearers: a socket being closed still belongs to one.
@@ -101,19 +116,39 @@ void ShimFilesCleanup();
 #ifdef SHIM_USE_NET
 void ShimNetCleanup();
 
+/* Wait for any running job and close the worker thread. Waiting is the point: the job
+ * holds pointers into buffers the caller is about to free. */
+void ShimWorkCleanup();
+#endif
+
+/* Cancel every outstanding decode and free the bitmaps. Cancel before free, for the
+ * usual reason: an ICL plugin mid-Convert is writing into that bitmap.
+ *
+ * Guarded like the net cleanup, and by the same flag that puts shim_image.cpp into the
+ * build — an app that does not decode images should not import imageconversion.dll. */
+#ifdef SHIM_USE_IMAGE
+void ShimImageCleanup();
+#endif
+
+/* Stops playback and releases the player. Before ShimFilesCleanup, because the media
+ * framework holds the clip open.
+ *
+ * Guarded like the image cleanup, and for the same reason: an app that plays no sound
+ * should not import mediaclientaudio.dll. */
+#ifdef SHIM_USE_AUDIO
+void ShimAudioCleanup();
+#endif
+
 /* The FEP-aware editor, or NULL when the scan-code path is selected.
  *
  * Returned from CShimControl::InputCapabilities, which the framework calls during its own
  * traversal and cannot allocate from -- so the editor is created by ShimFepInit when the
  * control is constructed. */
+#ifdef SHIM_USE_FEP
 class MCoeFepAwareTextEditor;
 MCoeFepAwareTextEditor* ShimFepEditor();
 void ShimFepInit();
 void ShimFepCleanup();
-
-/* Wait for any running job and close the worker thread. Waiting is the point: the job
- * holds pointers into buffers the caller is about to free. */
-void ShimWorkCleanup();
 #endif
 
 #endif /* SHIM_PRIV_H */

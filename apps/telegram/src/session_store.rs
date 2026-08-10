@@ -50,18 +50,18 @@ use alloc::vec::Vec;
 use symbian::fs::{self, Fs, Utf16Path};
 use tg_proto::handshake::AuthKey;
 
-/// `"tgS2"`. Bumped when the layout changes, so an old record is refused rather than
+/// `"tgS3"`. Bumped when the layout changes, so an old record is refused rather than
 /// misread — the version is two bytes into a fixed-width struct, which is the only place a
 /// format check is worth anything.
-pub const MAGIC: u32 = 0x7467_5332;
+pub const MAGIC: u32 = 0x7467_5333;
 
-/// Total record width: magic, dc, offset, key, key id, salt.
+/// Total record width: magic, dc, offset, iap, key, key id, salt.
 ///
 /// Written as the sum of its parts and asserted against what [`encode`] produces, because
 /// the two are in different places and this is where they disagree. The first version of
 /// this line had a spare `+ 4` on the end and every test failed on the assertion — which is
 /// the cheapest way that mistake has ever been caught.
-pub const LEN: usize = 4 + 1 + 4 + 256 + 8 + 8;
+pub const LEN: usize = 4 + 1 + 8 + 4 + 256 + 8 + 8;
 
 /// The file, under the private directory.
 const NAME: &str = "session.bin";
@@ -72,7 +72,11 @@ pub struct Stored {
     pub dc: u8,
     pub auth: AuthKey,
     pub salt: [u8; 8],
-    pub time_offset: i32,
+    pub time_offset: i64,
+    /// The access point the OS settled on, or zero when unknown. Passing it back to
+    /// [`symbian::net::Bearer::start`] makes the next launch silent — the prompt only
+    /// appears when the saved id fails or when there is none.
+    pub iap: u32,
 }
 
 impl core::fmt::Debug for Stored {
@@ -128,6 +132,7 @@ pub fn encode(s: &Stored) -> Vec<u8> {
     v.extend_from_slice(&MAGIC.to_be_bytes());
     v.push(s.dc);
     v.extend_from_slice(&s.time_offset.to_be_bytes());
+    v.extend_from_slice(&s.iap.to_be_bytes());
     v.extend_from_slice(&s.auth.key);
     v.extend_from_slice(&s.auth.id.to_be_bytes());
     v.extend_from_slice(&s.salt);
@@ -143,12 +148,13 @@ pub fn decode(bytes: &[u8]) -> Option<Stored> {
         return None;
     }
     let dc = bytes[4];
-    let time_offset = i32::from_be_bytes(bytes[5..9].try_into().ok()?);
+    let time_offset = i64::from_be_bytes(bytes[5..13].try_into().ok()?);
+    let iap = u32::from_be_bytes(bytes[13..17].try_into().ok()?);
     let mut key = [0u8; 256];
-    key.copy_from_slice(&bytes[9..265]);
-    let id = u64::from_be_bytes(bytes[265..273].try_into().ok()?);
+    key.copy_from_slice(&bytes[17..273]);
+    let id = u64::from_be_bytes(bytes[273..281].try_into().ok()?);
     let mut salt = [0u8; 8];
-    salt.copy_from_slice(&bytes[273..281]);
+    salt.copy_from_slice(&bytes[281..289]);
 
     // An all-zero key is what a half-written file or a zeroed-on-logout one looks like, and
     // it is not a key. Refusing it here means the caller redoes the handshake rather than
@@ -164,6 +170,7 @@ pub fn decode(bytes: &[u8]) -> Option<Stored> {
         auth: AuthKey { key, id, salt, server_time: 0 },
         salt,
         time_offset,
+        iap,
     })
 }
 
@@ -219,7 +226,7 @@ mod tests {
     }
 
     fn a_session() -> Stored {
-        Stored { dc: 4, auth: a_key(), salt: [3; 8], time_offset: -17 }
+        Stored { dc: 4, auth: a_key(), salt: [3; 8], time_offset: -17, iap: 42 }
     }
 
     /// An in-memory `Fs`, since the one in `symbian` is private to its own tests.
@@ -275,6 +282,11 @@ mod tests {
 
         fn close(&mut self, handle: i32) {
             self.open[(handle - 1) as usize] = None;
+        }
+
+        fn list_dir(&mut self, _path: &[u16], _out: &mut [u16]) -> symbian::Result<usize> {
+            // The session store never lists a directory; a stub keeps the trait satisfied.
+            Ok(0)
         }
 
         fn delete(&mut self, path: &[u16]) -> symbian::Result<()> {
@@ -353,14 +365,14 @@ mod tests {
         // Find the stored bytes and confirm the key is really in there before the wipe.
         let key_byte = a_session().auth.key[0];
         assert!(
-            fs.files.values().any(|v| v.len() == LEN && v[9] == key_byte),
+            fs.files.values().any(|v| v.len() == LEN && v[17] == key_byte),
             "the key was not written"
         );
 
         clear(&mut fs, Invalidate::LoggedOut).unwrap();
         assert!(load(&mut fs).is_none());
         assert!(
-            !fs.files.values().any(|v| v.len() == LEN && v[9] == key_byte),
+            !fs.files.values().any(|v| v.len() == LEN && v[17] == key_byte),
             "the key survived the wipe"
         );
     }

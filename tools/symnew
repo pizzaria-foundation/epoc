@@ -308,6 +308,12 @@ RUST_CRATE=device
 HEAP=0x1000,0x200000
 STACK=0x8000
 
+# Debug logging. 1 makes every \`symbian::log!("…")\` in this app append to
+# C:\\Data\\logs_$NAME.txt — no capability, no host, readable off the phone afterwards. 0 removes
+# those call sites entirely, format strings included, so leaving them in the source costs a
+# release build nothing. Write the lines as you go; flip this when you need them.
+DEBUG=1
+
 # The dev handset runs a patched installserver; see tools/symbuild.
 SIGN=0
 EOF

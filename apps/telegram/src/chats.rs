@@ -19,9 +19,20 @@ impl ChatList {
         Uniform { count: store.chats.len(), height: theme.metrics.row_h }
     }
 
-    pub fn handle_key(&mut self, ev: KeyEvent, store: &Store, theme: &Theme<'_>, viewport_h: i32) -> Handled {
+    pub fn handle_key(&mut self, ev: KeyEvent, store: &Store, theme: &Theme<'_>, viewport_h: i32) -> (Handled, ChatListAction) {
+        // Down at the bottom of the list asks for more dialogs. Checked before the
+        // ListState dispatch so it is not shadowed.
+        if ev.key == Key::Down && !store.chats.is_empty() {
+            let rows = Self::rows(store, theme);
+            let content_h = rows.count as i32 * rows.height;
+            let bottom = (content_h - viewport_h).max(0);
+            if self.state.selected == rows.count - 1 && self.state.scroll >= bottom {
+                return (Handled::Consumed, ChatListAction::LoadMore);
+            }
+        }
         let rows = Self::rows(store, theme);
-        self.state.handle_key(ev, &rows, viewport_h)
+        let handled = self.state.handle_key(ev, &rows, viewport_h);
+        (handled, ChatListAction::None)
     }
 
     pub fn draw(&self, c: &mut Canvas<'_>, store: &Store, theme: &Theme<'_>) {
@@ -29,7 +40,8 @@ impl ChatList {
         let frame = Frame::split(screen, theme, true, true);
 
         chrome::clear(c, theme);
-        chrome::title_bar(c, frame.title, theme, "Telegram", Some(&store.status));
+        let sub = if store.dialogs_loading { "carregando…" } else { &store.status };
+        chrome::title_bar(c, frame.title, theme, "Telegram", Some(sub));
 
         if store.chats.is_empty() {
             chrome::placeholder(c, frame.content, theme, "Nenhuma conversa");
@@ -51,7 +63,11 @@ impl ChatList {
             chrome::scrollbar(c, frame.content, theme, bar);
         }
 
-        chrome::softkey_bar(c, frame.softkeys, theme, [Some("Opções"), Some("Abrir"), Some("Sair")]);
+        // "Atualizar" on the left. There is no push here — no updates subscription, no long
+        // poll — so the list is only as fresh as the last request, and without a way to ask
+        // again the only remedy is restarting the application.
+        let refresh = if store.dialogs_loading { Some("...") } else { Some("Atualizar") };
+        chrome::softkey_bar(c, frame.softkeys, theme, [refresh, Some("Abrir"), Some("Sair")]);
     }
 
     fn draw_row(
@@ -166,6 +182,10 @@ fn itoa(mut v: u32) -> alloc::string::String {
 pub enum ChatListAction {
     Open(usize),
     Exit,
+    /// Scrolled to the bottom of the dialog list; request the next page.
+    LoadMore,
+    /// Re-fetch the dialog list from the server.
+    Refresh,
     None,
 }
 
@@ -179,6 +199,10 @@ impl ChatList {
                     ChatListAction::Open(self.state.selected)
                 }
             }
+            // Left, not right: right is Exit here and Back everywhere else, which is where
+            // S60 puts it and where a thumb expects it. Left is the slot this app had left
+            // empty on every screen, and it is where S60 puts Options.
+            Key::Softkey(symbian_ui::Softkey::Left) => ChatListAction::Refresh,
             Key::Softkey(symbian_ui::Softkey::Right) => ChatListAction::Exit,
             _ => ChatListAction::None,
         }

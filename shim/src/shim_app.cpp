@@ -98,8 +98,10 @@ const TKeyMap KKeyMap[] =
     { EKeyDownArrow,  SHIM_EV_KEY_DOWN, EShimKeyDown },
     { EKeyLeftArrow,  SHIM_EV_KEY_DOWN, EShimKeyLeft },
     { EKeyRightArrow, SHIM_EV_KEY_DOWN, EShimKeyRight },
-    /* EKeyDevice3 is the D-pad centre press. */
+    /* EKeyDevice3 is the D-pad centre press. Add the raw code seen on Brazilian
+     * E72 handsets (0x11000C) which does not map to the standard Phidon key. */
     { EKeyDevice3,    SHIM_EV_KEY_DOWN, EShimKeySelect },
+    { 0x11000C,       SHIM_EV_KEY_DOWN, EShimKeySelect },
     /* Left and right softkeys. FP2 added a middle one; EKeyDevice3 doubles as it
      * on some layouts, which is why Select and MSK land on the same id — the
      * toolkit treats both as "activate". */
@@ -160,97 +162,67 @@ TBool FnActive()
 
 } /* namespace */
 
-/* ------------------------------------------------- the overlaid phone keypad --
+/* ----------------------------------------------------------- the keyboard map --
  *
- * The E72 prints a 12-key phone keypad on top of the letters:
+ * There is no keymap in this file, and that is the design. It used to hold one — twelve
+ * rows translating the E72's overlaid phone keypad, `1 2 3` on R T Y and so on — and the
+ * table has moved to `crates/symbian-keys`, generated from a dump of the handset's own
+ * keymap by `tools/mkkeymap.py`.
  *
- *     1 2 3  ->  R T Y        7 8 9  ->  V B N
- *     4 5 6  ->  F G H        * 0 #  ->  U M J
+ * It moved for three reasons, in order of how much they cost while it lived here:
  *
- * The window server identifies those twelve physical keys *as the digit keys*: the
- * R key arrives with iScanCode 0x31, which is the scan code of '1', not of 'R'. It
- * is not a mistranslation — at the window server's level, that key is the 1 key. The
- * letter identity is applied above it by Avkon's FEP, from the input mode of the
- * focused editor.
+ *   - The target handset is Brazilian and its keyboard is ABNT2, which this SDK was
+ *     treating as a US QWERTY. Accents did not work at all and `+` could not be typed. A
+ *     correct table is a few dozen rows with four cases each, and a table that size needs
+ *     to be generated from a measurement rather than written by hand.
+ *   - Nothing here can be tested. A keyboard is all edge cases, and the Rust crate has
+ *     unit tests on the host for every one of them.
+ *   - The simulator can share a Rust table. It could not share this one, so an accent bug
+ *     was only ever reproducible on the phone.
  *
- * Declaring TCoeInputCapabilities::EAllText is not enough — tried on device, no
- * change. What the FEP actually reads is the input mode on the focused editor's state
- * object, CAknEdwinState (aknedsts.h), through SetCurrentInputMode.
+ * What stays here is the part only this file can do: it receives the `TKeyEvent` and
+ * returns a `TKeyResponse`. So it reports the facts — `iCode`, `iScanCode` and the raw
+ * `iModifiers` — and decides who consumes the key. Nothing here decides what a key means.
  *
- * An earlier version of this comment claimed that class was absent from the public
- * SDK. That was wrong, and wrong for an instructive reason: the grep that "proved" it
- * returned nothing because these headers carry a © in extended-ASCII, which makes grep
- * treat them as binary and suppress every match in silence. `grep -a` shows the class
- * on line 158 of aknedsts.h. See docs/device-notes.md.
+ * The FEP would have supplied all of it, and this remains a choice rather than a
+ * limitation. `TCoeInputCapabilities::EAllText` alone is not enough — tried on device, no
+ * change; what the FEP reads is the input mode on the focused editor's state object,
+ * `CAknEdwinState` (aknedsts.h), through `SetCurrentInputMode`. An earlier version of this
+ * comment claimed that class was absent from the public SDK, which was wrong, and wrong
+ * instructively: the grep that "proved" it returned nothing because these headers carry a
+ * © in extended-ASCII, so grep treated them as binary and suppressed every match in
+ * silence. `grep -a` finds the class on line 158. See docs/device-notes.md.
  *
- * So the FEP path is available, and we translate anyway — a choice, not a limitation:
- *
- *   - The FEP's job is inline editing and predictive text. Taking it means
- *     implementing MCoeFepAwareTextEditor, twelve pure virtuals, and handing the FEP
- *     authority over a caret and a text buffer the Rust toolkit already owns. Two
- *     things holding one buffer is the bug, not the wiring.
- *   - This translation is tested on hardware. That is worth more than an untested
- *     alternative that is architecturally tidier.
- *
- * What it costs is real and worth stating: the FEP would give the whole Fn layer,
- * including symbols. Fn+Q should produce '!' and produces 'q', because only the twelve
- * digit keys are in the table below. Fixing that our way needs a second, larger,
- * device-specific table; fixing it the FEP's way needs the interface above. Neither is
- * done.
- *
- * The trigger is self-identifying and needs no state: for a letter key the window
- * server *does* translate, so iCode differs from iScanCode ('e' 0x65 vs 'E' 0x45).
- * For these twelve it does not, so iCode == iScanCode. Translate only then, and a
- * device without the overlay is unaffected because its scan codes never match.
+ * Taking the FEP means implementing MCoeFepAwareTextEditor and handing it authority over a
+ * caret and a text buffer the Rust toolkit already owns. Two components holding one buffer
+ * is the bug, not the wiring.
  */
-struct TKeypadOverlay
-    {
-    TInt iScanCode;   /* what the window server calls the key */
-    TInt iLower;      /* the letter actually printed on it */
-    };
 
-const TKeypadOverlay KKeypadOverlay[] =
-    {
-    { '1', 'r' }, { '2', 't' }, { '3', 'y' }, { '*', 'u' },
-    { '4', 'f' }, { '5', 'g' }, { '6', 'h' }, { '#', 'j' },
-    { '7', 'v' }, { '8', 'b' }, { '9', 'n' }, { '0', 'm' },
-    };
-
-const TInt KKeypadOverlayCount = sizeof(KKeypadOverlay) / sizeof(KKeypadOverlay[0]);
-
-/* The letter an overlaid key should produce, or 0 if this is not one of them.
+/* ----------------------------------------------------------------- dead keys --
  *
- * Ctrl held means "I want the digit" — we own the translation, so we own the way out
- * of it. The phone's own numeric toggle is handled by the FEP and therefore invisible
- * to us; ShimEvent::native carries the raw iModifiers word so that can be
- * investigated with the key probe rather than guessed at.
+ * There is nothing to do here, and that took a measurement to establish.
+ *
+ * On an ABNT2 keyboard the accent keys produce no character of their own; they modify the
+ * next one. The expectation was that with no FEP running the window server would have no
+ * character to hand over and would fall back to a non-character key code above 0xF800,
+ * which this file would then have to recognise and consume — otherwise Avkon would act on
+ * the same press the Rust side is about to compose with.
+ *
+ * What the handset actually does, measured with examples/keyprobe on a Brazilian E72:
+ *
+ *     chr 002E '.'  scan 007A mod 00      the key alone: an ordinary full stop
+ *     chr F002      scan 007A mod 01      shifted:       PtiEngine's dead-key code
+ *     chr 0027 '\''  scan 007E mod 00
+ *     chr F004      scan 007E mod 01
+ *
+ * The dead key arrives as its *PtiEngine code* in iCode — 0xF001..0xF005 — which is inside
+ * the printable gate below, so it already goes out as SHIM_EV_KEY_CHAR and is already
+ * consumed. `symbian_keys::layout_abnt2::DEAD_CODES` turns the code into its mark on the
+ * Rust side.
+ *
+ * A table of dead-key scan codes stood here to make the consume decision. It was
+ * unreachable, and worse than useless: it named a mechanism the handset does not use.
  */
-TInt OverlayLetter(const TKeyEvent& aKey)
-    {
-    if (aKey.iCode != aKey.iScanCode)
-        return 0;                       /* the window server already translated it */
-    /* Any of these means "I want the digit": our own Fn state, a Func modifier if
-     * the platform does report one, or Ctrl held. Ctrl stays in as a fallback that
-     * works with no state at all. */
-    if (FnActive()
-        || (aKey.iModifiers & (EModifierFunc | EModifierLeftFunc | EModifierRightFunc))
-        || (aKey.iModifiers & EModifierCtrl))
-        return 0;
-    for (TInt i = 0; i < KKeypadOverlayCount; i++)
-        {
-        if (KKeypadOverlay[i].iScanCode == aKey.iScanCode)
-            {
-            TInt ch = KKeypadOverlay[i].iLower;
-            /* Shift and Caps Lock are ours to apply too, for the same reason: the
-             * window server never produced a character here, so nothing has applied
-             * them yet. */
-            const TBool upper = (aKey.iModifiers & EModifierShift)
-                             || (aKey.iModifiers & EModifierCapsLock);
-            return upper ? (ch - 'a' + 'A') : ch;
-            }
-        }
-    return 0;
-    }
 
 CShimControl* gControl = NULL;
 TBool gExitRequested = EFalse;
@@ -441,16 +413,30 @@ TKeyResponse CShimControl::OfferKeyEventL(const TKeyEvent& aKeyEvent, TEventCode
             }
         }
 
-    /* Anything else with a printable code is text. */
-    if (aKeyEvent.iCode >= 0x20 && aKeyEvent.iCode != 0x7F)
+    /* Anything else with a printable code is text.
+     *
+     * `< 0xF800` is the missing piece that cost a day on a Brazilian E72. Symbian
+     * reserves the range 0xF800+ for non-character key codes (EKeyUpArrow,
+     * EKeyPrintScreen, EKeyF21, etc. — see e32keys.h ENonCharacterKeyBase).
+     *
+     * These codes satisfied `>= 0x20 && != 0x7F`, so dead keys like ~ (which the
+     * window server reports as EKeyF21, 0xF82A, when the FEP is not active) were
+     * pushed as SHIM_EV_KEY_CHAR. On the Rust side char::from_u32(0xF82A) returned
+     * None — the event was silently dropped, the dead key never composed, and ~
+     * followed by 'a' typed 'a' instead of 'ã'. *
+     * Because the character "was consumed", `return EKeyWasConsumed` at the end
+     * prevented the unknown-key handler from running, so they didn't even survive
+     * as Key::Raw. The `< 0xF800` bound puts them through the right path. */
+    if (aKeyEvent.iCode >= 0x20 && aKeyEvent.iCode < 0xF800)
         {
-        const TInt overlay = OverlayLetter(aKeyEvent);
         ShimEvent e;
         e.kind = SHIM_EV_KEY_CHAR;
         e.handle = 0;
         e.status = SHIM_OK;
-        /* a UCS-2 scalar, below 0x110000 by construction. */
-        e.a = overlay ? overlay : aKeyEvent.iCode;
+        /* a UCS-2 scalar, below 0x110000 by construction. The *character* is not decided
+         * here: iScanCode goes out in `d` and the Rust layout table has the final say, so
+         * the twelve overlaid keypad keys are resolved there rather than in this file. */
+        e.a = aKeyEvent.iCode;
         e.b = mods;
         e.c = aKeyEvent.iRepeats;
         e.d = aKeyEvent.iScanCode;
@@ -474,6 +460,7 @@ TKeyResponse CShimControl::OfferKeyEventL(const TKeyEvent& aKeyEvent, TEventCode
     e.d = aKeyEvent.iScanCode;
     e.native = aKeyEvent.iModifiers;
     ShimPushEvent(e);
+
     return EKeyWasNotConsumed;
     }
 
@@ -486,6 +473,7 @@ public:
     ~CShimAppUi();
 
     void HandleCommandL(TInt aCommand);
+    void HandleForegroundEventL(TBool aForeground);
 
 private:
     void HandleResourceChangeL(TInt aType);
@@ -510,11 +498,47 @@ void CShimAppUi::ConstructL()
 
     rust_app_start();
 
-    /* Idle priority: the pump runs whenever the scheduler has nothing more urgent,
-     * which is exactly the right time to redraw. Returning ETrue from the callback
-     * reschedules it, so this is a cooperative loop that always yields. */
-    iPump = CIdle::NewL(CActive::EPriorityIdle);
+    /* BELOW idle, not at it — and that one is worth the paragraph.
+     *
+     * The pump runs whenever the scheduler has nothing more urgent, which is the right
+     * time to redraw. Returning ETrue from the callback reschedules it, so this is a
+     * cooperative loop that always yields. But re-arming every pass also means the pump is
+     * *permanently ready*: there is never a moment when the scheduler does not have it
+     * available to run.
+     *
+     * Symbian dispatches the highest-priority ready object and, among equals, the one
+     * added first. So a permanently-ready object at EPriorityIdle does not merely go last
+     * — it starves every object at that same priority that is added after it. Forever.
+     * Not slowly: never.
+     *
+     * That is not hypothetical. `CImageDecoder` drives its decode from active objects
+     * inside the plugin, and on the E72's vendor JPEG codec those sit at idle priority.
+     * `examples/imgprobe` measured both halves of it: a decode issued from `rust_app_start`
+     * — before this line runs, so the plugin's objects are queued ahead of the pump —
+     * completed in 241 ms, and the byte-identical decode issued later from inside
+     * `rust_step` never completed at all. Same image, same configuration, same plugin.
+     *
+     * One below EPriorityIdle rather than some large negative number: this should be the
+     * lowest-priority object in the process, and "strictly below the documented floor" says
+     * exactly that without inventing a magnitude. */
+    iPump = CIdle::NewL(CActive::EPriorityIdle - 1);
     iPump->Start(TCallBack(&CShimAppUi::PumpCallback, this));
+    }
+
+void CShimAppUi::HandleForegroundEventL(TBool aForeground)
+    {
+    /* Push a focus event so Rust knows whether we are in the foreground.
+     * `a` is 1 for foreground, 0 for background. */
+    ShimPushSimple(SHIM_EV_FOCUS, 0, SHIM_OK, aForeground ? 1 : 0);
+
+    /* The framework needs to manage sound system state, key resources,
+     * and other per-application foreground/background transitions.
+     * Nokia's own FocusEvent example always calls the base class, and
+     * skipping it is what prevents the framework from doing its job.
+     * The restart-on-resource-change path that CAknAppUi also handles
+     * is only triggered when a resource change actually occurred,
+     * which it never does for this application. */
+    CAknAppUi::HandleForegroundEventL(aForeground);
     }
 
 CShimAppUi::~CShimAppUi()
@@ -527,13 +551,23 @@ CShimAppUi::~CShimAppUi()
     /* Tell Rust before tearing down the surface it may still hold a pointer to. */
     rust_app_stop();
     ShimTimersCleanup();
+#ifdef SHIM_USE_IMAGE
+    /* Before the files, not after: a decoder holds an RFile subsession on the shim's
+     * file server session, so closing the session first orphans a handle whose close
+     * then panics. Same ordering rule as sockets before bearers below. */
+    ShimImageCleanup();
+#endif
+#ifdef SHIM_USE_AUDIO
+    /* Before the files for the same reason: the media framework keeps the clip open. */
+    ShimAudioCleanup();
+#endif
     ShimFilesCleanup();
-#ifdef SHIM_USE_NET
-    /* Compiled in only when the app opted into networking, because shim_net.cpp is
-     * only compiled then — see the source selection in tools/symbuild. */
 #ifdef SHIM_USE_FEP
     ShimFepCleanup();
 #endif
+#ifdef SHIM_USE_NET
+    /* Compiled in only when the app opted into networking, because shim_net.cpp is
+     * only compiled then — see the source selection in tools/symbuild. */
     ShimNetCleanup();
     ShimWorkCleanup();
 #endif

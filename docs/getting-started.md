@@ -7,7 +7,7 @@ takes an hour of compiling once and then never again.
 ## Your first app
 
 ```
-tools/symnew myapp
+epoc new myapp
 cargo run -p myapp --example sim
 ```
 
@@ -123,7 +123,7 @@ linkable at all.
 ### Build and install
 
 ```
-tools/symbuild apps/myapp
+epoc build apps/myapp
 ```
 
 Every stage is described in [build-flow](build-flow.md). Two of them are gates rather than
@@ -172,7 +172,7 @@ guessing:
 | | |
 |---|---|
 | `tools/e32dump.py <exe>` | decodes and validates an E32 header, re-deriving the checksums independently of elf2e32 |
-| `cargo run -p preview` | renders every screen to `preview-out/*.png`, including icons at 6× |
+| `cargo run -p preview` | renders the SDK's sheets to `preview-out/*.png` — the rasterizer, the icons at 6×, the surfaces |
 | `examples/libprobe` | which optional DLLs this handset has — asks with `RLibrary::Load` rather than finding out by failing to launch |
 | `examples/keyprobe` | the raw key numbers the window server delivers |
 

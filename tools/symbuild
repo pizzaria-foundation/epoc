@@ -58,9 +58,24 @@ source "$APP/app.conf"
 : "${STACK:=0x8000}"
 : "${EPOCROOT:=$SDK/sdk}"
 : "${RUST_CRATE:=}"
+# Dev bridge: the cargo feature that pulls in crates/epocadb, if this app has one.
+# Only ever enabled alongside EPOCADB_HOST, so a build with no host to talk to also
+# has no bridge compiled into it.
+: "${DEV_BRIDGE_FEATURE:=}"
+: "${EPOCADB_HOST:=}"
+# Debug logging: DEBUG=1 in app.conf makes `symbian::log!` write to C:\Data\logs_$NAME.txt.
+# Off by default, and off means *absent*: symbian::log::ENABLED is a const read from
+# SYMBIAN_DEBUG, so with DEBUG=0 the macro expands to a branch on `false` and neither the
+# call nor its format string survives the optimiser. An environment variable rather than a
+# cargo feature precisely so no app has to declare anything for this to work.
+: "${DEBUG:=0}"
 : "${CXX_SOURCES:=}"
 # Off by default: the dev handset has a patched installserver.
 : "${SIGN:=0}"
+# Publish & Subscribe is on by default: the entry! runtime publishes present/step
+# telemetry through it (a capability-free, no-library primitive), so every app that draws
+# is observable. An app that genuinely wants it out can still set USE_PROP=0.
+: "${USE_PROP:=1}"
 
 # An app built on the shim always needs the whole GUI set, so it is not worth
 # making every app.conf repeat it. apparc/cone/eikcore/avkon are the application
@@ -87,9 +102,29 @@ if [ "${USE_SHIM:-0}" = 1 ]; then
     # esock is the socket server client, insock the IPv4 address and protocol
     # constants, commdb TCommDbConnPref, netmeta the connection preference plumbing
     # underneath it.
-    NET_LIBS="esock insock commdb netmeta"
+    NET_LIBS="esock insock commdb netmeta apgrfx"
   fi
+  # shim_mem needs only hal, which is already in the base set.
   : "${SYMBIAN_LIBS:=euser apparc cone eikcore avkon ws32 fbscli bitgdi gdi fntstr efsrv estor hal $NET_LIBS $FEP_LIBS}"
+  if [ "${USE_IMAGE:-0}" = 1 ]; then
+    SYMBIAN_LIBS="$SYMBIAN_LIBS imageconversion"
+  fi
+  if [ "${USE_AUDIO:-0}" = 1 ]; then
+    # mediaclientaudio is CMdaAudioPlayerUtility. Playback needs no capability: the
+    # SDK's own CLFExample links this and ships `capability none`.
+    SYMBIAN_LIBS="$SYMBIAN_LIBS mediaclientaudio"
+  fi
+  # An escape hatch for a library exactly one app needs, so that a one-off does not have
+  # to earn a USE_* flag in this file and a branch in the source gate below.
+  #
+  # It exists for examples/keydump, which links ptiengine to read the handset's own
+  # keymap out of it once and bake the answer into a static table. No shipping app should
+  # ever set this: every library named here becomes an import, and an import the handset
+  # cannot satisfy stops the image loading with no error, no log and no report file. Ask
+  # examples/libprobe first — that is what it is for.
+  if [ -n "${EXTRA_LIBS:-}" ]; then
+    SYMBIAN_LIBS="$SYMBIAN_LIBS $EXTRA_LIBS"
+  fi
 fi
 
 BUILD="$APP/build"
@@ -130,19 +165,69 @@ echo "==> $NAME  (uid3 $UID3, caps: $CAPABILITIES)"
 if [ -f "$APP/api.conf" ]; then
   # shellcheck disable=SC1090
   . "$APP/api.conf"
+  # Defaulted before export because an api.conf need not carry credentials at all — most
+  # hold only EPOCADB_HOST — and under `set -u` exporting an unset var aborted the build with
+  # "TG_API_ID: unbound variable", a Telegram error message on an app that has nothing to do
+  # with Telegram.
+  : "${TG_API_ID:=}"
+  : "${TG_API_HASH:=}"
   export TG_API_ID TG_API_HASH
-  echo "--> api credentials: id $TG_API_ID"
+  if [ -n "$TG_API_ID" ]; then
+    echo "--> api credentials: id $TG_API_ID"
+  fi
+  # Dev bridge: optional host IP for log streaming. Unset → bridge disabled.
+  export EPOCADB_HOST="${EPOCADB_HOST:-}"
+  if [ -n "$EPOCADB_HOST" ]; then
+    echo "--> epocadb host: $EPOCADB_HOST"
+  fi
+fi
+
+# ---------------------------------------------------------------- profile
+# PROFILE=highcap swaps in HIGHCAP_CAPABILITIES and (below) the crate's high-cap cargo
+# feature — patched E72 only, where the installserver's capability ceiling is lifted.
+# Absent, the app builds stock-safe and installs on any handset.
+HIGHCAP=0
+if [ "${PROFILE:-}" = highcap ]; then
+  HIGHCAP=1
+  [ -n "${HIGHCAP_CAPABILITIES:-}" ] && CAPABILITIES="$HIGHCAP_CAPABILITIES"
+  echo "--> profile: highcap  (caps: $CAPABILITIES)"
 fi
 
 # ---------------------------------------------------------------- 1. Rust
 RUST_LIB=""
 if [ -n "$RUST_CRATE" ]; then
   echo "--> rust: $RUST_CRATE"
+  # Read by `option_env!` in crates/symbian/src/log.rs. The name is exported
+  # unconditionally so the log filename is derived from app.conf rather than configured
+  # twice; SYMBIAN_DEBUG is exported only when on, because the const there tests presence
+  # and an exported empty string is still present.
+  export SYMBIAN_APP_NAME="$NAME"
+  if [ "$DEBUG" = 1 ]; then
+    export SYMBIAN_DEBUG=1
+    echo "    debug log: on  → C:\\Data\\logs_$NAME.txt"
+  else
+    unset SYMBIAN_DEBUG
+    echo "    debug log: off"
+  fi
+  # Collect cargo features from every source that contributes one, comma-joined so a
+  # single --features carries them all.
+  FEATS=""
+  if [ -n "$EPOCADB_HOST" ] && [ -n "$DEV_BRIDGE_FEATURE" ]; then
+    FEATS="$DEV_BRIDGE_FEATURE"
+    echo "    dev bridge: on ($DEV_BRIDGE_FEATURE)"
+  fi
+  if [ "$HIGHCAP" = 1 ] && [ -n "${HIGHCAP_CARGO_FEATURE:-}" ]; then
+    FEATS="${FEATS:+$FEATS,}$HIGHCAP_CARGO_FEATURE"
+    echo "    high-cap cargo feature: $HIGHCAP_CARGO_FEATURE"
+  fi
+  CARGO_FEATURES=()
+  [ -n "$FEATS" ] && CARGO_FEATURES=(--features "$FEATS")
   ( cd "$APP/$RUST_CRATE" && \
     cargo +nightly build --release \
       -Zjson-target-spec \
       -Zbuild-std=core,alloc \
       -Zbuild-std-features=compiler-builtins-mem \
+      ${CARGO_FEATURES[@]+"${CARGO_FEATURES[@]}"} \
       --target "$TARGET_JSON" )
   tgt="$(basename "$TARGET_JSON" .json)"
   RUST_LIB="$(find "$APP/$RUST_CRATE/target/$tgt/release" -maxdepth 1 -name 'lib*.a' | head -1)"
@@ -170,9 +255,27 @@ if [ "${USE_FEP:-0}" = 1 ]; then
   FEP_LIBS="fepbase"
 fi
 
-if [ "${USE_SHIM:-0}" = 1 ]; then
+# The shim comes in two shapes. USE_SHIM is the GUI app: shim_app.cpp owns E32Main and the
+# whole Avkon stack. USE_SHIM_DAEMON is the headless daemon: shim_daemon.cpp owns E32Main and
+# a bare CActiveScheduler, no Avkon, no framebuffer — so shim_app.cpp and shim_gfx.cpp are
+# swapped out. Everything else (timers, net, files, P&S) is the same active-object machinery
+# either way. Exactly one of the two flags is set.
+if [ "${USE_SHIM:-0}" = 1 ] || [ "${USE_SHIM_DAEMON:-0}" = 1 ]; then
   for src in "$SDK"/shim/src/*.cpp; do
     case "$(basename "$src")" in
+      # The two entry files are mutually exclusive: the GUI build takes shim_app.cpp, the
+      # daemon build takes shim_daemon.cpp, and neither takes the other's — two E32Main /
+      # ShimRequestExit definitions would collide.
+      shim_app.cpp)
+        [ "${USE_SHIM:-0}" = 1 ] || continue
+        ;;
+      shim_daemon.cpp)
+        [ "${USE_SHIM_DAEMON:-0}" = 1 ] || continue
+        ;;
+      # No framebuffer in a headless daemon.
+      shim_gfx.cpp)
+        [ "${USE_SHIM_DAEMON:-0}" = 1 ] && continue
+        ;;
       # Opt-in, not because the code is optional but because linking it is: an app
       # that never opens a socket should not import the socket server, and
       # --no-undefined checks referenced symbols before --gc-sections gets a chance
@@ -182,6 +285,28 @@ if [ "${USE_SHIM:-0}" = 1 ]; then
         ;;
       shim_fep.cpp)
         [ "${USE_FEP:-0}" = 1 ] || continue
+        ;;
+      # Process launch and Publish & Subscribe, for an app that starts and signals its own
+      # headless daemon. Gated because the file that references them must be able to
+      # resolve them.
+      shim_process.cpp)
+        [ "${USE_PROC:-0}" = 1 ] || continue
+        ;;
+      shim_prop.cpp)
+        [ "${USE_PROP:-0}" = 1 ] || continue
+        ;;
+      # Same reason, and the one that caught us: the file was compiled
+      # unconditionally while imageconversion stayed behind USE_IMAGE, so every
+      # shim app that does not decode images failed to link on CImageDecoder.
+      shim_image.cpp)
+        [ "${USE_IMAGE:-0}" = 1 ] || continue
+        ;;
+      shim_audio.cpp)
+        [ "${USE_AUDIO:-0}" = 1 ] || continue
+        ;;
+      # Free-RAM and own-heap readings, for an app that watches its own footprint.
+      shim_mem.cpp)
+        [ "${USE_MEM:-0}" = 1 ] || continue
         ;;
     esac
     SRCS+=("$src")
@@ -229,6 +354,11 @@ if [ ${#SRCS[@]} -gt 0 ]; then
       -DSHIM_APP_UID3="$UID3" \
       ${USE_NET:+$([ "$USE_NET" = 1 ] && echo -DSHIM_USE_NET)} \
       ${USE_FEP:+$([ "$USE_FEP" = 1 ] && echo -DSHIM_USE_FEP)} \
+      ${USE_IMAGE:+$([ "$USE_IMAGE" = 1 ] && echo -DSHIM_USE_IMAGE)} \
+      ${USE_AUDIO:+$([ "$USE_AUDIO" = 1 ] && echo -DSHIM_USE_AUDIO)} \
+      ${USE_PROC:+$([ "$USE_PROC" = 1 ] && echo -DSHIM_USE_PROC)} \
+      ${USE_PROP:+$([ "$USE_PROP" = 1 ] && echo -DSHIM_USE_PROP)} \
+      ${USE_MEM:+$([ "$USE_MEM" = 1 ] && echo -DSHIM_USE_MEM)} \
       -fexceptions -fno-rtti \
       -Wall -Wno-narrowing -Wno-ctor-dtor-privacy -Wno-unknown-pragmas \
       -Wno-attributes \
@@ -319,7 +449,7 @@ echo "--> elf2e32"
   --uncompressed \
   --sid="$UID3" \
   --uid1=0x1000007a \
-  --uid2=0x100039ce \
+  --uid2="${UID2:-0x100039ce}" \
   --uid3="$UID3" \
   --vid=0x00000000 \
   --capability="$CAPABILITIES" \
@@ -342,7 +472,22 @@ python3 "$SDK/tools/e32dump.py" "$BUILD/$NAME.exe" --quiet
 echo "    header validated"
 
 # --------------------------------------------------------------- 5. resources
-if [ -f "$APP/data/${NAME}_reg.rss" ]; then
+# No registration resource means no menu entry — the package installs, reports success,
+# and the application simply is not there. That failure is silent on both sides, so it is
+# refused here instead: it cost a build, a Bluetooth transfer and an install to find, and
+# the only symptom was "n apareceu na listagem de apps".
+#
+# A GUI app is one that draws, and every app this toolchain builds draws — except a headless
+# daemon, which deliberately has no menu entry and no UI resources. HEADLESS=1 is the
+# explicit opt-out this comment used to ask for: it turns the missing _reg.rss from an error
+# into the intended state, and skips the whole resource stage below.
+if [ "${HEADLESS:-0}" != 1 ] && [ ! -f "$APP/data/${NAME}_reg.rss" ]; then
+  echo "no $APP/data/${NAME}_reg.rss — without it the package installs but never appears" >&2
+  echo "in the menu. Copy one from another app under examples/, adjusting NAME and UID3." >&2
+  echo "(A non-GUI daemon is exempt: set HEADLESS=1 in app.conf.)" >&2
+  exit 1
+fi
+if [ "${HEADLESS:-0}" != 1 ] && [ -f "$APP/data/${NAME}_reg.rss" ]; then
   echo "--> resources"
   # Order matters: ${NAME}_reg.rss #includes the .rsg that compiling $NAME.rss
   # generates, so the UI resource has to be built first.
@@ -359,6 +504,24 @@ if [ -f "$APP/data/${NAME}_reg.rss" ]; then
         -h"$base.rsg" -s"$BUILD/$base.rpp" )
     echo "    $base.rsc"
   done
+fi
+
+# --------------------------------------------------------- 5a. autostart resource
+# A start-up control file, so the daemon launches at boot. Compiled like any resource
+# but installed to the Software Installer's import dir (below), not \resource\apps\.
+#
+# The S60 Startup List Management API is explicit that the installer only honours this in
+# a SIGNED (trusted) SISAPP package — so on the unsigned dev flow it is packaged but the
+# installer usually ignores it. Warn, build it anyway, and let the handset be the judge.
+if [ "${AUTOSTART:-0}" = 1 ] && [ -f "$APP/data/${NAME}_startup.rss" ]; then
+  echo "--> autostart resource"
+  [ "${SIGN:-0}" = 1 ] || echo "    warning: AUTOSTART wants a signed package (SIGN=1); an unsigned installer usually ignores the start-up item" >&2
+  "$CROSS/$TC-g++" -E -P -x c++ -nostdinc \
+    -I"$EPOCROOT/epoc32/include" -I"$EPOCROOT/epoc32/include/variant" \
+    -I"$APP/data" -D_UNICODE -DLANGUAGE_SC "$APP/data/${NAME}_startup.rss" -o "$BUILD/${NAME}_startup.rpp"
+  ( cd "$APP/data" && "$HOST/rcomp" -u -o"$BUILD/${NAME}_startup.rsc" \
+      -h"${NAME}_startup.rsg" -s"$BUILD/${NAME}_startup.rpp" )
+  echo "    ${NAME}_startup.rsc"
 fi
 
 # ------------------------------------------------------------------- 5b. icon
@@ -396,6 +559,20 @@ cat > "$BUILD/$NAME.pkg" <<EOF
 [0x101F7961],0,0,0,{"Series60ProductID"}
 "$BUILD/$NAME.exe"-"!:\\sys\\bin\\$NAME.exe"
 EOF
+# Extra executables bundled into the same package — a GUI app that ships its own headless
+# daemon (USE_SHIM_DAEMON), so one install puts both in \sys\bin and one uninstall removes
+# both. Each entry is a path to a built .exe; it installs under its own basename.
+for extra in ${EXTRA_EXES:-}; do
+  # Relative to the app dir, so app.conf can name a sibling app's build output portably.
+  case "$extra" in /*) epath="$extra" ;; *) epath="$APP/$extra" ;; esac
+  if [ ! -f "$epath" ]; then
+    echo "EXTRA_EXES: $epath not found — build that app first" >&2
+    exit 1
+  fi
+  ebase="$(basename "$epath")"
+  echo "\"$epath\"-\"!:\\sys\\bin\\$ebase\"" >> "$BUILD/$NAME.pkg"
+  echo "--> bundling $ebase"
+done
 for rsc in "$BUILD"/*_reg.rsc; do
   [ -f "$rsc" ] || continue
   # The device wants _reg.rsc in the AppArc import drop-box; 10003a3f is the
@@ -404,12 +581,22 @@ for rsc in "$BUILD"/*_reg.rsc; do
   echo "\"$rsc\"-\"!:\\private\\10003a3f\\import\\apps\\$(basename "$rsc")\"" >> "$BUILD/$NAME.pkg"
 done
 for rsc in "$BUILD"/*.rsc; do
-  case "$rsc" in *_reg.rsc) continue ;; esac
+  # _reg goes to the AppArc drop-box (above); _startup to the installer's import dir
+  # (below). Everything else is a UI resource for \resource\apps\.
+  case "$rsc" in *_reg.rsc | *_startup.rsc) continue ;; esac
   [ -f "$rsc" ] || continue
   echo "\"$rsc\"-\"!:\\resource\\apps\\$(basename "$rsc")\"" >> "$BUILD/$NAME.pkg"
 done
 if [ -n "$ICON_MBM" ]; then
   echo "\"$ICON_MBM\"-\"!:\\resource\\apps\\$(basename "$ICON_MBM")\"" >> "$BUILD/$NAME.pkg"
+fi
+# The start-up control file must be named [<packageUID>].rsc and land in the Software
+# Installer UI's import dir (SID 101f875a). The installer reads it there at install time
+# and, for a trusted package, adds the executable to the boot start-up list.
+if [ "${AUTOSTART:-0}" = 1 ] && [ -f "$BUILD/${NAME}_startup.rsc" ]; then
+  SUID="${UID3#0x}"; SUID="${SUID^^}"
+  echo "\"$BUILD/${NAME}_startup.rsc\"-\"!:\\private\\101f875a\\import\\[$SUID].rsc\"" >> "$BUILD/$NAME.pkg"
+  echo "--> autostart: [$SUID].rsc → \\private\\101f875a\\import\\"
 fi
 
 ( cd "$BUILD" && "$HOST/makesis" "$NAME.pkg" "$NAME.sis" )

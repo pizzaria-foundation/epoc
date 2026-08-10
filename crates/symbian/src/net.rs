@@ -168,6 +168,8 @@ pub trait Net {
     /// Likewise until the receive completes.
     fn tcp_recv(&mut self, handle: i32, buf: &mut [u8]) -> Result<()>;
     fn tcp_close(&mut self, handle: i32);
+    fn udp_open(&mut self, conn: i32) -> Result<i32>;
+    fn udp_send_to(&mut self, handle: i32, addr: Ipv4, port: u16, buf: &[u8]) -> Result<()>;
 }
 
 /// [`Net`] over the shim.
@@ -226,6 +228,18 @@ impl Net for ShimNet {
     fn tcp_close(&mut self, handle: i32) {
         unsafe { sys::shim_tcp_close(handle) }
     }
+
+    fn udp_open(&mut self, conn: i32) -> Result<i32> {
+        let mut h = 0i32;
+        Error::check(unsafe { sys::shim_udp_open(conn, &mut h) })?;
+        Ok(h)
+    }
+
+    fn udp_send_to(&mut self, handle: i32, addr: Ipv4, port: u16, buf: &[u8]) -> Result<()> {
+        Error::check(unsafe {
+            sys::shim_udp_send_to(handle, buf.as_ptr(), buf.len() as i32, addr.0, port)
+        })
+    }
 }
 
 // ------------------------------------------------------------------------ bearer --
@@ -251,24 +265,12 @@ impl Bearer {
     /// The strategy to try first: if anything else on the handset is online, this joins it
     /// immediately with no dialog and nothing to wait for. `Err(Error::NotFound)` when
     /// there is nothing up, and then [`Bearer::start`] is the fallback.
-    ///
-    /// # What this replaced, and why it was wrong
-    ///
-    /// `Bearer::none()` opened sockets with **no** `RConnection`, on the reasoning that the
-    /// stack would then use whatever route already existed. Its doc comment called that the
-    /// only path with no dialog, no negotiation and nothing that can time out — all true,
-    /// and all irrelevant, because it also could not *create* or *find* a route.
-    ///
-    /// What that path actually uses is the handset's *configured default connection*. On
-    /// one with none, the socket opens, the connect is issued, and nothing ever completes —
-    /// so the strategy reported success and three phases timed out underneath it. It cost
-    /// two device runs and read as a network problem both times.
-    ///
-    /// `RConnection::Attach` is the platform's own answer to the question that path was
-    /// trying to ask, and it either joins something or says there is nothing to join.
     pub fn attach<N: Net>(net: &mut N) -> Result<Self> {
         let handle = net.net_start(Iap::Attach)?;
-        Ok(Bearer { handle, iap: None, retried: true, up: false })
+        // `retried: false`, so finding nothing to join falls through to the access point
+        // dialog rather than giving up. Every other program on the handset offers that
+        // dialog; refusing to is why ours was the only one that could not get online.
+        Ok(Bearer { handle, iap: None, retried: false, up: false })
     }
 
     /// Bring up a bearer. Pass the id from a previous session if there is one.
@@ -370,8 +372,25 @@ pub struct TcpStream {
     /// Received but not yet read by the caller.
     rx: Box<[u8]>,
     rx_len: usize,
-    /// Where the shim is currently writing, if a read is outstanding. A read is issued
-    /// into `rx[rx_len..]`, so arriving data appends rather than overwriting.
+    /// Where the platform writes. **Never** `rx`, and never anything whose address depends
+    /// on how much is buffered.
+    ///
+    /// A read is issued once and completes later, and the shim holds the pointer it was
+    /// given for the whole of that — `symbian_shim.h` says so. Issuing it into `rx[rx_len..]`
+    /// looked like an appending read and was one, right up until the caller drained `rx`
+    /// while the read was still outstanding: `rx_len` went back to zero, the shim kept
+    /// writing at the old offset, and the next completion counted those bytes from the
+    /// front of a buffer that still held the previous reply.
+    ///
+    /// On the handset that showed up as Telegram answering `res_pq` twice — the second
+    /// reply arrived with 104 stale bytes glued to the front of it, and the handshake died
+    /// on a constructor it had already consumed. The HTTP self test never saw it because
+    /// one request and one response is one read.
+    ///
+    /// The fix is not better bookkeeping. It is that the address handed to the platform is
+    /// a constant, so no bookkeeping can be wrong about it.
+    land: Box<[u8]>,
+    /// Whether a read is outstanding.
     rx_pending: bool,
 
     /// Queued to send. Owned, because the shim holds a pointer to it until the send
@@ -391,6 +410,42 @@ impl TcpStream {
             handle,
             state: State::Opening,
             rx: vec![0u8; rx_cap].into_boxed_slice(),
+            land: vec![0u8; rx_cap].into_boxed_slice(),
+            rx_len: 0,
+            rx_pending: false,
+            tx: vec![0u8; tx_cap].into_boxed_slice(),
+            tx_len: 0,
+            tx_pending: 0,
+        })
+    }
+
+    /// Open a socket without binding to a specific bearer. The stack picks the default
+    /// route, which is correct when another part of the application has already brought
+    /// one up. `-1` is not a valid bearer handle — the shim treats it as "no preference".
+    pub fn open_default<N: Net>(net: &mut N, rx_cap: usize, tx_cap: usize) -> Result<Self> {
+        let handle = net.tcp_open(-1)?;
+        Ok(TcpStream {
+            handle,
+            state: State::Opening,
+            rx: vec![0u8; rx_cap].into_boxed_slice(),
+            land: vec![0u8; rx_cap].into_boxed_slice(),
+            rx_len: 0,
+            rx_pending: false,
+            tx: vec![0u8; tx_cap].into_boxed_slice(),
+            tx_len: 0,
+            tx_pending: 0,
+        })
+    }
+
+    /// Open a socket on a specific bearer, by handle. Used by [`crate::epocadb::Bridge`]
+    /// to open sockets without borrowing the bearer directly.
+    pub fn open_handle<N: Net>(net: &mut N, bearer_handle: i32, rx_cap: usize, tx_cap: usize) -> Result<Self> {
+        let handle = net.tcp_open(bearer_handle)?;
+        Ok(TcpStream {
+            handle,
+            state: State::Opening,
+            rx: vec![0u8; rx_cap].into_boxed_slice(),
+            land: vec![0u8; rx_cap].into_boxed_slice(),
             rx_len: 0,
             rx_pending: false,
             tx: vec![0u8; tx_cap].into_boxed_slice(),
@@ -483,11 +538,16 @@ impl TcpStream {
                     self.state = State::Closed;
                     return Progress::Closed;
                 }
-                self.rx_len = (self.rx_len + n).min(self.rx.len());
+                // Out of the landing buffer and into the queue, now that the platform is
+                // finished with it. `pump_rx` never asks for more than the free space, so
+                // the `min` is a guard rather than a truncation that could lose bytes.
+                let take = n.min(self.rx.len() - self.rx_len);
+                self.rx[self.rx_len..self.rx_len + take].copy_from_slice(&self.land[..take]);
+                self.rx_len += take;
                 if self.pump_rx(net).is_err() {
                     return self.fail(sys::SHIM_ERR_GENERAL);
                 }
-                Progress::Received(n)
+                Progress::Received(take)
             }
 
             sys::SHIM_EV_SENT => {
@@ -533,8 +593,10 @@ impl TcpStream {
         if self.rx_len >= self.rx.len() {
             return Ok(());
         }
-        let start = self.rx_len;
-        net.tcp_recv(self.handle, &mut self.rx[start..])?;
+        // Always from the front of the landing buffer. The length shrinks as the queue
+        // fills, but the address does not move, which is the whole point of it.
+        let free = self.rx.len() - self.rx_len;
+        net.tcp_recv(self.handle, &mut self.land[..free])?;
         self.rx_pending = true;
         Ok(())
     }
@@ -613,6 +675,32 @@ impl Lookup {
     }
 }
 
+// ------------------------------------------------------------------------ UDP --
+
+/// A UDP socket, for the beacon and device discovery.
+pub struct UdpSocket {
+    handle: i32,
+}
+
+impl UdpSocket {
+    pub fn open<N: Net>(net: &mut N, bearer_handle: i32) -> Result<Self> {
+        let handle = net.udp_open(bearer_handle)?;
+        Ok(UdpSocket { handle })
+    }
+
+    pub fn send_to<N: Net>(&mut self, net: &mut N, addr: Ipv4, port: u16, data: &[u8]) -> Result<()> {
+        net.udp_send_to(self.handle, addr, port, data)
+    }
+}
+
+impl Drop for UdpSocket {
+    fn drop(&mut self) {
+        if self.handle >= 0 {
+            ShimNet.tcp_close(self.handle);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -631,6 +719,14 @@ mod tests {
         closes: Vec<i32>,
         /// Make the next call of a given kind fail.
         fail_recv: bool,
+        /// Bytes the peer has waiting. `tcp_recv` writes the next one into whatever buffer
+        /// it is handed, which is what the platform does and what a fake that only records
+        /// the length cannot express — the reason the stale-buffer bug survived every test
+        /// in this file.
+        queued: Vec<Vec<u8>>,
+        /// The address of every buffer a read was issued into, as an integer. Never
+        /// dereferenced; it is here to assert the platform's pointer does not move.
+        read_at: Vec<usize>,
     }
 
     impl FakeNet {
@@ -670,12 +766,25 @@ mod tests {
                 return Err(Error::InUse);
             }
             self.reads.push((h, buf.len()));
+            self.read_at.push(buf.as_ptr() as usize);
+            if !self.queued.is_empty() {
+                let next = self.queued.remove(0);
+                let n = next.len().min(buf.len());
+                buf[..n].copy_from_slice(&next[..n]);
+            }
             Ok(())
         }
-        fn tcp_close(&mut self, h: i32) {
-            self.closes.push(h);
-        }
+    fn tcp_close(&mut self, h: i32) {
+        self.closes.push(h);
     }
+    fn udp_open(&mut self, _conn: i32) -> Result<i32> {
+        Ok(self.alloc())
+    }
+    fn udp_send_to(&mut self, h: i32, _addr: Ipv4, _port: u16, buf: &[u8]) -> Result<()> {
+        self.writes.push((h, buf.to_vec()));
+        Ok(())
+    }
+}
 
     fn ev(kind: i32, handle: i32, status: i32, a: i32) -> RawEvent {
         RawEvent { kind, handle, status, a, ..Default::default() }
@@ -691,6 +800,78 @@ mod tests {
         let sh = s.handle();
         assert_eq!(s.on_event(net, &ev(sys::SHIM_EV_CONNECTED, sh, 0, 0)), Progress::Connected);
         (bearer, s)
+    }
+
+    // ---- the receive path ----
+
+    #[test]
+    fn a_second_reply_does_not_arrive_with_the_first_one_glued_to_it() {
+        // Exactly what the handset did. Telegram answered `res_pq`, the client read it and
+        // sent `req_DH_params`, and the next read came back as `res_pq` again with the real
+        // answer behind it: 104 stale bytes in front of 552 new ones. The handshake died on
+        // a constructor it had already consumed.
+        //
+        // The cause was where the read was issued, not what the server sent. A read into
+        // `rx[rx_len..]` is still outstanding when the caller drains `rx` and `rx_len` drops
+        // to zero, and from then on the platform is writing 104 bytes past where the
+        // bookkeeping thinks it is.
+        //
+        // One request and one response never sees it, which is why the HTTP self test
+        // passed and every program on the phone worked except this one.
+        let mut net = FakeNet::new();
+        let mut bearer = Bearer::start(&mut net, None).unwrap();
+        let bh = bearer.handle();
+        bearer.on_event(&mut net, &ev(sys::SHIM_EV_NET_READY, bh, 0, 7)).unwrap();
+
+        let mut s = TcpStream::open(&mut net, &bearer, 64, 64).unwrap();
+        s.connect(&mut net, Ipv4::new(10, 0, 0, 1), 9).unwrap();
+        let h = s.handle();
+
+        net.queued = alloc::vec![b"first...".to_vec(), b"second!!".to_vec()];
+        assert_eq!(s.on_event(&mut net, &ev(sys::SHIM_EV_CONNECTED, h, 0, 0)), Progress::Connected);
+
+        let mut out = [0u8; 64];
+        assert_eq!(s.on_event(&mut net, &ev(sys::SHIM_EV_RECV, h, 0, 8)), Progress::Received(8));
+        assert_eq!(s.read(&mut net, &mut out).unwrap(), 8);
+        assert_eq!(&out[..8], b"first...");
+
+        assert_eq!(s.on_event(&mut net, &ev(sys::SHIM_EV_RECV, h, 0, 8)), Progress::Received(8));
+        assert_eq!(s.read(&mut net, &mut out).unwrap(), 8);
+        assert_eq!(
+            &out[..8],
+            b"second!!",
+            "the previous reply came back instead of the new one"
+        );
+    }
+
+    #[test]
+    fn every_read_is_issued_into_the_same_address() {
+        // The invariant the fix rests on. The platform keeps the pointer it was handed
+        // until the read completes, so that pointer must not depend on how much happens to
+        // be buffered — no amount of care in the bookkeeping is worth as much as the
+        // address being a constant.
+        let mut net = FakeNet::new();
+        let mut bearer = Bearer::start(&mut net, None).unwrap();
+        let bh = bearer.handle();
+        bearer.on_event(&mut net, &ev(sys::SHIM_EV_NET_READY, bh, 0, 7)).unwrap();
+
+        let mut s = TcpStream::open(&mut net, &bearer, 64, 64).unwrap();
+        s.connect(&mut net, Ipv4::new(10, 0, 0, 1), 9).unwrap();
+        let h = s.handle();
+        s.on_event(&mut net, &ev(sys::SHIM_EV_CONNECTED, h, 0, 0));
+
+        // A partial drain, which leaves the queue non-empty and used to move the target.
+        let mut out = [0u8; 3];
+        for _ in 0..4 {
+            s.on_event(&mut net, &ev(sys::SHIM_EV_RECV, h, 0, 8));
+            let _ = s.read(&mut net, &mut out);
+        }
+        assert!(net.read_at.len() >= 4, "no reads were issued");
+        assert!(
+            net.read_at.windows(2).all(|w| w[0] == w[1]),
+            "the address handed to the platform moved: {:?}",
+            net.read_at
+        );
     }
 
     // ---- addresses ----
