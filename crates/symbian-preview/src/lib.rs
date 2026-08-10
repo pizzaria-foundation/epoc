@@ -11,7 +11,7 @@
 //! with the code they document.
 //!
 //! ```ignore
-//! let atlases = Atlases::load(&sdk_root())?;
+//! let atlases = Atlases::load();
 //! atlases.with_themes(|dark, _light| {
 //!     let mut sheet = Sheet::new(E72_SCREEN);
 //!     my_screen.draw(&mut sheet.canvas(), dark);
@@ -99,9 +99,11 @@ impl Atlases {
     /// desktop — but chained the same way, so what the fallback does here is what it does on
     /// the phone.
     ///
-    /// `sdk_root` is the directory holding `crates/`. See [`sdk_root`].
-    pub fn load(sdk_root: &Path) -> Self {
-        let dir = sdk_root.join("crates/symbian-ui/assets");
+    /// Finds the atlases next to this crate, wherever this crate happens to be: a checkout,
+    /// a cargo git dependency, a vendored copy. `EPOC_SDK` overrides the search - see
+    /// [`assets_dir`].
+    pub fn load() -> Self {
+        let dir = assets_dir();
         let one = |name: &str| {
             let p = dir.join(format!("{name}.sbf"));
             std::fs::read(&p)
@@ -147,26 +149,24 @@ impl Atlases {
     }
 }
 
-/// The SDK checkout root, found by walking up from the current directory until `crates/` is
-/// there.
+/// Where the font atlases are: `symbian-ui/assets`, beside this crate.
 ///
-/// Not `CARGO_MANIFEST_DIR`: a preview may be run from an application's own repository, where
-/// the SDK is a path dependency somewhere else entirely, and the atlases still have to be
-/// found. Falls back to the current directory, which is what `cargo run` from a checkout
-/// gives.
-pub fn sdk_root() -> PathBuf {
+/// `CARGO_MANIFEST_DIR` is expanded when *this* crate is compiled, not when a caller is, so
+/// it points at the SDK wherever the SDK actually is - a checkout, a cargo git dependency
+/// under `~/.cargo/git/checkouts/`, a vendored copy. That is what makes a preview runnable
+/// from an application's own repository, where there is no `crates/` directory to find.
+///
+/// An earlier version walked up from the current directory looking for `crates/`, which
+/// worked inside the SDK and failed everywhere else - the first application to live in its
+/// own repository hit it immediately.
+///
+/// `EPOC_SDK` overrides it, pointing at a checkout root, for the case of running against
+/// atlases that are not the ones this build was compiled against.
+pub fn assets_dir() -> PathBuf {
     if let Ok(explicit) = std::env::var("EPOC_SDK") {
-        return PathBuf::from(explicit);
+        return PathBuf::from(explicit).join("crates/symbian-ui/assets");
     }
-    let mut dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    loop {
-        if dir.join("crates/symbian-ui/assets").is_dir() {
-            return dir;
-        }
-        if !dir.pop() {
-            return std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        }
-    }
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../symbian-ui/assets")
 }
 
 /// Copy `src` into `dst` at `at`, magnified `zoom` times.

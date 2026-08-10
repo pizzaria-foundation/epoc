@@ -11,7 +11,7 @@ use symbian_preview::{blit_zoom, Atlases, Sheet};
 const OUT: &str = "preview-out";
 
 fn main() {
-    let atlases = Atlases::load(&symbian_preview::sdk_root());
+    let atlases = Atlases::load();
 
     // ---- a smoke sheet that exercises the rasterizer and the atlases ----
     atlases.with_fonts(|fonts| {

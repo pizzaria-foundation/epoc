@@ -16,7 +16,7 @@ standing as `symbian-sim`, and a crate applications pull in under `[dev-dependen
     with_fonts         builds the fonts and hands you a symbian_ui::Fonts
     with_themes        the same, with dark and light Themes over them
     blit_zoom          magnify a region with a gutter grid, for judging small icons
-    sdk_root           finds crates/symbian-ui/assets by walking up, or reads EPOC_SDK
+    assets_dir         where the atlases are, or EPOC_SDK if you override it
 
 ## What it deliberately does not contain
 
@@ -24,17 +24,20 @@ Any particular screen. The SDK's own sheets - the rasterizer smoke test, the ico
 the surface primitives - live in `tools/preview`. An application's sheets live with the
 application, so its scenes travel with the code they document:
 
-    // apps/myapp/examples/preview.rs
-    let atlases = Atlases::load(&symbian_preview::sdk_root());
+    // examples/preview.rs, in the application's own repository
+    let atlases = Atlases::load();
     atlases.with_themes(|dark, _light| {
         let mut sheet = Sheet::new(E72_SCREEN);
         my_screen.draw(&mut sheet.canvas(), dark);
         sheet.save("preview-out", "10-my-screen");
     });
 
-That split is why `sdk_root` walks the filesystem instead of using
-`CARGO_MANIFEST_DIR`: a preview run from an application's own repository still has to
-find the atlases in whatever checkout of the SDK is around.
+That split is why the atlases are found through `CARGO_MANIFEST_DIR` of *this* crate,
+expanded when this crate is compiled rather than when a caller is. It resolves to wherever
+the SDK actually is - a checkout, a cargo git dependency under `~/.cargo/git/checkouts/`, a
+vendored copy - so a preview runs from an application's own repository, where there is no
+`crates/` directory to find. An earlier version walked up from the current directory looking
+for one; the first application to move out hit that immediately.
 
 ## Two decisions worth knowing
 
