@@ -42,7 +42,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use symbian::fs::ShimFs;
-use symbian::msg::{self, Session, StoreEventKind};
+use symbian::msg::{self, NewMessage, Session, StoreEventKind};
 use symbian_report::{push_hex, push_i64, Report};
 
 use crate::registry;
@@ -82,6 +82,12 @@ pub struct Watcher {
     /// Set once an entry of ours has been seen published in a folder other than the inbox —
     /// which is the reply, and the whole point of the run.
     reply_seen: bool,
+    /// The id of the entry this probe wrote itself, and whether an event ever mentioned it.
+    ///
+    /// A layered measurement, so a run with no events is not one ambiguous fact. See
+    /// `self_test`.
+    own_id: Option<msg::EntryId>,
+    own_event_seen: bool,
 }
 
 impl Default for Watcher {
@@ -106,6 +112,8 @@ impl Watcher {
             events: 0,
             queued: Vec::new(),
             reply_seen: false,
+            own_id: None,
+            own_event_seen: false,
         }
     }
 
@@ -192,6 +200,63 @@ impl Watcher {
         self.started = true;
     }
 
+    /// Write one entry ourselves, and see whether our own session hears about it.
+    ///
+    /// WHY THIS EXISTS
+    ///
+    /// The first two runs of this probe ended "30s: 0 events" and could not say why. Nobody
+    /// knew whether no event had arrived because the platform does not deliver them, or because
+    /// the operator had not replied yet. One ambiguous fact is not a measurement.
+    ///
+    /// So the question is split. This writes a message into Drafts through our own session — a
+    /// change the Message Server certainly knows about, since it made it — and the report then
+    /// distinguishes three worlds:
+    ///
+    /// - **no event for our own write**: delivery is broken on our side, and the human half of
+    ///   the test would have told us nothing. `shim_msv_observe` or the observer is at fault.
+    /// - **our own write reported, MCE's reply not**: the boundary is the process. A service
+    ///   needs `Bridge::poll` on a timer, and that is a fact about the platform.
+    /// - **both reported**: the design holds.
+    ///
+    /// It leaves the entry behind, named so it is obvious whose it is, on the same reasoning as
+    /// the mtm probe: what is left on the phone is evidence, and a human may want to look at it.
+    fn self_test(&mut self) {
+        let Some(session) = self.session.as_mut() else {
+            return;
+        };
+        let services = session.services(MTM_UID).unwrap_or_default();
+        let Some(&service) = services.first() else {
+            self.report.line("");
+            self.report.check_note(
+                "self-test: our service exists",
+                false,
+                "no service of our MTM — run the mtm probe first; nothing to attribute an entry to",
+            );
+            return;
+        };
+
+        self.report.line("");
+        self.report.entering(&mut self.fs, "writing one entry of our own into drafts");
+        let msg = NewMessage::new(service, MTM_UID)
+            .from("msvev probe (safe to delete)")
+            .body("Written by the msvev probe to see whether the store reports it.")
+            .into_folder(symbian_sys::SHIM_MSV_DRAFTS);
+        match session.create_message(&msg) {
+            Ok(id) => {
+                self.own_id = Some(id);
+                let mut line = String::from("wrote id ");
+                push_hex(&mut line, id as u32, 8);
+                line.push_str(" into drafts");
+                self.report.line(&line);
+            }
+            Err(e) => {
+                self.report
+                    .check_note("self-test: wrote an entry", false, &err(e));
+            }
+        }
+        self.report.flush(&mut self.fs);
+    }
+
     /// A line every ten seconds, so a report cut short still says how far it got.
     ///
     /// This is the difference between a finding and a shrug: a truncated file showing "40s: 0
@@ -237,6 +302,12 @@ impl Watcher {
              * dropped deliberately and a reader must rescan. Worth seeing in the report,
              * because it is the case the "an event is a hint" design exists for. */
             line.push_str(" (capped)");
+        }
+        if Some(store.id) == self.own_id {
+            /* Our own write, reported back to us. Half the question answered, and answered
+             * without a human. */
+            line.push_str("  <-- the entry this probe wrote");
+            self.own_event_seen = true;
         }
         self.report.line(&line);
         self.report.flush(&mut self.fs);
@@ -355,6 +426,17 @@ impl Watcher {
 
         /* The three findings, stated as checks so `grep FAIL` finds them. */
         self.report.check_note(
+            "our own write was reported back to us",
+            self.own_event_seen,
+            if self.own_event_seen {
+                "so shim_msv_observe and the observer work; what is left is the process boundary"
+            } else if self.own_id.is_some() {
+                "we wrote an entry and heard nothing — delivery is broken on our side, not the platform's"
+            } else {
+                "nothing was written, so this says nothing"
+            },
+        );
+        self.report.check_note(
             "a session event crossed into this process",
             self.events > 0,
             if self.events > 0 {
@@ -412,6 +494,11 @@ impl symbian_app::DaemonApp for Watcher {
         }
 
         self.seconds += 1;
+        if self.seconds == 2 {
+            /* On the second tick, not the first: the first is what proves the clock ticks, and
+             * a write on the same tick would make a failure there ambiguous with a dead clock. */
+            self.self_test();
+        }
         self.heartbeat();
         self.read_queued();
 
