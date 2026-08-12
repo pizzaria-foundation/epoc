@@ -73,7 +73,7 @@ fn attempted(r: &mut Report) {
             Some(false) => "NOT held",
             None => "unknown",
         });
-        note.push_str("  — ");
+        note.push_str("  - ");
         note.push_str(at.what);
 
         // The verdict column is deliberately "did it succeed", not "did it match the

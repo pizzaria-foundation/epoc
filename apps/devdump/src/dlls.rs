@@ -340,11 +340,11 @@ pub const CONTROLS: &[&str] = &["euser.dll", "avkon.dll", "efsrv.dll"];
 /// Names worth calling out in the report even though they are in [`NAMES`], because a
 /// decision is waiting on each one.
 pub const NOTABLE: &[(&str, &str)] = &[
-    ("libssl.dll", "TLS — the entire TLS story on this handset is whether this loads"),
-    ("libcrypto.dll", "OpenSSL 0.9.8a: AES, RSA, bignum — but no SHA-256, which predates it"),
+    ("libssl.dll", "TLS - the entire TLS story on this handset is whether this loads"),
+    ("libcrypto.dll", "OpenSSL 0.9.8a: AES, RSA, bignum - but no SHA-256, which predates it"),
     ("libc.dll", "Open C: BSD sockets and stdio"),
     ("libz.dll", "inflate"),
-    ("msgs.dll", "the Message Server — what an MTM would be built on"),
+    ("msgs.dll", "the Message Server - what an MTM would be built on"),
     ("mtur.dll", "the MTM registries"),
     ("etel.dll", "telephony"),
     ("etelmm.dll", "RMobilePhone: operator, signal, IMEI"),
@@ -419,6 +419,6 @@ mod tests {
     /// being accidentally truncated is worth failing over.
     #[test]
     fn the_sweep_is_the_whole_sdk() {
-        assert!(NAMES.len() > 250, "only {} names — was the list truncated?", NAMES.len());
+        assert!(NAMES.len() > 250, "only {} names - was the list truncated?", NAMES.len());
     }
 }

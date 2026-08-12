@@ -113,7 +113,7 @@ fn sweep(r: &mut Report, fs: &mut ShimFs) {
     r.head("beyond the SDK");
     r.info(
         "why",
-        "these have no .dso in this SDK, so nothing could link them today — but the handset          may carry them, and RLibrary::Load is how that gets asked",
+        "these have no .dso in this SDK, so nothing could link them today - but the handset          may carry them, and RLibrary::Load is how that gets asked",
     );
     for name in dlls::EXTRA {
         let rc = present(name);

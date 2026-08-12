@@ -230,7 +230,7 @@ impl Watcher {
             self.report.check_note(
                 "self-test: our service exists",
                 false,
-                "no service of our MTM — run the mtm probe first; nothing to attribute an entry to",
+                "no service of our MTM - run the mtm probe first; nothing to attribute an entry to",
             );
             return;
         };
@@ -246,7 +246,7 @@ impl Watcher {
                 self.own_id = Some(id);
                 let mut line = String::from("wrote id ");
                 push_hex(&mut line, id as u32, 8);
-                line.push_str(" into drafts — now waiting for the store to report it back");
+                line.push_str(" into drafts - now waiting for the store to report it back");
                 self.report.line(&line);
             }
             Err(e) => {
@@ -436,7 +436,7 @@ impl Watcher {
             if self.own_event_seen {
                 "so shim_msv_observe and the observer work; what is left is the process boundary"
             } else if self.own_id.is_some() {
-                "we wrote an entry and heard nothing — delivery is broken on our side, not the platform's"
+                "we wrote an entry and heard nothing - delivery is broken on our side, not the platform's"
             } else {
                 "nothing was written, so this says nothing"
             },
@@ -447,7 +447,7 @@ impl Watcher {
             if self.events > 0 {
                 "so a service can be woken rather than poll"
             } else {
-                "nothing arrived — a service needs a polling timer, and Bridge::poll is it"
+                "nothing arrived - a service needs a polling timer, and Bridge::poll is it"
             },
         );
         self.report.check_note(
@@ -517,7 +517,7 @@ impl symbian_app::DaemonApp for Watcher {
         if self.own_id.is_some() && !self.own_event_seen && self.seconds == SELF_TEST_DEADLINE {
             self.report.line("");
             self.report.line(
-                "our own write went unreported for 15s — not waiting for a reply whose event",
+                "our own write went unreported for 15s - not waiting for a reply whose event",
             );
             self.report.line("could not arrive either. Ending early; the verdict is below.");
             self.finish();

@@ -21,10 +21,10 @@ use symbian_sys as sys;
 
 /// The networking DLLs whose presence decides what can be built without porting it.
 const ASK: &[(&str, &str)] = &[
-    ("http.dll", "the platform's own HTTP stack — would make README's HTTP todo unnecessary"),
+    ("http.dll", "the platform's own HTTP stack - would make README's HTTP todo unnecessary"),
     ("httpfilterauthentication.dll", "HTTP auth filter"),
     ("securesocket.dll", "the platform's own TLS sockets"),
-    ("libssl.dll", "Open C's OpenSSL 0.9.8a — TLS, if this handset has Open C"),
+    ("libssl.dll", "Open C's OpenSSL 0.9.8a - TLS, if this handset has Open C"),
     ("libcrypto.dll", "Open C's crypto: AES, RSA, bignum. No SHA-256; 0.9.8a predates it"),
     ("libc.dll", "Open C: BSD sockets and stdio"),
     ("esock.dll", "the socket server (control: selftest already links it)"),

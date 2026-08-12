@@ -145,13 +145,13 @@ pub fn run(r: &mut Report, fs: &mut ShimFs) {
     // process outright. The rule this project already follows applies — a facility that can
     // take the process down belongs in its own binary, where failing costs its own section.
     // It now has one.
-    r.info("moved", "the notification is its own probe now — see the ncn section");
+    r.info("moved", "the notification is its own probe now - see the ncn section");
     let _ = service;
 
     r.head("what to look at on the phone");
     r.info("1", "open Messaging — is there an account called \"devdump probe\"?");
     r.info("2", "open the Inbox — is there a message from \"devdump\"?");
-    r.info("3", "what icon does it have — ours, or the unknown-type envelope?");
+    r.info("3", "what icon does it have - ours, or the unknown-type envelope?");
     r.info("4", "did an indicator, a tone or a floating note appear?");
 }
 
@@ -167,7 +167,7 @@ fn registration(r: &mut Report, fs: &mut ShimFs, session: &mut msg::Session) {
     r.check_note(
         "the .mtm reached the device",
         present,
-        if present { REG_PATH } else { "NOT INSTALLED — the package did not carry it" },
+        if present { REG_PATH } else { "NOT INSTALLED - the package did not carry it" },
     );
     if !present {
         return;
@@ -204,7 +204,7 @@ fn registration(r: &mut Report, fs: &mut ShimFs, session: &mut msg::Session) {
     // always started from a clean registry and the startup count was always 15 — which read
     // as "it never registers". The probe was destroying the only evidence it could produce.
     // The registration stays. It is inert unless something asks for the type.
-    r.info("left installed", "on purpose — the next run's startup count is the measurement");
+    r.info("left installed", "on purpose - the next run's startup count is the measurement");
 }
 
 /// Where `apps/mtmdemo` writes its construction breadcrumbs. Must match the `Trace` helper
@@ -250,7 +250,7 @@ fn dll_trace(r: &mut Report, fs: &mut ShimFs) {
 const OURS: &[(u32, &str)] = &[
     (0xE0DD_0A01, "the mtm probe's first type"),
     (0xE0DD_0A02, "the ncn probe's type"),
-    (0xE0DD_0B01, "apps/mtmdemo — the current one"),
+    (0xE0DD_0B01, "apps/mtmdemo - the current one"),
 ];
 
 /// Remove what previous runs left in the user's Messaging account list.
@@ -269,7 +269,7 @@ fn cleanup(r: &mut Report, fs: &mut ShimFs, session: &mut msg::Session) {
                 if n > 0 {
                     let mut s = String::new();
                     push_i64(&mut s, n as i64);
-                    s.push_str(" removed — ");
+                    s.push_str(" removed - ");
                     s.push_str(what);
                     let mut key = String::from("0x");
                     push_hex(&mut key, *uid, 8);

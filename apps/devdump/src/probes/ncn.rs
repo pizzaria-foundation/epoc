@@ -138,7 +138,7 @@ fn attempt(r: &mut Report, fs: &mut ShimFs, what: &str, id: i32) {
             r.check_note("NewMessages returned", true, what);
             r.info(
                 "expect on screen",
-                "an indicator, a tone and a floating note — the triple an arriving SMS makes",
+                "an indicator, a tone and a floating note - the triple an arriving SMS makes",
             );
         }
         Err(e) => {

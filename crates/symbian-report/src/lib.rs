@@ -418,6 +418,24 @@ pub fn push_hex(s: &mut String, v: u32, digits: usize) {
 
 #[cfg(test)]
 mod tests {
+    /// Report text is read on the handset, in a viewer that mangles anything outside ASCII —
+    /// an em dash came back as three bytes of noise in the middle of a line. Every string this
+    /// crate emits of its own must stay in ASCII; a probe's own text is its business, but the
+    /// scaffolding around it is read on every report.
+    #[test]
+    fn the_scaffolding_is_ascii_only() {
+        let mut r = super::Report::new("x");
+        r.head("h");
+        r.line("l");
+        r.check("c", true);
+        r.check_note("n", false, "why");
+        r.info("k", "v");
+        r.num("i", 42);
+        for (i, ch) in r.text().chars().enumerate() {
+            assert!(ch.is_ascii(), "non-ASCII {ch:?} at {i} in report scaffolding");
+        }
+    }
+
     use super::*;
     use symbian::fs::MemFs;
 

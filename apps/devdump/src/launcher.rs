@@ -339,7 +339,7 @@ impl Launcher {
             Outcome::Refused(code) => {
                 note.push_str("  err ");
                 report::push_i64(&mut note, code as i64);
-                note.push_str("  (the loader would not start the image — an unsatisfied import looks exactly like this)");
+                note.push_str("  (the loader would not start the image - an unsatisfied import looks exactly like this)");
             }
             Outcome::TimedOut(ms) => {
                 note.push_str("  after ");
@@ -355,7 +355,7 @@ impl Launcher {
                 note.push_str("  (started, then left nothing readable)");
             }
             Outcome::Detached => {
-                note.push_str("  (started and left running — read its own section directly; it is not in the merge)");
+                note.push_str("  (started and left running - read its own section directly; it is not in the merge)");
             }
             Outcome::Pending => {}
         }

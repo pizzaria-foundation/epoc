@@ -129,7 +129,7 @@ fn short_reads(r: &mut Report, fs_: &mut ShimFs, dir: &Utf16Path) {
                         "a single read is not a whole-file read",
                         true,
                         if n == data.len() {
-                            "it returned everything this time — which is not a guarantee"
+                            "it returned everything this time - which is not a guarantee"
                         } else {
                             "it returned less than asked, as the file server is allowed to"
                         },
@@ -198,7 +198,7 @@ fn rename(r: &mut Report, fs_: &mut ShimFs, dir: &Utf16Path) {
         matches!(refused, Err(symbian::Error::AlreadyExists)),
         &match refused {
             Err(e) => err(e),
-            Ok(()) => String::from("it succeeded — the atomic-save delete-first dance may be unnecessary here"),
+            Ok(()) => String::from("it succeeded - the atomic-save delete-first dance may be unnecessary here"),
         },
     );
     let _ = fs_.delete(a.as_units());
