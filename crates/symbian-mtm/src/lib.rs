@@ -39,25 +39,34 @@
 //!     }
 //! }
 //!
-//! // In the daemon's DaemonApp::handle_raw:
-//! self.bridge.handle_raw(ev);
-//! if self.bridge.rescan_owed() {
-//!     let _ = self.bridge.poll();
+//! // Once, at startup:
+//! let ticker = symbian::timer_every(DESC.poll_interval_ms)?;
+//!
+//! // In the daemon's DaemonApp::handle_raw, for every event:
+//! self.bridge.handle_raw(ev);              // a store event, if they work here
+//! if self.bridge.rescan_owed() || ev.kind == symbian_sys::SHIM_EV_TIMER {
+//!     let _ = self.bridge.poll();          // the timer is what makes it certain
 //! }
 //! ```
 //!
-//! # An event is a hint, never data
+//! # A timer is the mechanism; an event is an optimisation
 //!
-//! The Message Server tells every open session when something changes, and
-//! [`Bridge::handle_raw`] does nothing with the event but remember that a rescan is owed. The
-//! store is then re-read from scratch.
+//! [`Bridge::poll`] re-reads the store and offers whatever it finds. Called on a timer, that
+//! alone is a complete implementation — and it is the one this crate asks a service to write,
+//! because it depends on nothing unmeasured.
 //!
-//! That is the whole reliability argument. A dropped ring slot, a daemon that was not running
-//! when the user replied, a notification the shim capped because a hundred entries changed at
-//! once — all three become the same case, and it is the case exercised on every single reply
-//! rather than only in a disaster. It also means [`Bridge::poll`] alone is a complete
-//! implementation: a service that never receives an event still works if something calls
-//! `poll` on a timer.
+//! The Message Server also tells every open session when something changes, and
+//! [`Bridge::handle_raw`] turns that into "a rescan is owed" so a reply is picked up in
+//! milliseconds instead of at the next tick. That path is *unproven on this handset*: whether a
+//! session event crosses a process boundary at all is what `apps/devdump/probes/msvev` exists to
+//! measure, and it has not answered yet. Nothing depends on the answer — a service that never
+//! receives an event behaves identically, one poll interval later.
+//!
+//! Which is also the reliability argument, and why the event carries no data. A dropped ring
+//! slot, a daemon that was not running when the user replied, a notification the shim capped
+//! because a hundred entries changed at once, and an event mechanism that turns out not to work
+//! at all — the same recovery in every case, exercised on every single reply rather than only
+//! in a disaster.
 //!
 //! # What "already handled" means, and why it is not a set of ids
 //!
@@ -103,6 +112,14 @@ pub struct Descriptor<'a> {
     pub outgoing: &'a [EntryId],
     /// Where a carried reply is moved to, which is also how the store remembers it is done.
     pub sent: EntryId,
+    /// How often a service should call [`Bridge::poll`], in milliseconds.
+    ///
+    /// This is the *mechanism*, not a fallback. Store events may make a reply arrive sooner, but
+    /// whether they cross a process boundary on this handset is unmeasured, so nothing may
+    /// depend on them. Five seconds is a compromise: a reply the user is waiting on feels
+    /// prompt, and a folder listing every five seconds is cheap next to what a chat service is
+    /// doing anyway.
+    pub poll_interval_ms: i32,
 }
 
 impl Descriptor<'static> {
@@ -117,6 +134,7 @@ impl Descriptor<'static> {
             service_name,
             outgoing: &[sys::SHIM_MSV_DRAFTS, sys::SHIM_MSV_OUTBOX],
             sent: sys::SHIM_MSV_SENT,
+            poll_interval_ms: 5_000,
         }
     }
 }
@@ -301,7 +319,10 @@ impl<S: MessagingService, M: Msv> Bridge<S, M> {
         };
         self.service_id = service_id;
 
-        self.session.observe()?;
+        /* Event delivery is switched on if it can be, and its failure is not fatal: the timer
+         * is what a service actually relies on. An install that refused to complete because an
+         * optimisation was unavailable would make the unmeasured path load-bearing after all. */
+        let _ = self.session.observe();
         self.rescan_owed = true;
 
         Ok(Installed { service_id, service_created, registry_count })
@@ -556,6 +577,31 @@ mod tests {
         let mut b = with_fake(fake, DESC, svc).unwrap();
         b.install().unwrap();
         b
+    }
+
+    /// Event delivery being unavailable must not stop a service starting. The timer is the
+    /// mechanism; observation is an optimisation whose viability on this handset is unmeasured,
+    /// and an install that failed without it would make the unproven path load-bearing.
+    #[test]
+    fn install_survives_event_delivery_being_refused() {
+        let mut fake = MemMsv::new();
+        fake.refuse_observe = true;
+        let mut b = with_fake(fake, DESC, Recorder::new()).unwrap();
+        let out = b.install().expect("install must not depend on observe");
+        assert!(out.service_created);
+        assert!(!b.session().msv().observing);
+        /* And the loop still works, because it never needed an event. */
+        let svc = out.service_id;
+        b.session().msv().push_reply(sys::SHIM_MSV_DRAFTS, MTM, svc, "Ana", "ok");
+        assert_eq!(b.poll().unwrap(), 1);
+    }
+
+    /// The default interval has to be short enough that a reply feels prompt. The number is a
+    /// judgement, but a *missing* one would be a service that never polls at all.
+    #[test]
+    fn the_default_poll_interval_is_set_and_sane() {
+        assert!(DESC.poll_interval_ms >= 1_000, "would hammer the Message Server");
+        assert!(DESC.poll_interval_ms <= 15_000, "a reply would feel lost");
     }
 
     #[test]

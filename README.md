@@ -81,6 +81,13 @@ and 283 of the 292 libraries asked about load, Open C among them.
     Replying natively               done    apps/mtmdemo's UI MTM. Confirmed on an E72: reply
                                             from Nokia's menu, an Avkon query dialog, and the
                                             reply left in the store for a daemon to send
+    Any service in the native Inbox  built   crates/symbian-mtm: a two-method trait, and
+                                            shim/mtm's C++ base classes. apps/mtmdemo is the
+                                            reference subclass and is the thing that ran
+    Waking on a store event          unproven a service polls on a timer, which works; whether
+                                            a session event crosses a process boundary is what
+                                            apps/devdump/probes/msvev exists to measure, and
+                                            nothing depends on the answer
     Native new-message notification blocked MNcnNotification kills the caller; the Avkon
                                             classes have no public header in this SDK
     HTTP                            todo    nothing yet; TCP is there to build it on — but the

@@ -800,6 +800,12 @@ pub struct MemMsv {
     pub installed: Vec<Vec<u16>>,
     pub calls: Vec<MsvCall>,
     pub observing: bool,
+    /// Make `observe` refuse.
+    ///
+    /// Its own flag rather than `fail_next`, because the caller under test is
+    /// `symbian_mtm::Bridge::install`, which makes several calls in sequence and must survive
+    /// this one specifically — event delivery is an optimisation there, not a requirement.
+    pub refuse_observe: bool,
     /// Fail the next trait call with this, then clear it.
     pub fail_next: Option<Error>,
     next_id: EntryId,
@@ -818,6 +824,7 @@ impl MemMsv {
             installed: Vec::new(),
             calls: Vec::new(),
             observing: false,
+            refuse_observe: false,
             fail_next: None,
             next_id: 0x2000,
         }
@@ -1107,6 +1114,9 @@ impl Msv for MemMsv {
 
     fn observe(&mut self, _handle: i32, enable: bool) -> Result<()> {
         self.calls.push(MsvCall::Observe(enable));
+        if self.refuse_observe {
+            return Err(Error::Platform(sys::SHIM_ERR_NOT_SUPPORTED));
+        }
         self.take_failure()?;
         self.observing = enable;
         Ok(())
