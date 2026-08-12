@@ -953,9 +953,27 @@ corrected the item appeared. The narrower question of whether other applications
 the MTM in "Send via…" is `KUidMtmQuerySendAsMessageSendSupportValue`, answered separately and
 `EFalse`: nothing here carries another application's data out.
 
-**2. MCE does consult a third party's `Can*L`.** Measured, not assumed — the component logs
-`uid-asked CanReplyToEntryL` when the menu is built. This is the fact that makes the native
-menu a real integration point rather than something only Nokia's own MTMs get.
+**2. MCE consults a third party's `Can*L` — for replying, and not for opening.** Measured, and
+the distinction was a surprise. The component logs each question the first time it is asked,
+and a full run that opened two messages and replied to one produced:
+
+    uidata: ContextIcon asked
+    uidata: CanCreateEntryL asked
+    ui: OpenL
+    uidata: ContextIcon asked
+    uidata: CanReplyToEntryL asked
+    ui: reply, creating the entry
+
+`CanReplyToEntryL` is asked before the reply. `CanOpenEntryL` and `CanViewEntryL` are **never
+asked at all**, from either of the two UI-data objects that existed during that run — and
+`OpenL` was still called twice. So opening is gated on the registration declaring a UI
+component, not on the UI-data component's answer.
+
+Two consequences. Answering `CanOpenEntryL` with `EFalse` will *not* stop MCE opening a
+message, so a service that cannot open one must leave from `OpenL` rather than rely on the
+flag. And the reply item genuinely is a menu decision a third party gets to make — which is
+what makes the native menu an integration point rather than something only Nokia's own MTMs
+get.
 
 **3. `CMsvCompletedOperation` is not completed on construction.** It derives from
 `CMsvOperation : CActive` and signals the observer in its `RunL`, on the next turn of the
