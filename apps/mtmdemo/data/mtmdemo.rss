@@ -14,6 +14,10 @@
 NAME MTMD
 
 #include <eikon.rh>
+#include <eikon.rsg>
+#include <avkon.rh>
+#include <avkon.rsg>
+#include <avkon.hrh>
 #include <mtud.rh>
 
 RESOURCE RSS_SIGNATURE { }
@@ -24,4 +28,49 @@ RESOURCE RSS_SIGNATURE { }
 RESOURCE MTUD_FUNCTION_ARRAY r_mtmdemo_function_array
     {
     functions = { };
+    }
+
+//  The reply editor.
+//
+//  WHY THIS RESOURCE HAS TO EXIST
+//
+//  CAknQueryDialog::RunLD() is documented as running the dialog with no resource id, and on
+//  this handset it kills the process. Measured, not assumed: the UI component's breadcrumb
+//  file stopped at "reply-u2 about to run the query dialog" and never reached the line after
+//  it, inside Nokia's Messaging application. So the dialog is built from a resource, and
+//  ExecuteLD is used instead of RunLD.
+//
+//  The component loads this file a second time itself, through CCoeEnv::AddResourceFileL,
+//  because CBaseMtmUi keeps the offset for its own load in a *private* member
+//  (mtmuibas.h:511). What it does NOT do is add that offset to the id: measured on the E72,
+//  AddResourceFileL returns 0x421de000 and the ids rcomp generates from "NAME MTMD" already
+//  carry that same base. Adding it again asks for a resource that does not exist, which is a
+//  dead Messaging application. See the long note in src/mtmui.cpp.
+//
+//  The label is static rather than set at runtime. SetPromptL was removed from the code path:
+//  it reaches into the dialog's query control, and whether that control exists before ExecuteLD
+//  has built it is an ordering assumption, which is what the last two failures here were.
+RESOURCE DIALOG r_mtmdemo_reply_query
+    {
+    flags = EGeneralQueryFlags;
+    buttons = R_AVKON_SOFTKEYS_OK_CANCEL;
+    items =
+        {
+        DLG_LINE
+            {
+            type = EAknCtQuery;
+            id = EGeneralQuery;
+            control = AVKON_DATA_QUERY
+                {
+                layout = EDataLayout;
+                label = "Reply:";
+                control = EDWIN
+                    {
+                    width = 4;
+                    lines = 1;
+                    maxlength = 256;
+                    };
+                };
+            }
+        };
     }

@@ -296,6 +296,40 @@ if [ -n "$RUST_CRATE" ]; then
   echo "    $(basename "$RUST_LIB") $(stat -c%s "$RUST_LIB") bytes"
 fi
 
+# --------------------------------- 2p. a UI-data component's resource, compiled first
+# Before the C++, and that ordering is a requirement rather than a preference.
+#
+# rcomp writes a .rsg naming every resource in the file, and a component that opens one of its
+# own dialogs needs those ids at *compile* time — `R_MTMDEMO_REPLY_QUERY + offset`. Compiling
+# the resource after the link, where this used to live, meant the header did not exist when the
+# sources were compiled, so a clean build could not see it at all.
+#
+# Nothing here depends on the link, unlike the registration resource in 4a, which is generated
+# from the .def and therefore cannot move.
+#
+# The .rsg lands beside the .rss, in the app's data/ directory, which is on the include path
+# below for exactly this reason.
+UI_RSG_DIR=""
+if [ -n "${MTM_UI_RESOURCE:-}" ]; then
+  uisrc="$APP/$MTM_UI_RESOURCE"
+  [ -f "$uisrc" ] || { echo "MTM_UI_RESOURCE: $uisrc not found" >&2; exit 1; }
+  uibase="$(basename "$uisrc" .rss)"
+  echo "--> mtm ui resource (before C++): $uibase.rsc"
+  "$CROSS/$TC-g++" -E -P -x c++ -nostdinc \
+    -I"$EPOCROOT/epoc32/include" -I"$EPOCROOT/epoc32/include/variant" \
+    -I"$APP/data" -D_UNICODE -DLANGUAGE_SC "$uisrc" -o "$BUILD/$uibase.rpp"
+  ( cd "$(dirname "$uisrc")" && "$HOST/rcomp" -u -o"$BUILD/$uibase.uirsc" \
+      -h"$uibase.rsg" -s"$BUILD/$uibase.rpp" )
+  # .uirsc rather than .rsc for the same reason 4b uses .mtmrsc: the packaging loop globs
+  # "$BUILD"/*.rsc and would sweep this into \resource\apps\, where the framework never
+  # looks. The extension is put back at the install path.
+  echo "    $uibase.uirsc  $(stat -c%s "$BUILD/$uibase.uirsc") bytes"
+fi
+
+if [ -n "${MTM_UI_RESOURCE:-}" ]; then
+  UI_RSG_DIR="$(dirname "$APP/$MTM_UI_RESOURCE")"
+fi
+
 # ------------------------------------------------------------------ 2. C++
 # Sources are gathered from two places: the app's own (relative to app.conf, so
 # app.conf stays portable) and the shared shim (USE_SHIM=1). An app that only
@@ -772,21 +806,9 @@ fi
 #
 # On the DLL path, like 4b, because a UI-data component is a DLL and the general resource and
 # icon stages are past the point where a DLL build stops.
-if [ -n "${MTM_UI_RESOURCE:-}" ]; then
-  uisrc="$APP/$MTM_UI_RESOURCE"
-  [ -f "$uisrc" ] || { echo "MTM_UI_RESOURCE: $uisrc not found" >&2; exit 1; }
-  uibase="$(basename "$uisrc" .rss)"
-  echo "--> mtm ui resource: $uibase.rsc"
-  "$CROSS/$TC-g++" -E -P -x c++ -nostdinc \
-    -I"$EPOCROOT/epoc32/include" -I"$EPOCROOT/epoc32/include/variant" \
-    -I"$APP/data" -D_UNICODE -DLANGUAGE_SC "$uisrc" -o "$BUILD/$uibase.rpp"
-  ( cd "$(dirname "$uisrc")" && "$HOST/rcomp" -u -o"$BUILD/$uibase.uirsc" \
-      -h"$uibase.rsg" -s"$BUILD/$uibase.rpp" )
-  # .uirsc rather than .rsc for the same reason 4b uses .mtmrsc: the packaging loop globs
-  # "$BUILD"/*.rsc and would sweep this into \resource\apps\, where the framework never
-  # looks. The extension is put back at the install path.
-  echo "    $uibase.uirsc  $(stat -c%s "$BUILD/$uibase.uirsc") bytes"
-fi
+#
+# The .rss half of this moved to stage 2p, ahead of the C++: the component needs the resource
+# ids at compile time. Only the icons are still built here.
 
 if [ -n "${MTM_ICONS:-}" ]; then
   # Generated first if a generator is present, on the same reasoning as the app icon stage:

@@ -14,6 +14,14 @@
 class CRegisteredMtmDll;
 class CMsvSession;
 
+/* Diagnostic scaffolding, shared by every component in this DLL. Appends one line to
+ * C:\\Data\\dump-mtmdemo.txt before each step is attempted — see src/mtmclient.cpp for why an
+ * instrument this crude is the right one when a fault means the process vanishes.
+ *
+ * Not EXPORT_C: it is internal to the DLL, and exporting it would put a fifth symbol in the
+ * table the registration resource is generated from. */
+void MtmDemoTrace(const TDesC& aStep);
+
 /* The MTM's identity. Must match data/mtmdemoreg.rss exactly: the registration names the
  * type, and every message carries it in TMsvEntry::iMtm. A mismatch means messages that
  * belong to nobody.
@@ -93,6 +101,18 @@ protected:
     CMtmDemoUiData(CRegisteredMtmDll& aRegisteredDll);
     void PopulateArraysL();
     void GetResourceFileName(TFileName& aFileName) const;
+
+private:
+    /* Which questions have already been written to the breadcrumb file, one bit each.
+     *
+     * The point of the ledger is that these methods are called once per row per redraw, and a
+     * file open per call would make the Messaging application visibly slow. Each distinct
+     * question is recorded once and then costs nothing.
+     *
+     * `mutable` because every one of these methods is const, and an *instance* member because a
+     * file-scope counter would be writable static data, which the loader refuses in a DLL. */
+    void TraceOnce(TInt aBit, const TDesC& aWhat) const;
+    mutable TUint32 iTraced;
     };
 
 /* The UI component: what happens when the user taps one of our messages.
@@ -129,6 +149,13 @@ protected:
 private:
     CMsvOperation* ShowMessageL(TRequestStatus& aStatus);
     HBufC* BodyTextLC();
+
+    /* The offset of this component's own copy of the resource file.
+     *
+     * CBaseMtmUi loads that file too and keeps its offset private (mtmuibas.h:511), so an id
+     * from our .rsg cannot be relocated through the base class. Loading it again is the only
+     * route to an offset we can add to. Released in the destructor. */
+    TInt iResourceOffset;
     };
 
 #endif /* MTMDEMO_H */

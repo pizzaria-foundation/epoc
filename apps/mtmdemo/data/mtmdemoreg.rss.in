@@ -53,11 +53,19 @@ RESOURCE MTM_INFO_FILE
         };
     }
 
-//  SendAs. This MTM cannot send — there is no server component behind the slot — so it
-//  advertises nothing rather than appearing in "Send via…" with nothing behind it.
+//  send_capability = 1, because this MTM does produce outgoing messages: the UI component's
+//  ReplyL writes one into the store for a daemon to carry out.
+//
+//  This was 0, alongside a CanReplyToEntryL of ETrue, and the two could not both be right. The
+//  reply item did not appear in the Messaging application's menu, and this contradiction is the
+//  first candidate — which of the three places this MTM declares "can send" MCE actually reads
+//  is measured by the breadcrumbs in src/mtmuidata.cpp, not assumed here.
+//
+//  The narrower question of whether other applications should offer this MTM in "Send via…" is
+//  answered EFalse, separately, through KUidMtmQuerySendAsMessageSendSupportValue.
 RESOURCE MTM_CAPABILITIES
     {
-    send_capability = 0;
+    send_capability = 1;
     body_capability = 1;
     }
 

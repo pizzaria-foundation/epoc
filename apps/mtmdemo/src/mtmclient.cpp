@@ -27,10 +27,10 @@
  *
  * WHAT IT DELIBERATELY DOES NOT DO
  *
- * Almost everything. `CBaseMtm` has eleven pure virtuals and most of them are meaningless for
- * a service whose messages arrive from a daemon: replying and forwarding belong to the UI
- * layer, addressees are a mail concept, and the MTM-specific function ids are for a UI MTM to
- * dispatch. Each of those leaves with KErrNotSupported, which is what the base class's own
+ * Most of it. `CBaseMtm` has eleven pure virtuals and most of them are meaningless for a
+ * service whose messages arrive from a daemon: forwarding has no meaning without a recipient
+ * to forward to, addressees are a mail concept, and the MTM-specific function ids are for a UI
+ * MTM to dispatch. Each of those leaves with KErrNotSupported, which is what the base class's own
  * documentation prescribes — a Client MTM is allowed to be this thin, and pretending
  * otherwise would be inventing behaviour nothing has asked for yet.
  *
@@ -46,6 +46,7 @@
 #include <msvids.h>
 #include <msvstore.h>
 #include <mtclbase.h>
+#include <txtrich.h>
 #include <mtmdef.h>
 #include <mtmuids.h>
 
@@ -70,7 +71,7 @@
  * which for five steps once is nothing.
  *
  * Remove this once construction is understood; it is diagnostic scaffolding, not a feature. */
-static void Trace(const TDesC& aStep)
+void MtmDemoTrace(const TDesC& aStep)
     {
     RFs fs;
     if (fs.Connect() != KErrNone)
@@ -133,9 +134,9 @@ static void Trace(const TDesC& aStep)
 extern "C" EXPORT_C CBaseMtm* NewMtmClientL(CRegisteredMtmDll& aRegisteredDll,
                                             CMsvSession& aSession)
     {
-    Trace(_L("1 factory entered"));
+    MtmDemoTrace(_L("1 factory entered"));
     CBaseMtm* mtm = CMtmDemoClient::NewL(aRegisteredDll, aSession);
-    Trace(_L("5 factory returning"));
+    MtmDemoTrace(_L("5 factory returning"));
     return mtm;
     }
 
@@ -149,7 +150,7 @@ extern "C" EXPORT_C CBaseMtm* NewMtmClientL(CRegisteredMtmDll& aRegisteredDll,
 extern "C" EXPORT_C TAny* NewMtmServerL(CRegisteredMtmDll& /*aRegisteredDll*/,
                                         TAny* /*aServerEntry*/)
     {
-    Trace(_L("server component asked for — leaving"));
+    MtmDemoTrace(_L("server component asked for — leaving"));
     User::Leave(KErrNotSupported);
     return NULL;
     }
@@ -158,7 +159,7 @@ extern "C" EXPORT_C TAny* NewMtmServerL(CRegisteredMtmDll& /*aRegisteredDll*/,
  * src/mtmui.cpp. */
 extern "C" EXPORT_C CBaseMtmUi* NewMtmUiL(CBaseMtm& aMtm, CRegisteredMtmDll& aRegisteredDll)
     {
-    Trace(_L("ui component asked for"));
+    MtmDemoTrace(_L("ui component asked for"));
     return CMtmDemoUi::NewL(aMtm, aRegisteredDll);
     }
 
@@ -167,19 +168,19 @@ extern "C" EXPORT_C CBaseMtmUi* NewMtmUiL(CBaseMtm& aMtm, CRegisteredMtmDll& aRe
  * src/mtmuidata.cpp. */
 extern "C" EXPORT_C CBaseMtmUiData* NewMtmUiDataL(CRegisteredMtmDll& aRegisteredDll)
     {
-    Trace(_L("ui data component asked for"));
+    MtmDemoTrace(_L("ui data component asked for"));
     return CMtmDemoUiData::NewL(aRegisteredDll);
     }
 
 CMtmDemoClient* CMtmDemoClient::NewL(CRegisteredMtmDll& aRegisteredDll, CMsvSession& aSession)
     {
-    Trace(_L("2 about to allocate"));
+    MtmDemoTrace(_L("2 about to allocate"));
     CMtmDemoClient* self = new (ELeave) CMtmDemoClient(aRegisteredDll, aSession);
-    Trace(_L("3 allocated; base ctor survived"));
+    MtmDemoTrace(_L("3 allocated; base ctor survived"));
     CleanupStack::PushL(self);
     self->ConstructL();
     CleanupStack::Pop(self);
-    Trace(_L("4 ConstructL survived"));
+    MtmDemoTrace(_L("4 ConstructL survived"));
     return self;
     }
 
@@ -209,9 +210,9 @@ void CMtmDemoClient::ConstructL()
      * that was the framework instantiating us through CClientMtmRegistry::NewMtmL — so the
      * crash landed in the one call that made it look as though registration had failed, when
      * registration had in fact just succeeded. */
-    Trace(_L("3a about to SwitchCurrentEntryL(root)"));
+    MtmDemoTrace(_L("3a about to SwitchCurrentEntryL(root)"));
     SwitchCurrentEntryL(KMsvRootIndexEntryId);
-    Trace(_L("3b SwitchCurrentEntryL returned"));
+    MtmDemoTrace(_L("3b SwitchCurrentEntryL returned"));
     }
 
 CMtmDemoClient::~CMtmDemoClient()
@@ -273,12 +274,100 @@ TMsvPartList CMtmDemoClient::Find(const TDesC& /*aTextToFind*/, TMsvPartList /*a
 
 /* ------------------------------------------------------------- not this layer's -- */
 
-CMsvOperation* CMtmDemoClient::ReplyL(TMsvId, TMsvPartList, TRequestStatus&)
+CMsvOperation* CMtmDemoClient::ReplyL(TMsvId aDestination, TMsvPartList aPartlist,
+                                      TRequestStatus& aCompletionStatus)
     {
-    /* Replying is a UI concern: it means creating an entry and opening an editor on it, and
-     * neither belongs in the client MTM. When a UI MTM exists, this is where it will call. */
-    User::Leave(KErrNotSupported);
-    return NULL;
+    /* Create the reply entry, and stop there.
+     *
+     * This split is the framework's, not ours: `CBaseMtmUi::ReplyL`'s own documentation
+     * prescribes *"1. create a new reply entry by calling CBaseMtm::ReplyL(); 2. call EditL()
+     * to allow the user to edit the reply"*. So the entry is made here, where there is no UI
+     * and no assumption about one, and the editing happens in the UI component. A caller with
+     * no screen at all — a daemon answering automatically — gets the useful half by calling
+     * only this.
+     *
+     * What comes back is an entry in preparation and invisible. It becomes a real message when
+     * whoever is going to fill in the body says so; until then it must not appear in the
+     * user's inbox as an empty thing they cannot explain. */
+    const TMsvEntry original = iMsvEntry->Entry();
+    const TMsvId originalId = original.Id();
+    const TMsvId serviceId = original.iServiceId;
+
+    /* The correspondent, copied out before anything moves.
+     *
+     * `TMsvEntry::iDetails` and `iDescription` are `TPtrC` (`msvstd.h`) — they do not own their
+     * text, they point into the buffer of the `CMsvEntry` that produced the entry. Copying the
+     * struct copies the pointer, and the two `SwitchCurrentEntryL` calls below reload that
+     * buffer. So a `reply.iDetails.Set(original.iDetails)` written against the local copy hands
+     * `CreateL` a dangling descriptor.
+     *
+     * That is exactly what the first version of this function did, and it took the Messaging
+     * application down on the first reply. Opening a message survived it because the viewer
+     * never switches context.
+     *
+     * An owned copy, allocated rather than a fixed `TBuf`, because there is no documented cap
+     * on this field and a chat identity is not obliged to be short. */
+    HBufC* details = original.iDetails.AllocLC();
+
+    TMsvEntry reply;
+    reply.iType = KUidMsvMessageEntry;
+    reply.iMtm = Type();
+    reply.iServiceId = serviceId;
+    /* Who the reply goes to. For this MTM the correspondent lives in iDetails — there is no
+     * addressee list, because a chat identity is not a mail recipient (see AddAddresseeL). */
+    reply.iDetails.Set(*details);
+    reply.iDate.HomeTime();
+    reply.SetInPreparation(ETrue);
+    reply.SetVisible(EFalse);
+
+    /* Created under aDestination, which the caller chooses — Drafts while it is being written,
+     * or the outbox for something ready to go. Switching the context there is how CMsvEntry
+     * creates a child, and the context is switched again straight afterwards because the
+     * framework's contract is that it ends up on the reply. */
+    MtmDemoTrace(_L("reply-c1 creating entry"));
+    SwitchCurrentEntryL(aDestination);
+    iMsvEntry->CreateL(reply);
+    SwitchCurrentEntryL(reply.Id());
+    MtmDemoTrace(_L("reply-c2 entry created, context switched"));
+
+    /* The body starts empty, then optionally quotes the original.
+     *
+     * `Body()` is the base class's cache and it belongs to whatever entry was last loaded, so
+     * resetting it is not tidiness — skipping it is how the previous message's text ends up in
+     * a reply. `KMsvMessagePartBody` in aPartlist is the caller asking for the original to be
+     * included, which is the one part of the partlist protocol this MTM honours. */
+    Body().Reset();
+    if (aPartlist & KMsvMessagePartBody)
+        {
+        /* A CMsvEntry of our own on the original, because the context is now the reply and
+         * `Session().GetEntryL` hands over ownership — reading the store off it inline would
+         * leak the entry on every reply. */
+        CMsvEntry* source = Session().GetEntryL(originalId);
+        CleanupStack::PushL(source);
+        CMsvStore* store = source->ReadStoreL();
+        CleanupStack::PushL(store);
+        if (store->HasBodyTextL())
+            store->RestoreBodyTextL(Body());
+        CleanupStack::PopAndDestroy(2, source);   // store, source
+        }
+
+    /* Completed before it is returned: nothing here is asynchronous. The caller still gets a
+     * CMsvOperation because that is the signature, and CMsvCompletedOperation is the
+     * platform's own way to hand back one that has already finished. */
+    /* The details copy has done its job — CreateL took its own copy of the text. */
+    const TMsvId replyId = reply.Id();
+    CleanupStack::PopAndDestroy(details);
+
+    /* Completed before it is returned: nothing here is asynchronous. The caller still gets a
+     * CMsvOperation because that is the signature, and CMsvCompletedOperation is the
+     * platform's own way to hand back one that has already finished. */
+    TPckgBuf<TMsvLocalOperationProgress> progress;
+    progress().iTotalNumberOfEntries = 1;
+    progress().iNumberCompleted = 1;
+    progress().iId = replyId;
+    MtmDemoTrace(_L("reply-c3 returning operation"));
+    return CMsvCompletedOperation::NewL(Session(), Type(), progress,
+                                        serviceId, aCompletionStatus);
     }
 
 CMsvOperation* CMtmDemoClient::ForwardL(TMsvId, TMsvPartList, TRequestStatus&)
@@ -343,9 +432,20 @@ TInt CMtmDemoClient::QueryCapability(TUid aCapability, TInt& aResponse)
             return KErrNone;
 
         case KUidMtmQueryCanSendMsgValue:
-            /* Not yet. Sending needs a Server MTM to carry the message out, and there is
-             * none — so answering yes would put this type in "Send via…" with nothing
-             * behind it. */
+            /* ETrue, matching the UI-data component word for word — see the longer note there.
+             * `ReplyL` above produces an outgoing message, so "cannot send" was a contradiction
+             * with this MTM's own behaviour.
+             *
+             * What this does *not* claim is that this MTM delivers anything. It writes the
+             * message into the store; a daemon outside Nokia's process picks it up. The
+             * distinction lives in the SendAs answer below, which is the question that decides
+             * whether other applications offer us. */
+            aResponse = ETrue;
+            return KErrNone;
+
+        case KUidMtmQuerySendAsMessageSendSupportValue:
+            /* Not for SendAs. Nothing here carries a message out on another application's
+             * behalf, and appearing in "Send via…" would take a Gallery photo and lose it. */
             aResponse = EFalse;
             return KErrNone;
 

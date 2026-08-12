@@ -70,8 +70,30 @@ CMtmDemoUiData* CMtmDemoUiData::NewL(CRegisteredMtmDll& aRegisteredDll)
     }
 
 CMtmDemoUiData::CMtmDemoUiData(CRegisteredMtmDll& aRegisteredDll)
-    : CBaseMtmUiData(aRegisteredDll)
+    : CBaseMtmUiData(aRegisteredDll), iTraced(0)
     {
+    }
+
+/* Record a question the Messaging application asked, the first time it asks it.
+ *
+ * WHY THIS IS HERE AT ALL
+ *
+ * `CanReplyToEntryL` was flipped to ETrue and the reply item did not appear in the menu. That
+ * leaves two very different explanations — MCE never asks this component, or it asks and then
+ * gates the item on something else — and no amount of reading settles which, because MCE is a
+ * closed binary and the SDK documents MTMs only against Symbian's own TechView.
+ *
+ * So the component reports what it is asked. One trip then says whether the answers here are
+ * even consulted, which is the difference between fixing our answers and abandoning this route.
+ *
+ * Diagnostic scaffolding. It comes out once the menu is understood. */
+void CMtmDemoUiData::TraceOnce(TInt aBit, const TDesC& aWhat) const
+    {
+    const TUint32 mask = 1u << aBit;
+    if (iTraced & mask)
+        return;
+    iTraced |= mask;
+    MtmDemoTrace(aWhat);
     }
 
 CMtmDemoUiData::~CMtmDemoUiData()
@@ -160,19 +182,22 @@ TBool CMtmDemoUiData::CanDeleteServiceL(const TMsvEntry& /*aService*/,
     return ETrue;
     }
 
-TBool CMtmDemoUiData::CanReplyToEntryL(const TMsvEntry& /*aContext*/,
+TBool CMtmDemoUiData::CanReplyToEntryL(const TMsvEntry& aContext,
                                        TInt& aReasonResourceId) const
     {
     aReasonResourceId = 0;
-    /* Not yet: replying means opening an editor, and that is a UI MTM. Offering it now would
-     * put a menu item on screen that leaves with KErrNotSupported when tapped. */
-    return EFalse;
+    TraceOnce(0, _L("uid-asked CanReplyToEntryL"));
+    /* ETrue only because `CMtmDemoUi::ReplyL` exists in this same build — the same rule as
+     * CanOpenEntryL below, and the same reason. Only messages: a service entry has nobody to
+     * reply to. */
+    return aContext.iType == KUidMsvMessageEntry;
     }
 
 TBool CMtmDemoUiData::CanForwardEntryL(const TMsvEntry& /*aContext*/,
                                        TInt& aReasonResourceId) const
     {
     aReasonResourceId = 0;
+    TraceOnce(3, _L("uid-asked CanForwardEntryL"));
     return EFalse;
     }
 
@@ -180,6 +205,7 @@ TBool CMtmDemoUiData::CanEditEntryL(const TMsvEntry& /*aContext*/,
                                     TInt& aReasonResourceId) const
     {
     aReasonResourceId = 0;
+    TraceOnce(4, _L("uid-asked CanEditEntryL"));
     return EFalse;
     }
 
@@ -187,6 +213,7 @@ TBool CMtmDemoUiData::CanViewEntryL(const TMsvEntry& aContext,
                                     TInt& aReasonResourceId) const
     {
     aReasonResourceId = 0;
+    TraceOnce(2, _L("uid-asked CanViewEntryL"));
     /* Only messages. Viewing a service entry would open a dialog on an entry that has no body
      * and never will. */
     return aContext.iType == KUidMsvMessageEntry;
@@ -196,6 +223,7 @@ TBool CMtmDemoUiData::CanOpenEntryL(const TMsvEntry& aContext,
                                     TInt& aReasonResourceId) const
     {
     aReasonResourceId = 0;
+    TraceOnce(1, _L("uid-asked CanOpenEntryL"));
     /* ETrue only because the UI component that answers it exists in this same build.
      *
      * These two flags and `CMtmDemoUi::OpenL` have to change together, always. The whole
@@ -265,6 +293,24 @@ TInt CMtmDemoUiData::QueryCapability(TUid aCapability, TInt& aResponse) const
             return KErrNone;
 
         case KUidMtmQueryCanSendMsgValue:
+            /* ETrue, and the previous EFalse was a contradiction rather than a policy.
+             *
+             * `CanReplyToEntryL` above says a user may reply, and a reply is an outgoing
+             * message. An MTM that offers replying and then answers "cannot send" is telling
+             * two different stories to two different callers, and the reply item not appearing
+             * in the Messaging application's menu is what that inconsistency looks like from
+             * outside. Which of the two MCE actually reads is what the trace above measures. */
+            aResponse = ETrue;
+            return KErrNone;
+
+        case KUidMtmQuerySendAsMessageSendSupportValue:
+            /* Separately EFalse, and deliberately: this is the SendAs question — whether other
+             * applications should offer this MTM in "Send via…". They should not. Nothing here
+             * sends; the entry is left in the store for a daemon, and a Gallery item handed to
+             * this MTM would go nowhere with no way for the user to find out. */
+            aResponse = EFalse;
+            return KErrNone;
+
         case KUidMtmQuerySupportAttachmentsValue:
         case KUidMtmQuerySupportSubjectValue:
             aResponse = EFalse;

@@ -78,8 +78,9 @@ and 283 of the 292 libraries asked about load, Open C among them.
     Opening a message natively      done    apps/mtmdemo's UI MTM. Confirmed on an E72: the
                                             native Messaging app opens our message with our
                                             viewer, an Avkon dialog drawn inside its process
-    Replying natively               todo    needs an editor, and the platform's own editor-
-                                            launch mechanism (muiu.dll) has no public header
+    Replying natively               done    apps/mtmdemo's UI MTM. Confirmed on an E72: reply
+                                            from Nokia's menu, an Avkon query dialog, and the
+                                            reply left in the store for a daemon to send
     Native new-message notification blocked MNcnNotification kills the caller; the Avkon
                                             classes have no public header in this SDK
     HTTP                            todo    nothing yet; TCP is there to build it on — but the

@@ -24,9 +24,13 @@
  * with a heading, needing no resource of our own. Avkon is already loaded in that process —
  * it *is* that process — so this costs nothing to reach.
  *
- * That gives a read-only viewer. Replying needs an editor and therefore needs the platform
- * to know which application edits our messages, which is the `KUidMsvMtmQueryEditorUid`
- * query and a separate piece of work.
+ * The same reasoning covers replying, one dialog further along: `CAknTextQueryDialog` asks for
+ * the text and the reply is left in the store for a daemon to send. What that is not is
+ * Nokia's composition screen — it is a query box. Getting the real screen would mean
+ * registering our application as this MTM's editor through `KUidMsvMtmQueryEditorUid`
+ * (`0x10001641`, answered by the *client* component's `QueryCapability` — `smsclnt.h:14` says
+ * so), and whether MCE consults that query for a third party is unmeasured. It is left for a
+ * build of its own, because answering it could pre-empt the paths that now work.
  *
  * THE SAME RULES AS THE UI DATA COMPONENT
  *
@@ -49,7 +53,9 @@
 #include <txtrich.h>
 #include <txtfmlyr.h>
 #include <aknmessagequerydialog.h>
+#include <aknquerydialog.h>
 #include <avkon.rsg>
+#include <mtmdemo.rsg>
 
 #include "mtmdemo.h"
 
@@ -61,6 +67,13 @@
  * visible and survivable; the other is neither. */
 const TInt KMtmDemoMaxViewChars = 4096;
 
+/* And how much the user may type in a reply.
+ *
+ * A stack buffer, so it has to be bounded, and this is a one-line query box rather than a
+ * composition screen — a limit generous for a chat reply and small enough that the descriptor
+ * lives on the stack of a method running inside somebody else's application. */
+const TInt KMtmDemoMaxReplyChars = 256;
+
 CMtmDemoUi* CMtmDemoUi::NewL(CBaseMtm& aBaseMtm, CRegisteredMtmDll& aRegisteredDll)
     {
     CMtmDemoUi* self = new (ELeave) CMtmDemoUi(aBaseMtm, aRegisteredDll);
@@ -71,12 +84,16 @@ CMtmDemoUi* CMtmDemoUi::NewL(CBaseMtm& aBaseMtm, CRegisteredMtmDll& aRegisteredD
     }
 
 CMtmDemoUi::CMtmDemoUi(CBaseMtm& aBaseMtm, CRegisteredMtmDll& aRegisteredDll)
-    : CBaseMtmUi(aBaseMtm, aRegisteredDll)
+    : CBaseMtmUi(aBaseMtm, aRegisteredDll), iResourceOffset(0)
     {
     }
 
 CMtmDemoUi::~CMtmDemoUi()
     {
+    /* Ours to release: the base class released its own copy, not this one. Leaving it loaded
+     * would hold a file open in the Messaging application for as long as it runs. */
+    if (iResourceOffset && iCoeEnv)
+        iCoeEnv->DeleteResourceFile(iResourceOffset);
     }
 
 void CMtmDemoUi::ConstructL()
@@ -85,6 +102,31 @@ void CMtmDemoUi::ConstructL()
      * the same file the UI-data component uses — one file, one thing to install, and neither
      * component has resources of its own beyond existing. */
     CBaseMtmUi::ConstructL();
+
+    /* And load it again, for an offset of our own.
+     *
+     * The base class just loaded this same file and kept the offset private (mtmuibas.h:511),
+     * so an id out of our .rsg has no way to be relocated through it. A second load is the only
+     * route to an offset this component can add to — and it is a second entry in CCoeEnv's
+     * list, not a second copy of the file.
+     *
+     * Guarded on iCoeEnv, because a UI MTM can be instantiated by a process that has no control
+     * environment at all. There is nothing such a caller could do with the dialog, but there is
+     * a difference between it failing to open one and this component faulting on construction. */
+    if (iCoeEnv)
+        iResourceOffset = iCoeEnv->AddResourceFileL(KMtmDemoResourceFile);
+
+    /* The offset itself, reported as a number.
+     *
+     * Measured as 0x421de000 on the E72, which is exactly the base the ids in mtmdemo.rsg
+     * already carry (0x421de002, 0x421de003). That is why nothing adds it: see the note in
+     * ReplyL. Kept because it is the one number that distinguishes a resource file loaded where
+     * its ids expect from one relocated somewhere else, and a future .rss with no NAME would
+     * report something different. */
+    TBuf<64> line;
+    _LIT(KOffset, "ui resource offset 0x%x");
+    line.Format(KOffset, iResourceOffset);
+    MtmDemoTrace(line);
     }
 
 void CMtmDemoUi::GetResourceFileName(TFileName& aFileName) const
@@ -257,11 +299,157 @@ CMsvOperation* CMtmDemoUi::CancelL(TRequestStatus& /*aStatus*/, const CMsvEntryS
     return NULL;
     }
 
-CMsvOperation* CMtmDemoUi::ReplyL(TMsvId /*aDestination*/, TMsvPartList /*aPartlist*/,
-                                  TRequestStatus& /*aCompletionStatus*/)
+/* Reply: ask for the text, and leave a finished message behind.
+ *
+ * The two steps are the framework's — `CBaseMtm::ReplyL` makes the entry, the UI edits it —
+ * and the editing is a `CAknTextQueryDialog`, for the same reason the viewer is a dialog: the
+ * platform's own editor-launch mechanism has no public header, and a UI MTM is already inside
+ * the application that would launch one.
+ *
+ * What this is *not* is Nokia's composition screen. It is a one-line query box, which is
+ * enough to send a chat reply and is not enough to write mail. The alternative — registering
+ * our application as this MTM's editor through `KUidMsvMtmQueryEditorUid` — is a separate
+ * measurement, not an alternative implementation, because whether MCE consults that query for
+ * a third party is unknown and answering it could pre-empt the paths that already work.
+ *
+ * Where the reply goes is aDestination, and this component does not send it. The entry lands
+ * there complete and visible, and whatever is watching the store — a daemon, in a real
+ * service — picks it up. That keeps the sending out of Nokia's process entirely. */
+CMsvOperation* CMtmDemoUi::ReplyL(TMsvId aDestination, TMsvPartList aPartlist,
+                                  TRequestStatus& aCompletionStatus)
     {
-    User::Leave(KErrNotSupported);
-    return NULL;
+    const TMsvEntry original = iBaseMtm.Entry().Entry();
+    const TMsvId serviceId = original.iServiceId;
+
+    /* The prompt text, owned, and copied out before step one moves the context.
+     *
+     * Same trap as in the client component: `iDetails` is a `TPtrC` into the `CMsvEntry`'s
+     * buffer (`msvstd.h`), and `CBaseMtm::ReplyL` switches context twice. Using
+     * `original.iDetails` after that call reads freed memory — which is what the first version
+     * of this method did, and it is why replying killed the Messaging application while opening
+     * a message was fine. */
+    HBufC* details = original.iDetails.AllocLC();
+
+    /* Step one: create the entry — here, with the base class's own API, and **not** by calling
+     * `iBaseMtm.ReplyL`.
+     *
+     * WHY NOT, BECAUSE THE OBVIOUS VERSION FROZE THE MESSAGING APPLICATION
+     *
+     * The framework prescribes calling `CBaseMtm::ReplyL` from here, and the client component
+     * does implement it. But it returns a `CMsvOperation`, and this code has no caller to hand
+     * that operation to — so the first version created one against a throwaway
+     * `TRequestStatus`, deleted it, and waited on the status to balance the signal.
+     *
+     * `CMsvCompletedOperation` is not completed on construction, despite the name. It derives
+     * from `CMsvOperation : CActive` and has `RunL`/`DoCancel` (`msvapi.h`): it signals the
+     * observer on the *next turn of the active scheduler*. So `User::WaitForRequest` on this
+     * thread blocks the very scheduler that has to run for that turn to happen — a deadlock on
+     * the Messaging application's UI thread, which from outside is the application vanishing to
+     * the home screen. The platform's own answer to this is
+     * `CMsvOperationActiveSchedulerWait`, a nested scheduler loop rather than a thread block,
+     * and its documentation in msvapi.h exists precisely because the direct wait is wrong.
+     *
+     * Rather than nest a scheduler inside MCE while it is showing a menu, this creates the
+     * entry directly. Everything it needs is public `CBaseMtm` API — the context and
+     * `CMsvEntry::CreateL` — so there is no operation, no request status, and nothing to wait
+     * for. `CMtmDemoClient::ReplyL` stays for callers with a real status to complete. */
+    MtmDemoTrace(_L("reply-u1 creating the entry"));
+
+    TMsvEntry reply;
+    reply.iType = KUidMsvMessageEntry;
+    reply.iMtm = Type();
+    reply.iServiceId = serviceId;
+    reply.iDetails.Set(*details);
+    reply.iDate.HomeTime();
+    reply.SetInPreparation(ETrue);
+    reply.SetVisible(EFalse);
+
+    iBaseMtm.SwitchCurrentEntryL(aDestination);
+    iBaseMtm.Entry().CreateL(reply);
+    const TMsvId replyId = reply.Id();
+    iBaseMtm.SwitchCurrentEntryL(replyId);
+
+    /* Quoting the original is what aPartlist asks for, and it is skipped here: the body is
+     * written from scratch below, and prefilling a one-line query box with the message being
+     * replied to would leave the user deleting it before they could type. */
+    (void)aPartlist;
+
+    /* Step two: ask for the text, from a resource of our own.
+     *
+     * `RunLD()` — the resource-free path the header documents — was tried and it takes the
+     * Messaging application down: the breadcrumb below ran and the one after the call never
+     * did. So the dialog is built from `R_MTMDEMO_REPLY_QUERY` in data/mtmdemo.rss, reached
+     * through the offset this component loaded for itself in ConstructL, because the base
+     * class's offset for the same file is private. */
+    /* THE ID IS USED AS THE .rsg GIVES IT. No offset added, and that is the whole bug fixed.
+     *
+     * `CAknQueryDialog::RunLD()` — the resource-free path the header documents without
+     * qualification — kills the process. Isolated and measured: the breadcrumb before it was
+     * written, the one after it never was, twice. So a query dialog needs a resource here.
+     *
+     * And `ExecuteLD(R_MTMDEMO_REPLY_QUERY + iResourceOffset)` killed it too, for a different
+     * reason that the offset trace in ConstructL settled: `AddResourceFileL` returned
+     * 0x421de000, and the id rcomp generated is 0x421de003 — the *same base*, already included.
+     * Adding it again asked for 0x843bc003, which is no resource at all.
+     *
+     * So the offset is what the file loaded at, not something to add. The widely-repeated
+     * `R_X + offset` idiom applies to ids generated without a NAME signature; this file has
+     * `NAME MTMD` and its ids carry the base. Reading could not settle which of the two this
+     * was — the returned value could.
+     *
+     * SetPromptL is still absent. It was removed while it was a suspect and this build changes
+     * one thing; the correspondent's name can come back once the dialog is known to open. */
+    TBuf<KMtmDemoMaxReplyChars> text;
+    CAknTextQueryDialog* query = CAknTextQueryDialog::NewL(text);
+    MtmDemoTrace(_L("reply-u2b about to ExecuteLD with the bare id"));
+    const TBool confirmed = query->ExecuteLD(R_MTMDEMO_REPLY_QUERY);
+    MtmDemoTrace(_L("reply-u2c dialog dismissed"));
+
+    if (!confirmed || !text.Length())
+        {
+        /* Cancelled. The entry created a moment ago has to go: leaving it would put an empty
+         * invisible message in the user's Drafts for every reply they thought better of, and
+         * invisible is exactly the state in which they could not find it to delete. */
+        iBaseMtm.SwitchCurrentEntryL(aDestination);
+        iBaseMtm.Entry().DeleteL(replyId);
+        CleanupStack::PopAndDestroy(details);
+        MtmDemoTrace(_L("reply-u4 cancelled, entry deleted"));
+
+        TPckgBuf<TMsvLocalOperationProgress> progress;
+        progress().iId = replyId;
+        progress().iError = KErrCancel;
+        return CMsvCompletedOperation::NewL(Session(), Type(), progress,
+                                           serviceId, aCompletionStatus,
+                                           KErrCancel);
+        }
+
+    /* The body, through the client component's own store path — the same one that reads it
+     * back, so there is one definition of where a body lives rather than two. */
+    iBaseMtm.SwitchCurrentEntryL(replyId);
+    iBaseMtm.Body().Reset();
+    iBaseMtm.Body().InsertL(0, text);
+    iBaseMtm.SaveMessageL();
+
+    /* And now it is a message: visible, no longer in preparation, with the text as its
+     * description so the Messaging application has a line to show in the list. This ChangeL is
+     * what publishes it, and it happens after the body is committed — the other order gives
+     * whatever is watching the store a visible message with nothing in it. */
+    TMsvEntry entry = iBaseMtm.Entry().Entry();
+    entry.iDescription.Set(text);
+    entry.iDate.HomeTime();
+    entry.SetInPreparation(EFalse);
+    entry.SetVisible(ETrue);
+    entry.SetComplete(ETrue);
+    iBaseMtm.Entry().ChangeL(entry);
+    CleanupStack::PopAndDestroy(details);
+    MtmDemoTrace(_L("reply-u5 reply published"));
+
+    TPckgBuf<TMsvLocalOperationProgress> progress;
+    progress().iTotalNumberOfEntries = 1;
+    progress().iNumberCompleted = 1;
+    progress().iId = replyId;
+    return CMsvCompletedOperation::NewL(Session(), Type(), progress,
+                                        serviceId, aCompletionStatus);
     }
 
 CMsvOperation* CMtmDemoUi::ForwardL(TMsvId /*aDestination*/, TMsvPartList /*aPartList*/,

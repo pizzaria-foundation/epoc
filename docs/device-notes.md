@@ -936,6 +936,67 @@ text in one descriptor and a message from a chat service has no natural size lim
 out of memory here kills the user's Messaging application, and truncation is both visible and
 survivable.
 
+### Replying works, and it cost five measurements
+
+A user can reply to a third party's message from Nokia's own Messaging application. The UI
+component creates the entry, asks for the text in an Avkon query dialog, and leaves a finished
+message in the destination folder for a daemon to send. Nothing in the path is a Nokia internal.
+
+Getting there took five device trips, and every one of them ended a guess. They are worth
+listing because four of the five are traps any MTM will hit.
+
+**1. The reply item does not appear if the MTM says it cannot send.** `CanReplyToEntryL`
+returning `ETrue` is not enough. This MTM also declared `send_capability = 0` in its
+registration and answered `KUidMtmQueryCanSendMsgValue` with `EFalse` in both components — and
+a reply *is* an outgoing message, so those were contradictions rather than policies. With them
+corrected the item appeared. The narrower question of whether other applications should offer
+the MTM in "Send via…" is `KUidMtmQuerySendAsMessageSendSupportValue`, answered separately and
+`EFalse`: nothing here carries another application's data out.
+
+**2. MCE does consult a third party's `Can*L`.** Measured, not assumed — the component logs
+`uid-asked CanReplyToEntryL` when the menu is built. This is the fact that makes the native
+menu a real integration point rather than something only Nokia's own MTMs get.
+
+**3. `CMsvCompletedOperation` is not completed on construction.** It derives from
+`CMsvOperation : CActive` and signals the observer in its `RunL`, on the next turn of the
+active scheduler (`msvapi.h`). So the obvious way to call `CBaseMtm::ReplyL` from a UI
+component with nowhere to put the operation —
+
+    TRequestStatus s;
+    CMsvOperation* op = iBaseMtm.ReplyL(dest, parts, s);
+    delete op;
+    User::WaitForRequest(s);        // deadlock
+
+blocks the very thread whose scheduler has to run for that turn to happen. The Messaging
+application freezes and the system takes it down, which from outside is the phone returning to
+the home screen with no panic and no dialog. The platform's answer is
+`CMsvOperationActiveSchedulerWait`, a nested scheduler loop; the answer used here is to create
+the entry directly with `CMsvEntry::CreateL`, so there is no operation and nothing to wait for.
+
+A dialog does run from `ReplyL`, incidentally — proven by running the viewer's own
+known-good `CAknMessageQueryDialog` there as a control before trusting anything else.
+
+**4. `CAknQueryDialog::RunLD()` kills the process.** The header documents it without
+qualification: *"Runs the querydialog and returns the ID of the button used to dismiss it."*
+On this handset the breadcrumb before it is written and the one after it never is. A query
+dialog needs a resource, and `ExecuteLD` is the call.
+
+**5. The resource offset must not be added to the id.** This is the one that took two trips,
+and the number settled it where reading could not. A UI MTM cannot use the offset
+`CBaseMtmUi` already has — the base class keeps it private (`mtmuibas.h:511`) — so the
+component loads the file again itself with `CCoeEnv::AddResourceFileL`. That returns
+**`0x421de000`**, and the ids rcomp generated are `0x421de002` and `0x421de003`: the same base,
+already included, because the file declares `NAME MTMD`. `ExecuteLD(R_X + offset)` therefore
+asked for `0x843bc003`, no resource at all, and killed the application.
+
+The widely repeated `R_X + offset` idiom applies to ids generated *without* a NAME signature.
+Both readings are consistent with every document; only the returned value distinguishes them.
+
+One build-order consequence: the component needs its resource ids at *compile* time, so
+`tools/symbuild` compiles a UI-data component's `.rss` at stage **2p**, ahead of the C++. It
+used to run after the link, where the generated `.rsg` did not exist yet for a clean build.
+The registration resource cannot move — it is generated from the linker's `.def`.
+
 ### What still does not work: the platform's new-message notification
 
 `MNcnNotification::NewMessages` kills the calling process. `ncnnotification.dll` is present,
