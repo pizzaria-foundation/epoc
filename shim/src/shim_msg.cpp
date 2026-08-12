@@ -106,11 +106,16 @@ const TInt KMaxIdsPerEvent = 8;
  *
  * THE ONE WAY THIS CAN KILL THE PROCESS
  *
- * `aArg1` is a `CMsvEntrySelection*` for the four entry events and is something else
- * entirely for the rest — for EMsvServerReady it is not a pointer to anything. So the switch
- * is exhaustive by construction: only the four cases that documented a selection ever read
- * one, every other case pushes an id of 0, and the default touches neither argument. Casting
- * aArg1 unconditionally would be a wild read inside whatever process opened the session.
+ * `aArg1` is a `CMsvEntrySelection*` for the four entry events and is something else entirely
+ * for the rest — for EMsvServerFailedToStart it is a pointer to an error code, for
+ * EMsvMediaChanged a TDriveNumber *value*. So the switch is exhaustive by construction: only
+ * the four cases that document a selection ever read one, and the default touches neither
+ * argument.
+ *
+ * And `aArg2` is never dereferenced, in any case. msvapi.h says the entry events pass the
+ * parent id *as* the argument while the MTM-registry events pass a *pointer* to a UID, and
+ * reading past that distinction is what killed this process three runs in a row. See the note
+ * at the cast.
  *
  * DELIVERY IS OPT-IN
  *
@@ -165,11 +170,22 @@ public:
             }
 
         const CMsvEntrySelection* sel = static_cast<const CMsvEntrySelection*>(aArg1);
-        /* aArg2 is the parent TMsvId for the entry events. Checked for NULL because a
-         * missing parent is a plausible platform answer for a root-level change, and
-         * dereferencing it would cost the process. */
-        const TMsvId parent = aArg2 ? *static_cast<const TMsvId*>(aArg2)
-                                    : KMsvNullIndexEntryId;
+
+        /* aArg2 is CAST, never dereferenced. This line killed the process three runs in a row.
+         *
+         * msvapi.h is precise, and the precision is easy to read past. For the entry events it
+         * says *"aArg2 **is** the TMsvId of the parent entry"*; for EMsvMtmGroupInstalled it
+         * says *"aArg2 **points to** a TUid"*. So for these four the id arrives as the pointer
+         * value itself, and the first version's `*static_cast<const TMsvId*>(aArg2)` read
+         * memory at address 0x1004 — a wild read inside whichever process opened the session,
+         * every single time our own write came back.
+         *
+         * A cast touches no memory, so it cannot fault whichever reading is right. If the
+         * platform ever did pass a pointer, this yields a nonsense id and nothing breaks: an
+         * event is a hint, and every reader re-reads the entry from the store, which is where
+         * the authoritative parent comes from. That is the property that makes this line safe
+         * rather than merely correct. */
+        const TMsvId parent = (TMsvId) (TInt) aArg2;
         const TInt count = sel ? sel->Count() : 0;
         ev.c = (int32_t) parent;
         ev.d = (int32_t) count;

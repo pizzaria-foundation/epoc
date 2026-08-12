@@ -1015,6 +1015,30 @@ One build-order consequence: the component needs its resource ids at *compile* t
 used to run after the link, where the generated `.rsg` did not exist yet for a clean build.
 The registration resource cannot move — it is generated from the linker's `.def`.
 
+### `HandleSessionEventL`: aArg2 is a value, not a pointer
+
+A daemon that observes the message store gets `MMsvSessionObserver::HandleSessionEventL`
+called from `CMsvSession`'s own active object. Reading its arguments wrongly kills the process,
+and `msvapi.h` is precise about them in a way that is easy to read straight past:
+
+    EMsvEntriesCreated:     aArg1 is a CMsvEntrySelection of the new entries.
+                            aArg2 **is** the TMsvId of the parent entry.
+    EMsvMtmGroupInstalled:  aArg2 **points to** a TUid for the new MTM.
+
+*Is* versus *points to*. For the four entry events the parent id arrives as the pointer value
+itself, so `*static_cast<const TMsvId*>(aArg2)` reads memory at address `0x1004`. Measured: the
+probe died at the same line three runs in a row, every time its own write came back — the
+report ended at `2s: 0 events so far` and never reached the next heartbeat.
+
+The fix is to **cast and never dereference**. That touches no memory, so it cannot fault under
+either reading; and if the platform ever did pass a pointer, the result is a nonsense id that
+costs nothing, because an event is a hint and every reader re-reads the entry from the store.
+
+`aArg1` needs the same care in the other direction: it is a selection only for the four entry
+events. For `EMsvServerFailedToStart` it points to an error code and for `EMsvMediaChanged` it
+is a `TDriveNumber` *value*, so the switch must be exhaustive and its default must touch
+neither argument.
+
 ### What still does not work: the platform's new-message notification
 
 `MNcnNotification::NewMessages` kills the calling process. `ncnnotification.dll` is present,
