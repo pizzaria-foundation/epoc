@@ -39,7 +39,7 @@ use symbian::msg::{self, NewMessage};
 use symbian_report::{push_hex, push_i64, Report};
 
 /// `apps/mtmdemo`'s type — the one whose DLL exports a real client factory. Must match
-/// `apps/mtmdemo/inc/mtmdemo.h` and its registration resource.
+/// `MTM_TYPE_UID` in `apps/mtmdemo/app.conf`, which is where the registration resource gets it.
 const MTM_UID: u32 = 0xE0DD_0B01;
 /// Where `symbuild`'s `MTM_RESOURCE` rule installs `apps/mtmdemo`'s registration.
 const REG_PATH: &str = "C:\\resource\\messaging\\mtm\\mtmdemoreg.rsc";

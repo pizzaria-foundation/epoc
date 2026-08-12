@@ -46,6 +46,9 @@ probe-fs = []
 probe-msg = []
 probe-mtm = []
 probe-ncn = []
+# The one resident probe: it watches for Message Server events while the operator replies in
+# the Messaging application, so it lives for a minute rather than a moment.
+probe-msvev = []
 probe-etel = []
 probe-sensors = []
 probe-bt = []

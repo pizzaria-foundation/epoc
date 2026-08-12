@@ -32,6 +32,7 @@ PARTS=(
   "apps/devdump/probes/msg"
   "apps/devdump/probes/mtm"
   "apps/devdump/probes/ncn"
+  "apps/devdump/probes/msvev"
   "apps/devdump"
 )
 

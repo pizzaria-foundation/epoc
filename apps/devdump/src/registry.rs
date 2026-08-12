@@ -75,6 +75,14 @@ pub const PROBES: &[Probe] = &[
     // containment is the one every risky import here gets. Last, so it can cost nothing else.
     p(62, "ncn", "ddncn.exe", 0xE0DD0062, 20_000,
       "the platform's new-message notification (known to crash; contained here)"),
+    // The only probe that waits for a human. It observes Message Server session events while
+    // the operator replies to one of our messages in the Messaging application, which is the
+    // one thing a probe cannot do for itself: session events need a scheduler that idles and a
+    // user doing something in another process. Hence the deadline — the longest here by an
+    // order of magnitude, and the reason it runs after everything else. It exits early once it
+    // has seen a reply, so a successful run does not sit out the window.
+    p(63, "msvev", "ddmsvev.exe", 0xE0DD0063, 120_000,
+      "do session events cross a process boundary, and which folder does MCE reply into?"),
 ];
 
 // NOT IN THE TABLE, AND DELIBERATELY SO
