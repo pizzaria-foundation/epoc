@@ -39,6 +39,12 @@ use symbian_report::{self as report, Report};
 
 use crate::registry::{self, Probe, PROBES};
 
+/// How long to wait for a detached probe's rendezvous before letting it go.
+///
+/// Generous for what it measures — a child signals this once its active scheduler starts — and
+/// nothing to do with how long the probe then runs for. See the note in `launch`.
+const DETACHED_RENDEZVOUS_MS: i32 = 5_000;
+
 /// How a probe ended. Ordered from best to worst so a summary can sort by it.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Outcome {
@@ -58,6 +64,11 @@ pub enum Outcome {
     /// Still alive when its deadline passed. Killed. The elapsed time is recorded next to
     /// it, because "a timeout is a measurement of your deadline, not of the system".
     TimedOut(i32),
+    /// Started, and deliberately not waited for. Its section appears later, on its own.
+    ///
+    /// Not an error and not a success: the launcher genuinely does not know how it went, and
+    /// saying so is better than either guess. See [`crate::registry::Probe::detached`].
+    Detached,
 }
 
 impl Outcome {
@@ -70,6 +81,7 @@ impl Outcome {
             Outcome::NoOutput => "NO OUTPUT",
             Outcome::Refused(_) => "REFUSED",
             Outcome::TimedOut(_) => "TIMED OUT",
+            Outcome::Detached => "detached",
         }
     }
 
@@ -249,7 +261,20 @@ impl Launcher {
             self.finish_probe(fs, i, Outcome::Refused(symbian_sys::SHIM_ERR_ARGUMENT));
             return;
         };
-        match procs.start(&path, pr.deadline_ms) {
+        /* A detached probe is still *waited for once*, briefly, and then let go.
+         *
+         * The wait that had to stop is the polling loop below — the one that sits until the
+         * process exits. The rendezvous is different: it completes as soon as the child's
+         * scheduler is up, and it is the only thing that distinguishes "the loader refused the
+         * image" from "it is running". Giving that up would turn every detached probe into an
+         * unexplained `detached` line, including one that never loaded.
+         *
+         * Zero is not the way to skip it either: `shim_process_start_timeout` answers
+         * KErrArgument for a non-positive timeout, so passing 0 here would have recorded every
+         * detached probe as REFUSED — which is what reading it before shipping caught. */
+        let deadline = if pr.detached { DETACHED_RENDEZVOUS_MS } else { pr.deadline_ms };
+        match procs.start(&path, deadline) {
+            Ok(()) if pr.detached => self.finish_probe(fs, i, Outcome::Detached),
             Ok(()) => self.phase = Phase::Wait { index: i, waited_ms: 0 },
             // The image would not load. This is the case the manifest exists for, and it
             // arrives as a number rather than as silence.
@@ -328,6 +353,9 @@ impl Launcher {
             }
             Outcome::NoOutput => {
                 note.push_str("  (started, then left nothing readable)");
+            }
+            Outcome::Detached => {
+                note.push_str("  (started and left running — read its own section directly; it is not in the merge)");
             }
             Outcome::Pending => {}
         }
@@ -549,8 +577,34 @@ mod tests {
     fn a_clean_run_marks_every_probe_ok() {
         let (l, _) = run(all(Behaviour::Completes { ticks: 2, pass: 5, fail: 0 }));
         for (pr, o) in PROBES.iter().zip(l.outcomes()) {
-            assert_eq!(*o, Outcome::Ok { pass: 5, fail: 0 }, "{}", pr.name);
+            let want = if pr.detached { Outcome::Detached } else { Outcome::Ok { pass: 5, fail: 0 } };
+            assert_eq!(*o, want, "{}", pr.name);
         }
+    }
+
+    /// A detached probe must cost the launcher no time at all. That is the whole point: the
+    /// operator has to be able to leave for another application, and the launcher cannot be
+    /// sitting there — leaving it backgrounds it and the system closes it, which on a handset
+    /// looked like the fleet starting over.
+    #[test]
+    fn a_detached_probe_is_not_waited_for() {
+        let (l, _) = run(all(Behaviour::Hangs));
+        for (pr, o) in PROBES.iter().zip(l.outcomes()) {
+            if pr.detached {
+                assert_eq!(*o, Outcome::Detached, "{} was waited for", pr.name);
+            }
+        }
+    }
+
+    /// And a detached probe that the loader refuses is still a refusal, not a shrug — the
+    /// launcher does know that much, because `start` told it.
+    #[test]
+    fn a_detached_probe_that_will_not_load_is_still_recorded() {
+        let detached_at = PROBES.iter().position(|p| p.detached).expect("none detached");
+        let mut b = all(Behaviour::Completes { ticks: 1, pass: 1, fail: 0 });
+        b[detached_at] = Behaviour::Refused(-1);
+        let (l, _) = run(b);
+        assert_eq!(l.outcomes()[detached_at], Outcome::Refused(-1));
     }
 
     /// The case the whole design is for: an image the loader refuses leaves no file, no
@@ -597,8 +651,13 @@ mod tests {
             }
             other => panic!("expected a timeout, got {other:?}"),
         }
-        for o in &l.outcomes()[1..] {
-            assert!(matches!(o, Outcome::Ok { .. }));
+        for (pr, o) in PROBES.iter().zip(l.outcomes()).skip(1) {
+            let ok = if pr.detached {
+                matches!(o, Outcome::Detached)
+            } else {
+                matches!(o, Outcome::Ok { .. })
+            };
+            assert!(ok, "{}: {o:?}", pr.name);
         }
     }
 
@@ -606,8 +665,13 @@ mod tests {
     #[test]
     fn a_run_where_everything_hangs_still_finishes() {
         let (l, _) = run(all(Behaviour::Hangs));
-        for o in l.outcomes() {
-            assert!(matches!(o, Outcome::TimedOut(_)), "{o:?}");
+        for (pr, o) in PROBES.iter().zip(l.outcomes()) {
+            let ok = if pr.detached {
+                matches!(o, Outcome::Detached)
+            } else {
+                matches!(o, Outcome::TimedOut(_))
+            };
+            assert!(ok, "{}: {o:?}", pr.name);
         }
     }
 

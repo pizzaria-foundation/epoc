@@ -18,7 +18,19 @@ pub struct Probe {
     pub exe: &'static str,
     /// UID3, used to poll liveness. Must match the probe's own `app.conf`.
     pub uid3: u32,
-    /// How long to wait before killing it and recording a timeout.
+    /// Start it and do not wait.
+    ///
+    /// For the one probe whose answer depends on the operator using *another application*.
+    /// The launcher is a GUI app: switching to Messaging backgrounds it, and the system closes
+    /// it — measured, the launcher came back at the start of the fleet. So a probe that needs
+    /// the operator elsewhere cannot be one the launcher is blocked on. It is started, the
+    /// fleet finishes, and its section appears in the dump directory whenever it is done.
+    ///
+    /// The cost is that the merge cannot include it, and the manifest says so rather than
+    /// recording it as NO OUTPUT — which is what waiting zero milliseconds would have looked
+    /// like.
+    pub detached: bool,
+    /// How long to wait before killing it and recording a timeout. Ignored when `detached`.
     ///
     /// Per-probe rather than global because the spread is real: a HAL sweep is
     /// instantaneous, and opening a Message Server session on a handset that is
@@ -37,7 +49,18 @@ const fn p(
     deadline_ms: i32,
     about: &'static str,
 ) -> Probe {
-    Probe { name, order, exe, uid3, deadline_ms, about }
+    Probe { name, order, exe, uid3, deadline_ms, about, detached: false }
+}
+
+/// Like [`p`], but started and not waited for. See [`Probe::detached`].
+const fn detached(
+    order: u8,
+    name: &'static str,
+    exe: &'static str,
+    uid3: u32,
+    about: &'static str,
+) -> Probe {
+    Probe { name, order, exe, uid3, deadline_ms: 0, about, detached: true }
 }
 
 /// Every probe, in the order the launcher runs them.
@@ -75,13 +98,15 @@ pub const PROBES: &[Probe] = &[
     // containment is the one every risky import here gets. Last, so it can cost nothing else.
     p(62, "ncn", "ddncn.exe", 0xE0DD0062, 20_000,
       "the platform's new-message notification (known to crash; contained here)"),
-    // The only probe that waits for a human. It observes Message Server session events while
-    // the operator replies to one of our messages in the Messaging application, which is the
-    // one thing a probe cannot do for itself: session events need a scheduler that idles and a
-    // user doing something in another process. Hence the deadline — the longest here by an
-    // order of magnitude, and the reason it runs after everything else. It exits early once it
-    // has seen a reply, so a successful run does not sit out the window.
-    p(63, "msvev", "ddmsvev.exe", 0xE0DD0063, 120_000,
+    // The only probe that waits for a human, and therefore the only detached one. It observes
+    // Message Server session events while the operator replies to one of our messages in the
+    // Messaging application — which a probe cannot do for itself: session events need a
+    // scheduler that idles and a person using another process.
+    //
+    // Detached because the launcher cannot be the one waiting. Leaving the launcher for
+    // Messaging backgrounds it and the system closes it, so the operator comes back to a fleet
+    // starting over. Started and let go, it outlives the launcher and writes its own section.
+    detached(63, "msvev", "ddmsvev.exe", 0xE0DD0063,
       "do session events cross a process boundary, and which folder does MCE reply into?"),
 ];
 
@@ -196,14 +221,28 @@ mod tests {
         }
     }
 
-    /// A zero or absent deadline is how a hung probe takes the whole run with it.
+    /// A zero or absent deadline is how a hung probe takes the whole run with it — unless the
+    /// probe is detached, where there is nothing to hang: the launcher never waits.
     #[test]
     fn every_probe_has_a_deadline_and_a_description() {
         for pr in PROBES {
-            assert!(pr.deadline_ms > 0, "{} has no deadline", pr.name);
-            assert!(pr.deadline_ms <= 120_000, "{} would stall the run", pr.name);
+            if pr.detached {
+                assert_eq!(pr.deadline_ms, 0, "{} is detached and needs no deadline", pr.name);
+            } else {
+                assert!(pr.deadline_ms > 0, "{} has no deadline", pr.name);
+                assert!(pr.deadline_ms <= 120_000, "{} would stall the run", pr.name);
+            }
             assert!(!pr.about.is_empty(), "{} explains nothing", pr.name);
         }
+    }
+
+    /// Detaching is for the one probe whose answer needs the operator in another application.
+    /// It is not a way to dodge a deadline, so the count is pinned: a second detached probe
+    /// should have to argue for itself here first.
+    #[test]
+    fn only_the_event_probe_is_detached() {
+        let detached: Vec<&str> = PROBES.iter().filter(|p| p.detached).map(|p| p.name).collect();
+        assert_eq!(detached, alloc::vec!["msvev"]);
     }
 
     /// The whole run has to fit in the time somebody will stand there holding the phone.

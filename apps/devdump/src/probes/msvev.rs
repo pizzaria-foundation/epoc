@@ -54,11 +54,14 @@ const MTM_UID: u32 = 0xE0DD_0B01;
 
 /// How long to watch, in seconds.
 ///
-/// Long enough for the operator to leave the launcher, reply in the Messaging application and
-/// come back; short enough that the launcher's own deadline (`registry.rs`) is the outer bound
-/// rather than a surprise. The probe exits early once it has seen a reply published, so a
-/// successful run does not sit out the whole window.
-const WINDOW_SECONDS: i32 = 100;
+/// Generous, because nothing is waiting: this probe is *detached* — the launcher starts it and
+/// finishes the fleet without it, so the operator can take as long as they need to reach the
+/// Messaging application and reply. The first version was 100 seconds on the assumption that
+/// the launcher would be sitting there, and it cannot: leaving the launcher backgrounds it and
+/// the system closes it, which showed up as the fleet starting over.
+///
+/// It exits a second after seeing a reply, so a successful run costs a fraction of this.
+const WINDOW_SECONDS: i32 = 300;
 
 /// The queue of ids to read on the next tick. Bounded because a bulk change can report many,
 /// and reading a hundred entries on one tick is the blocking this design exists to avoid.
