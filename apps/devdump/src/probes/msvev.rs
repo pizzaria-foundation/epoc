@@ -246,7 +246,7 @@ impl Watcher {
                 self.own_id = Some(id);
                 let mut line = String::from("wrote id ");
                 push_hex(&mut line, id as u32, 8);
-                line.push_str(" into drafts");
+                line.push_str(" into drafts — now waiting for the store to report it back");
                 self.report.line(&line);
             }
             Err(e) => {
@@ -263,7 +263,12 @@ impl Watcher {
     /// events" says forty seconds passed with nothing arriving, where the same file ending at
     /// "watching" says only that somebody read it too early.
     fn heartbeat(&mut self) {
-        if self.seconds != 1 && self.seconds % 10 != 0 {
+        /* Every second for the first ten, then every ten.
+         *
+         * The first version wrote at 1s and then not until 10s, and a run pulled in that gap
+         * was unreadable: the file ended just after the self-test write with no way to tell a
+         * process that had died from one nobody had waited for. Nine cheap lines close that. */
+        if self.seconds > 10 && self.seconds % 10 != 0 {
             return;
         }
         let mut line = String::from("  ");
@@ -502,9 +507,27 @@ impl symbian_app::DaemonApp for Watcher {
         self.heartbeat();
         self.read_queued();
 
+        /* The self-test's verdict, early.
+         *
+         * If our own write has not been reported back within this many seconds, the observation
+         * layer is broken and the human half of the test can say nothing — so there is no point
+         * waiting out five minutes for a reply whose event could not arrive either. Ending here
+         * turns a long ambiguous run into a short definite one. */
+        const SELF_TEST_DEADLINE: i32 = 15;
+        if self.own_id.is_some() && !self.own_event_seen && self.seconds == SELF_TEST_DEADLINE {
+            self.report.line("");
+            self.report.line(
+                "our own write went unreported for 15s — not waiting for a reply whose event",
+            );
+            self.report.line("could not arrive either. Ending early; the verdict is below.");
+            self.finish();
+            self.done = true;
+            return;
+        }
+
         /* Exit early on success: a run that got its answer should not make the operator wait
-         * out the window, and the launcher is blocked on this process. One extra second after
-         * the reply, so the events that follow it are recorded too. */
+         * out the window. One extra second after the reply, so the events that follow it are
+         * recorded too. */
         if (self.reply_seen && self.queued.is_empty()) || self.seconds >= WINDOW_SECONDS {
             self.finish();
             self.done = true;
