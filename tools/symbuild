@@ -954,8 +954,11 @@ fi
 #     to bmconv must be relative, hence the cd.
 ICON_MBM=""
 # Generated, not committed: a checked-in .bmp is a binary nobody can review, and
-# the generator is the actual source.
-if [ -f "$APP/data/mkicon.py" ] && [ ! -f "$APP/data/${NAME}_icon.bmp" ]; then
+# the generator is the actual source. Which means it runs on every build, exactly
+# like the MTM icon stage above — guarding it on the .bmp being absent would make
+# the first build the only one that reads mkicon.py, and every edit to the icon
+# after that would be silently ignored in favour of a stale bitmap.
+if [ -f "$APP/data/mkicon.py" ]; then
   python3 "$APP/data/mkicon.py" "$APP/data"
 fi
 if [ -f "$APP/data/${NAME}_icon.bmp" ]; then

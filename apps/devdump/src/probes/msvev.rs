@@ -166,10 +166,48 @@ impl Watcher {
         push_i64(&mut line, WINDOW_SECONDS as i64);
         line.push_str(" seconds");
         self.report.line(&line);
-        self.report.flush(&mut self.fs);
 
-        let _ = symbian::timer_every(1000);
+        /* The clock, and whether it was armed at all.
+         *
+         * A silent `let _ = timer_every(...)` is what made the first run of this probe
+         * unreadable: the report ended at "watching for 100 seconds" with no events and no END,
+         * and "nothing arrived" was indistinguishable from "the clock never ticked" — which is
+         * the same ambiguity that cost two device trips when a UI tick was never called.
+         *
+         * So the arming is a check, and the ticks announce themselves below. */
+        match symbian::timer_every(1000) {
+            Ok(_) => self.report.check("clock armed", true),
+            Err(e) => {
+                self.report.check_note("clock armed", false, &err(e));
+                /* Without a clock nothing will ever read the queue or close the report, so end
+                 * here rather than sit until the launcher kills the process. */
+                self.done = true;
+                return;
+            }
+        }
+        self.report.flush(&mut self.fs);
         self.started = true;
+    }
+
+    /// A line every ten seconds, so a report cut short still says how far it got.
+    ///
+    /// This is the difference between a finding and a shrug: a truncated file showing "40s: 0
+    /// events" says forty seconds passed with nothing arriving, where the same file ending at
+    /// "watching" says only that somebody read it too early.
+    fn heartbeat(&mut self) {
+        if self.seconds != 1 && self.seconds % 10 != 0 {
+            return;
+        }
+        let mut line = String::from("  ");
+        push_i64(&mut line, self.seconds as i64);
+        line.push_str("s: ");
+        push_i64(&mut line, self.events as i64);
+        line.push_str(" events so far");
+        if self.seconds == 1 {
+            line.push_str("  (the clock is ticking)");
+        }
+        self.report.line(&line);
+        self.report.flush(&mut self.fs);
     }
 
     /// One line per event, written before anything is read. The order matters for the same
@@ -371,6 +409,7 @@ impl symbian_app::DaemonApp for Watcher {
         }
 
         self.seconds += 1;
+        self.heartbeat();
         self.read_queued();
 
         /* Exit early on success: a run that got its answer should not make the operator wait
