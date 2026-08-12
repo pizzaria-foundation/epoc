@@ -80,6 +80,15 @@ pub const SHIM_EV_AUDIO_DONE: i32 = 42;
 /// A headless daemon uses this as its stop signal — whoever launched it sets the property,
 /// this arrives.
 pub const SHIM_EV_PROP: i32 = 53;
+/// Something changed in the message store. `a` is one of `SHIM_MSV_EV_*`, `b` the entry id,
+/// `c` its parent folder, `d` how many entries the platform's original selection carried.
+///
+/// **A hint, never data.** By the time this is read the id may be gone and the flags may have
+/// changed again, and the shim delivers at most a handful per notification. A reader re-reads
+/// the entry from the store, which is what makes a dropped ring slot, a restarted process and
+/// an event nobody was listening for all the same recoverable case. Off until
+/// [`shim_msv_observe`].
+pub const SHIM_EV_MSV: i32 = 60;
 pub const SHIM_EV_QUIT: i32 = 90;
 
 /// The Publish & Subscribe key an app publishes its present-efficiency telemetry under, in
@@ -371,12 +380,88 @@ pub const SHIM_NCN_TONE: i32 = 0x02;
 pub const SHIM_NCN_SOFT_NOTE: i32 = 0x04;
 pub const SHIM_NCN_NORMAL: i32 = 0x07;
 
+/// Entry type UIDs, mirrored from `msvstd.hrh`.
+///
+/// `shim_msg.cpp` asserts each against the platform's own constant at compile time. That guard
+/// exists because the first version of these was guessed wrong, and a wrong type UID is
+/// invisible: every `is_message()` answers false and a service silently never recognises one
+/// of its own messages.
+pub const SHIM_MSV_TYPE_ROOT: u32 = 0x1000_0F67;
+pub const SHIM_MSV_TYPE_SERVICE: u32 = 0x1000_0F68;
+pub const SHIM_MSV_TYPE_FOLDER: u32 = 0x1000_0F69;
+pub const SHIM_MSV_TYPE_MESSAGE: u32 = 0x1000_0F6A;
+pub const SHIM_MSV_TYPE_ATTACHMENT: u32 = 0x1000_0F6B;
+
 /// Standard message folders, mirrored from `msvids.h` so Rust need not carry that header.
 pub const SHIM_MSV_ROOT: i32 = 0x1000;
 pub const SHIM_MSV_INBOX: i32 = 0x1002;
 pub const SHIM_MSV_OUTBOX: i32 = 0x1003;
 pub const SHIM_MSV_DRAFTS: i32 = 0x1004;
 pub const SHIM_MSV_SENT: i32 = 0x1005;
+
+/// Entry flags that only the read side reports, continuing the bit space
+/// [`SHIM_MSV_NEW`]..[`SHIM_MSV_VISIBLE`] uses on the write side.
+///
+/// One vocabulary for reading an entry's state and for writing it, deliberately: a caller
+/// cannot pass a read flag to [`shim_msv_set_flags`] and have it mean something else.
+pub const SHIM_MSV_IN_PREPARATION: i32 = 0x10;
+pub const SHIM_MSV_FAILED: i32 = 0x20;
+
+/// One entry of the message store, flattened.
+///
+/// `details_len` and `description_len` are the **full** platform lengths; the arrays hold
+/// the first `min(len, capacity)` units. There is no documented cap on either field, so a
+/// caller that cares must compare — see [`crate::ShimMsvEntry`] users in `symbian::msg`,
+/// which turn the comparison into a `truncated` flag rather than losing it.
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct ShimMsvEntry {
+    pub id: i32,
+    pub parent: i32,
+    pub service_id: i32,
+    pub mtm_uid: u32,
+    /// `KUidMsvMessageEntry` / `...ServiceEntry` / `...FolderEntry` / `...AttachmentEntry`.
+    pub type_uid: u32,
+    /// Seconds since the Unix epoch. The shim converts out of Symbian's year-0 count with
+    /// the same helper the write side converts into, so the two cannot disagree.
+    pub unix_time: i64,
+    pub size: i32,
+    pub flags: i32,
+    pub details_len: i32,
+    pub description_len: i32,
+    pub details: [u16; 64],
+    pub description: [u16; 128],
+}
+
+impl Default for ShimMsvEntry {
+    fn default() -> Self {
+        Self {
+            id: 0,
+            parent: 0,
+            service_id: 0,
+            mtm_uid: 0,
+            type_uid: 0,
+            unix_time: 0,
+            size: 0,
+            flags: 0,
+            details_len: 0,
+            description_len: 0,
+            details: [0; 64],
+            description: [0; 128],
+        }
+    }
+}
+
+/// Carried in `a` of [`SHIM_EV_MSV`]. The four entry kinds put a real id in `b`; the session
+/// and registry ones put 0, because the platform's notification is not about an entry.
+pub const SHIM_MSV_EV_CREATED: i32 = 1;
+pub const SHIM_MSV_EV_CHANGED: i32 = 2;
+pub const SHIM_MSV_EV_DELETED: i32 = 3;
+pub const SHIM_MSV_EV_MOVED: i32 = 4;
+pub const SHIM_MSV_EV_MTM_INSTALLED: i32 = 5;
+pub const SHIM_MSV_EV_MTM_REMOVED: i32 = 6;
+pub const SHIM_MSV_EV_SERVER_READY: i32 = 7;
+pub const SHIM_MSV_EV_SERVER_GONE: i32 = 8;
 
 // ---------------------------------------------------------------- the shim --
 
@@ -608,6 +693,25 @@ extern "C" {
     pub fn shim_msv_delete_entry(handle: i32, id: i32) -> i32;
     /// Delete every service of a type and everything under it. Returns the count removed.
     pub fn shim_msv_delete_services(handle: i32, mtm_uid: u32) -> i32;
+
+    // messaging, the read side (USE_MSG). Adds no import: every call is in msgs.dso already.
+    /// One entry's fields. Zeroes `out` before it tries, so a caller that ignores the error
+    /// reads an empty entry rather than its own stack.
+    pub fn shim_msv_entry(handle: i32, id: i32, out: *mut ShimMsvEntry) -> i32;
+    /// A folder's children, newest first. Writes `min(count, cap)` and reports the full
+    /// count — truncation is a number, not an error, so the retry loop stays in Rust.
+    pub fn shim_msv_children(handle: i32, folder_id: i32, out_ids: *mut i32, cap: i32, out_count: *mut i32) -> i32;
+    /// Service entries of one MTM type. How a service finds the account it made last run
+    /// instead of creating a second one.
+    pub fn shim_msv_services(handle: i32, mtm_uid: u32, out_ids: *mut i32, cap: i32, out_count: *mut i32) -> i32;
+    /// The body as UTF-16. No body text is length 0 and success, not `NOT_FOUND`.
+    pub fn shim_msv_body(handle: i32, id: i32, out: *mut u16, cap: i32, out_len: *mut i32) -> i32;
+    /// Set and clear flags in one `ChangeL`, read-modify-write inside the shim. `set` wins.
+    pub fn shim_msv_set_flags(handle: i32, id: i32, set: i32, clear: i32) -> i32;
+    /// Reparent. Durable state that survives a restart, where a set of ids in a process is not.
+    pub fn shim_msv_move_entry(handle: i32, id: i32, new_parent: i32) -> i32;
+    /// Start or stop delivering session events as [`SHIM_EV_MSV`]. Off by default.
+    pub fn shim_msv_observe(handle: i32, enable: i32) -> i32;
 
     // the new-message notification (USE_NCN) — imports ecom.dso
     /// Raise the platform's own indicator/tone/note for a service. Failure is a value: the
@@ -963,6 +1067,27 @@ mod host_stubs {
         SHIM_ERR_NOT_READY
     }
     pub unsafe fn shim_msv_delete_services(_h: i32, _u: u32) -> i32 {
+        SHIM_ERR_NOT_READY
+    }
+    pub unsafe fn shim_msv_entry(_h: i32, _id: i32, _out: *mut ShimMsvEntry) -> i32 {
+        SHIM_ERR_NOT_READY
+    }
+    pub unsafe fn shim_msv_children(_h: i32, _f: i32, _o: *mut i32, _c: i32, _n: *mut i32) -> i32 {
+        SHIM_ERR_NOT_READY
+    }
+    pub unsafe fn shim_msv_services(_h: i32, _u: u32, _o: *mut i32, _c: i32, _n: *mut i32) -> i32 {
+        SHIM_ERR_NOT_READY
+    }
+    pub unsafe fn shim_msv_body(_h: i32, _id: i32, _o: *mut u16, _c: i32, _l: *mut i32) -> i32 {
+        SHIM_ERR_NOT_READY
+    }
+    pub unsafe fn shim_msv_set_flags(_h: i32, _id: i32, _s: i32, _c: i32) -> i32 {
+        SHIM_ERR_NOT_READY
+    }
+    pub unsafe fn shim_msv_move_entry(_h: i32, _id: i32, _p: i32) -> i32 {
+        SHIM_ERR_NOT_READY
+    }
+    pub unsafe fn shim_msv_observe(_h: i32, _e: i32) -> i32 {
         SHIM_ERR_NOT_READY
     }
     pub unsafe fn shim_ncn_notify(_s: i32, _i: i32) -> i32 {

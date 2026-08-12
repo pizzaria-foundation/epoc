@@ -625,6 +625,14 @@ name = "symbian-keys"
 version = "0.1.0"
 
 [[package]]
+name = "symbian-mtm"
+version = "0.1.0"
+dependencies = [
+ "symbian",
+ "symbian-sys",
+]
+
+[[package]]
 name = "symbian-preview"
 version = "0.1.0"
 dependencies = [

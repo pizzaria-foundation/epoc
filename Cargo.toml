@@ -14,6 +14,7 @@ members = [
     "crates/symbian-preview",
     "crates/symbian-crypto",
     "crates/symbian-report",
+    "crates/symbian-mtm",
     "examples/netprobe",
     "examples/selftest",
     "examples/imgprobe",
@@ -59,6 +60,7 @@ symbian-audio = { path = "crates/symbian-audio" }
 symbian-preview = { path = "crates/symbian-preview" }
 symbian-crypto = { path = "crates/symbian-crypto" }
 symbian-report = { path = "crates/symbian-report" }
+symbian-mtm = { path = "crates/symbian-mtm" }
 devdump = { path = "apps/devdump" }
 opus = { path = "crates/opus" }
 epocadb = { path = "crates/epocadb" }

@@ -1,0 +1,17 @@
+[package]
+name = "symbian-mtm"
+description = "A messaging service inside Nokia's own Messaging application"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+# Deliberately not symbian-app: that crate owns the device entry point and pulls in
+# symbian-ui, symbian-gfx and the font atlases. This one never draws. The integrator's
+# daemon depends on both and forwards three lines; see the module documentation.
+[dependencies]
+symbian = { workspace = true }
+symbian-sys = { workspace = true }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_vendor, values("symbian"))'] }

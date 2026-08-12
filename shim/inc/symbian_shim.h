@@ -103,6 +103,16 @@ enum ShimEventKind {
     /* A subscribed Publish & Subscribe property changed. `a` is the key, `c` the freshly
      * read integer value. From shim_prop; the daemon uses it as its stop signal. */
     SHIM_EV_PROP = 53,
+    /* Something changed in the message store. `a` is one of SHIM_MSV_EV_*, `b` the TMsvId
+     * the event is about, `c` its parent folder, `d` how many entries the platform's
+     * original selection carried — this event being one of them.
+     *
+     * A HINT, NEVER DATA. By the time Rust reads this, the id may already be gone and the
+     * flags may already have changed again. The contract is that a reader re-reads the
+     * entry from the store and re-derives what to do, which is what makes a dropped ring
+     * slot, a restarted daemon and a session event that arrived while nobody was listening
+     * all the same recoverable case. See shim_msv_observe. */
+    SHIM_EV_MSV = 60,
     /* The app should exit; nothing may be queued after it. */
     SHIM_EV_QUIT = 90
 };
@@ -839,6 +849,19 @@ typedef struct ShimMtmInfo {
 
 int32_t shim_msv_mtm_info(int32_t handle, int32_t index, ShimMtmInfo* out);
 
+/* Entry type UIDs, from msvstd.hrh, so Rust need not carry that header.
+ *
+ * shim_msg.cpp asserts each of these against the platform's own constant at compile time.
+ * That guard is not ceremony: the first version of the Rust side guessed these values, and a
+ * wrong type UID makes every `is_message()` answer false — so a service would silently never
+ * recognise one of its own messages, with nothing failing anywhere. A build error is the only
+ * acceptable way for that to show up. */
+#define SHIM_MSV_TYPE_ROOT        0x10000F67
+#define SHIM_MSV_TYPE_SERVICE     0x10000F68
+#define SHIM_MSV_TYPE_FOLDER      0x10000F69
+#define SHIM_MSV_TYPE_MESSAGE     0x10000F6A
+#define SHIM_MSV_TYPE_ATTACHMENT  0x10000F6B
+
 /* Standard folder ids, so Rust need not carry msvids.h. */
 #define SHIM_MSV_ROOT     0x1000
 #define SHIM_MSV_INBOX    0x1002
@@ -915,6 +938,121 @@ int32_t shim_msv_delete_entry(int32_t handle, int32_t id);
  *
  * Returns the number of services removed, or a negative error. */
 int32_t shim_msv_delete_services(int32_t handle, uint32_t mtm_uid);
+
+/* --------------------------------------------------- messaging, the read side --
+ * Still SHIM_USE_MSG, and it adds no import: MoveL, ChildrenWithMtmL, ReadStoreL and
+ * ChangeL all live in msgs.dso, which is already on the link line. So this does not add a
+ * new way for the image to fail to load.
+ *
+ * WHY IT EXISTS
+ *
+ * The write side above is enough to put a message in the user's inbox. It is not enough to
+ * run a service, because the traffic goes both ways: a UI MTM loaded into Nokia's Messaging
+ * application writes the user's reply into the store, and something outside that process has
+ * to notice and carry it out. Until this block existed, a daemon could not see the reply at
+ * all — not its id, not the correspondent, not the text.
+ *
+ * TRUNCATION IS A NUMBER, NOT AN ERROR
+ *
+ * Every call that fills a buffer writes what fits and reports the FULL length, the same
+ * contract as shim_sql_column_text. So the grow-and-retry loop lives on the Rust side, where
+ * a host test can drive it, rather than being a special error code down here that every
+ * caller has to remember to handle. */
+
+/* Entry flags for ShimMsvEntry::flags.
+ *
+ * The first four are SHIM_MSV_NEW..VISIBLE above, reused deliberately: one vocabulary for
+ * reading an entry's state and for writing it, so a caller cannot pass the read flag to the
+ * write call and get something else. These continue the same bit space. */
+#define SHIM_MSV_IN_PREPARATION 0x10
+#define SHIM_MSV_FAILED         0x20
+
+/* One entry, flattened, so Rust need not carry msvstd.h or know that TMsvEntry's text
+ * fields are TPtrC into the CMsvEntry's own buffer.
+ *
+ * `details_len` and `description_len` are the FULL platform lengths; the arrays hold the
+ * first min(len, capacity) units. The sizes are what the platform's own MTMs use for these
+ * fields in practice, not a documented cap — there is none — so a caller that cares must
+ * compare the length against the array size. */
+typedef struct ShimMsvEntry {
+    int32_t  id;
+    int32_t  parent;
+    int32_t  service_id;
+    uint32_t mtm_uid;
+    /* KUidMsvMessageEntryValue / ...ServiceEntry / ...FolderEntry / ...AttachmentEntry. */
+    uint32_t type_uid;
+    /* iDate, converted out of Symbian's year-0 epoch by the same helper the write side
+     * uses — the two must not disagree about what a timestamp means. */
+    int64_t  unix_time;
+    int32_t  size;
+    int32_t  flags;             /* SHIM_MSV_* */
+    int32_t  details_len;       /* full length, may exceed 64 */
+    int32_t  description_len;   /* full length, may exceed 128 */
+    uint16_t details[64];
+    uint16_t description[128];
+} ShimMsvEntry;
+
+int32_t shim_msv_entry(int32_t handle, int32_t id, ShimMsvEntry* out);
+
+/* Children of a folder. Writes min(count, cap) ids and reports the full count, so a caller
+ * that got a short answer can size a second call. */
+int32_t shim_msv_children(int32_t handle, int32_t folder_id,
+                          int32_t* out_ids, int32_t cap, int32_t* out_count);
+
+/* Service entries of one MTM type — CMsvEntry(root)->ChildrenWithMtmL.
+ *
+ * This is how a service finds the account it created on a previous run instead of creating a
+ * second one. shim_msv_delete_services exists to clean up after not having this. */
+int32_t shim_msv_services(int32_t handle, uint32_t mtm_uid,
+                          int32_t* out_ids, int32_t cap, int32_t* out_count);
+
+/* The body text, as UTF-16. Fills what fits, reports the full character count.
+ *
+ * An entry with no body is length 0 and SHIM_OK, not SHIM_ERR_NOT_FOUND: a message without
+ * body text is an ordinary thing — a notification, a placeholder — and making the caller
+ * distinguish "empty" from "missing" would be inventing a difference the store does not
+ * make. */
+int32_t shim_msv_body(int32_t handle, int32_t id,
+                      uint16_t* out, int32_t cap, int32_t* out_len);
+
+/* Set and clear entry flags in one ChangeL. `set` wins where the two collide.
+ *
+ * Read-modify-write inside the shim rather than taking a whole entry from the caller,
+ * because writing back a TMsvEntry that was read a moment ago undoes every field the server
+ * has changed since — which is the same trap the create path documents, seen from the other
+ * side. */
+int32_t shim_msv_set_flags(int32_t handle, int32_t id, int32_t set, int32_t clear);
+
+/* Reparent an entry — CMsvEntry(oldParent)->MoveL(id, newParent).
+ *
+ * How a sent reply leaves the outbox, and therefore also how a service records that it is
+ * done: the parent folder is durable state that survives a restart, where a set of ids held
+ * in a process is not. */
+int32_t shim_msv_move_entry(int32_t handle, int32_t id, int32_t new_parent);
+
+/* Start or stop delivering session events onto the event ring as SHIM_EV_MSV.
+ *
+ * Off by default. A one-shot probe has nothing to do with them, and events pushed to a ring
+ * nobody drains are only a dropped-event count — so this is opt-in rather than a consequence
+ * of opening a session.
+ *
+ * The delivery is bounded: at most a handful of events per platform notification, because a
+ * bulk delete of a hundred entries would otherwise flush the whole ring and take with it the
+ * events that mattered. That bound is safe only because an event is a hint and the reader
+ * re-reads the store; see SHIM_EV_MSV. */
+int32_t shim_msv_observe(int32_t handle, int32_t enable);
+
+/* Carried in `a` of SHIM_EV_MSV. The four entry events carry a real id in `b`; the session
+ * and MTM-registry ones carry 0, because the platform's notification for those is not about
+ * an entry at all. */
+#define SHIM_MSV_EV_CREATED        1   /* EMsvEntriesCreated */
+#define SHIM_MSV_EV_CHANGED        2   /* EMsvEntriesChanged */
+#define SHIM_MSV_EV_DELETED        3   /* EMsvEntriesDeleted */
+#define SHIM_MSV_EV_MOVED          4   /* EMsvEntriesMoved */
+#define SHIM_MSV_EV_MTM_INSTALLED  5   /* EMsvMtmGroupInstalled */
+#define SHIM_MSV_EV_MTM_REMOVED    6   /* EMsvMtmGroupDeInstalled */
+#define SHIM_MSV_EV_SERVER_READY   7   /* EMsvServerReady */
+#define SHIM_MSV_EV_SERVER_GONE    8   /* EMsvServerTerminated, EMsvCloseSession */
 
 /* ------------------------------------------------ the new-message notification --
  * SHIM_USE_NCN. Imports ecom.dso.
