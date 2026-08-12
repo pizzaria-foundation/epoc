@@ -1,0 +1,587 @@
+SYMBIAN OS V9.3
+
+ »
+Symbian OS v9.3 »
+Examples »
+Messaging example code »
+Messaging Text MTM example code »
+TextMTM utilities
+
+TextMTM utilities
+
+In addition to the MTM component DLLs, a number of other programs are
+provided.
+
+Example Code
+
+These files can be found in
+examples/Messaging/TextMTM/txut
+
+The files reproduced here are the main files contained in the examples
+directory. Some extra files may be needed to run the examples, and these will
+be found in the appropriate examples directory
+
+/ TXUT.H
+//
+// Copyright (c) 1999 Symbian Ltd.  All rights reserved.
+//
+
+#if !defined (__TXUT_H__)
+#define __TXUT_H__
+
+#if !defined(__BADESCA_H__)
+#include <badesca.h>
+#endif
+#if !defined(__MSVAPI_H__)
+#include <msvapi.h>
+#endif
+
+// TextMTM UIDs
+LOCAL_D const TInt KUidMsgTypeTextValue = 0x10005247;
+LOCAL_D const TUid KUidMsgTypeText = { KUidMsgTypeTextValue};
+LOCAL_D const TUid theTechnologyTypeUid  = { KUidMsgTypeTextValue};
+
+LOCAL_D const TUid KUidMsvMtmTextServerDLL   ={0x10003C3E};
+LOCAL_D const TUid KUidMsvMtmTextClientDLL   ={0x10003C3F};
+LOCAL_D const TUid KUidMsvMtmTextUiDLL       ={0x10005236};
+LOCAL_D const TUid KUidMsvMtmTextUiDataDLL   ={0x10003C61};
+LOCAL_D const TUid KUidTextMtmVersion1       ={ KUidMsgTypeTextValue};
+
+// Constants
+LOCAL_D const TInt KUidTxtMTMSettingsValue = 0x1000525A;
+LOCAL_D const TUid KUidTxtMTMSettings={KUidTxtMTMSettingsValue};
+LOCAL_D const TInt KMaxTextMessageSize = 0xFFFF;
+
+//
+//  TTxtProgress: Operation progress information
+//
+
+class TTxtProgress
+    {
+public:
+    TInt        iTotalMsgs;
+    TInt        iMsgsProcessed;
+    TInt        iErrorCode; // client side needs to be informed of an error
+    TMsvId      iNewId;   // Used with CreateL, or any copy/move, storing the last moved message id.
+    };
+
+typedef TPckgBuf<TTxtProgress> TTxtProgressBuf;
+
+//
+// TxtUtils: Generic static utility functions
+//
+
+class TxtUtils
+    {
+public:
+    // Build file name for associated entry, given its entry.
+    IMPORT_C static void GetEntryFileNameL(TFileName& aFileName, TMsvEntry& aEntry);
+    };
+
+//
+// TMTMTxtSettings: contains the settings for a service.
+// In pre 9.0 releases, settings are stored in the CMsvStore
+// associated with the service entry.
+//
+// From 9.0, the CMTMTxtSettings class should be used to
+// store/load settings into the central repository.
+
+class CMsvStore;
+class TMTMTxtSettings
+    {
+public:
+    TFileName RootFolder() const;
+    void SetRootFolder(const TDesC& aRootFolder);
+private:
+    TFileName iRootFolder;
+    };
+
+inline void TMTMTxtSettings::SetRootFolder(const TDesC& aRootFolder)
+    {
+    iRootFolder = aRootFolder;
+    }
+
+inline TFileName TMTMTxtSettings::RootFolder() const
+    {
+    return iRootFolder;
+    }
+
+class CRepository;
+
+/** From 9.0, this class is used to
+ store/load settings into the central repository.
+ It also saves/loads a setting to identify a default textmtm service.
+ */
+class CMTMTxtSettings: public CBase
+    {
+public:
+    IMPORT_C static CMTMTxtSettings* NewL();
+    ~CMTMTxtSettings();
+    // load, save, and delete text mtm settings
+    IMPORT_C void LoadSettingsL(TMsvId aServiceId, TMTMTxtSettings& aSettings) const;
+    IMPORT_C void SaveSettingsL(TMsvId aServiceId, const TMTMTxtSettings& aSettings);
+    IMPORT_C void DeleteSettingsL(TMsvId aServiceId);
+    // handle a setting that specifies what the default service is
+    IMPORT_C TMsvId DefaultServiceL() const;
+    IMPORT_C void SetDefaultServiceL(TMsvId aService);
+    IMPORT_C void DeleteDefaultServiceSettingL();
+
+private:
+    void ConstructL();
+    void CreateOrSetL(TUint aKey, const TDesC& aValue);
+    void CreateOrSetL(TUint aKey, TInt aValue);
+    TUint32 FindAccountL(TMsvId aService) const;
+    TUint GetNextAccountSlotL();
+    void DeleteSettingL(TUint32 settingId);
+
+private:
+    CRepository* iRepository;
+    };
+
+#endif
+
+// TXTCMDS.H
+//
+// Copyright (c) 1999 Symbian Ltd.  All rights reserved.
+//
+
+#ifndef _TXTCMDS_H_
+#define _TXTCMDS_H_
+
+#include <MSVSTD.HRH>
+
+//
+//  TTxtCmds: MTM-specific commands
+//
+enum TTxtCmds
+    {
+    KTXTMTMRefresh= KMtmFirstFreeMtmFunctionId + 1
+    };
+
+#endif
+
+// TXUT.CPP
+//
+// Copyright (c) 1999 Symbian Ltd.  All rights reserved.
+//
+
+#include <msvstd.h>      // TMsvEntry
+#include <msvstore.h>    // CMsvStore
+#include <MSVUIDS.H> //KUidMsvFolderEntry
+#include <centralrepository.h>
+
+#include "txut.h"
+
+const TUint32 KNullId = 0x00000000;
+const TUint32 KIncrementAccount = 0x00100000;
+const TInt KMaxAccount = 2048;
+const TUint32 KDefaultServiceId = 0x80000000; // set top bit
+const TUint32 EAccountMask = 0x800FFFFF;
+
+// Key IDs for particular text mtm settings in repository
+enum
+    {
+    EServiceId = 0,
+    EFolderSettingId = 1
+    };
+
+// standard NewL
+EXPORT_C CMTMTxtSettings* CMTMTxtSettings::NewL()
+    {
+    CMTMTxtSettings* self = new (ELeave) CMTMTxtSettings();
+    CleanupStack::PushL(self);
+    self->ConstructL();
+    CleanupStack::Pop();
+    return self;
+    }
+
+// destructor
+CMTMTxtSettings::~CMTMTxtSettings()
+    {
+    delete iRepository;
+    }
+
+// delete all settings for specified service
+EXPORT_C void CMTMTxtSettings::DeleteSettingsL(TMsvId aServiceId)
+    {
+    TUint32 serviceKey = FindAccountL(aServiceId);
+    DeleteSettingL(serviceKey);
+    DeleteSettingL(serviceKey + EFolderSettingId);
+    }
+
+/**
+Loads settings for textmtm service.
+
+@param  aServiceId ID of service entry
+
+@param  aSettings Service settings
+*/
+EXPORT_C void CMTMTxtSettings::LoadSettingsL(TMsvId aServiceId, TMTMTxtSettings& aSettings) const
+    {
+    TUint32 serviceKey = FindAccountL(aServiceId);
+    TFileName rootFolder;
+    User::LeaveIfError(iRepository->Get(serviceKey + EFolderSettingId, rootFolder));
+    aSettings.SetRootFolder(rootFolder);
+    }
+
+/**
+Stores settings for textmtm service.
+
+@param  aServiceId ID of service entry
+
+@param  aSettings Service settings
+*/
+EXPORT_C void CMTMTxtSettings::SaveSettingsL(TMsvId aServiceId, const TMTMTxtSettings& aSettings)
+    {
+    TUint32 accountId = 0;
+    TInt error = 0;
+    // see if account already exists
+    TRAP(error, accountId = FindAccountL(aServiceId));
+    if (error != KErrUnknown) User::LeaveIfError(error);
+    // doesn't already exist, so get id of new account
+    if (error == KErrUnknown) accountId = GetNextAccountSlotL();
+
+    TRAP( error,
+        // Save settings to CenRep
+        CreateOrSetL(accountId, static_cast<TInt>(aServiceId));
+        CreateOrSetL(accountId + EFolderSettingId, aSettings.RootFolder());
+        );
+    if (error != KErrNone)
+        {
+        // saving settings to CenRep failed, so cleanup account and leave
+        DeleteSettingsL(aServiceId);
+        User::Leave(error);
+        }
+    }
+
+/**
+Sets the default textmtm service.
+
+@param  aService The default service
+*/
+EXPORT_C void CMTMTxtSettings::SetDefaultServiceL(TMsvId aService)
+    {
+    CreateOrSetL(KDefaultServiceId, static_cast<TInt>(aService));
+    }
+
+/**
+Gets the default textmtm service.
+
+@return The default service
+
+@leave KErrNotFound If default service setting does not exist.
+*/
+EXPORT_C TMsvId CMTMTxtSettings::DefaultServiceL() const
+    {
+    // Get the service Id from CenRep
+    TInt temp = 0;
+    User::LeaveIfError(iRepository->Get(KDefaultServiceId, temp));
+    return static_cast<TMsvId>(temp);
+    }
+
+/**
+Remove the default service setting.
+*/
+EXPORT_C void CMTMTxtSettings::DeleteDefaultServiceSettingL()
+    {
+    DeleteSettingL(KDefaultServiceId);
+    }
+
+// create cenrep repository in which to store textmtm settings
+void CMTMTxtSettings::ConstructL()
+    {
+    iRepository = CRepository::NewL(KUidMsgTypeText);
+    }
+
+// sets (or creates if it does not already exist) a string key
+void CMTMTxtSettings::CreateOrSetL(TUint aKey, const TDesC& aValue)
+    {
+    TInt error = iRepository->Set(aKey, aValue);
+    if (error == KErrNotFound)
+        {
+        // setting does not exist, so create it
+        User::LeaveIfError(iRepository->Create(aKey, aValue));
+        }
+    else
+        {
+        User::LeaveIfError(error);
+        }
+    }
+
+// sets (or creates if it does not already exist) an integer key
+void CMTMTxtSettings::CreateOrSetL(TUint aKey, TInt aValue)
+    {
+    TInt error = iRepository->Set(aKey, aValue);
+    if (error == KErrNotFound)
+        {
+        // setting does not exist, so create it
+        User::LeaveIfError(iRepository->Create(aKey, aValue));
+        }
+    else
+        {
+        User::LeaveIfError(error);
+        }
+    }
+
+// Leaves with KErrUnknown if account does not exist
+TUint32 CMTMTxtSettings::FindAccountL(TMsvId aService) const
+    {
+    RArray<TUint32> accounts;
+    CleanupClosePushL(accounts);
+    TInt error = iRepository->FindEqL(KNullId, static_cast<TUint32>(EAccountMask), static_cast<TInt>(aService), accounts);
+    if (error == KErrNotFound)
+        {
+        // account does not exist
+        User::Leave(KErrUnknown);
+        }
+    else
+        {
+        User::LeaveIfError(error);
+        }
+
+    if (accounts.Count()>1)
+        {
+        // There should be only one account for the service
+        User::Leave(KErrOverflow);
+        }
+
+    TUint32 account = accounts[0];
+    CleanupStack::PopAndDestroy(&accounts);
+    return account;
+    }
+
+// get a base (account) id to identify all keys for a particular service
+TUint CMTMTxtSettings::GetNextAccountSlotL()
+    {
+    TUint32 accountId = KNullId;
+    TInt serviceId = 0;
+    TInt error = 0;
+    TBool found = EFalse;
+
+    for (TInt count = 0; count < KMaxAccount; ++count)
+        {
+        accountId = accountId + KIncrementAccount;
+        error = iRepository->Get(accountId, serviceId);
+        if (error == KErrNotFound)
+            {
+            found = ETrue;
+            break;
+            }
+        else
+            {
+            User::LeaveIfError(error);
+            }
+        }
+
+    if (found == EFalse)
+        {
+        // No empty slot available
+        User::Leave(KErrNotFound);
+        }
+
+    return accountId;
+    }
+
+// delete a setting, and don't give an error if it doesn't exist
+void CMTMTxtSettings::DeleteSettingL(TUint32 settingId)
+    {
+    TInt error = iRepository->Delete(settingId);
+    if (error != KErrNotFound)
+        {
+        User::LeaveIfError(error);
+        }
+    }
+
+//
+// TxtUtils: Generic static utility functions
+//
+
+EXPORT_C void TxtUtils::GetEntryFileNameL(TFileName& aFileName, TMsvEntry& aEntry)
+// Create absolute file name: default path + aEntry.iDetails + aEntry.iDescription
+    {
+    CMTMTxtSettings* settings = CMTMTxtSettings::NewL();
+    CleanupStack::PushL(settings);
+    TMTMTxtSettings root;
+    settings->LoadSettingsL(aEntry.iServiceId, root);
+    CleanupStack::PopAndDestroy(); //settings
+    aFileName = root.RootFolder();
+    aFileName.Append(aEntry.iDetails);
+    aFileName.Append(aEntry.iDescription);
+    if (aEntry.iType == KUidMsvFolderEntry)
+        aFileName.Append(KPathDelimiter);
+    }
+
+// TXUT.MMP
+//
+// Copyright (c) 2000 Symbian Ltd.  All rights reserved.
+
+target          TXUT.dll
+targettype      dll
+uid      0x1000008d 0x10003C75
+VENDORID 0x70000001
+CAPABILITY   All -TCB
+
+source          txut.cpp txutdll.cpp
+
+userinclude     .
+systeminclude   \Epoc32\include
+
+library         euser.lib estor.lib msgs.lib efsrv.lib
+library         centralrepository.lib
+
+// v2 def files
+
+#if defined(WINS)
+    deffile .\txutWINS.def
+#else
+    deffile .\txutEABI.def
+#endif
+
+nostrictdef
+
+// BLD.INF
+// Component description file
+//
+// Copyright (c) 2000 Symbian Ltd.  All rights reserved.
+
+PRJ_EXPORTS
+txut\txut.h
+10005247.txt z:\private\10202BE9\10005247.txt
+
+PRJ_MMPFILES
+
+txut\Txut.mmp
+txtc\Txtc.mmp
+txti\Txti.mmp
+txts\Txts.mmp
+txtu\Txtu.mmp
+txin\Txin.mmp
+
+// BLD.INF
+// Component description file
+//
+// Copyright (c) 2000 Symbian Ltd.  All rights reserved.
+
+PRJ_EXPORTS
+txut\txut.h
+10005247.txt z:\private\10202BE9\10005247.txt
+
+PRJ_MMPFILES
+
+txut\Txut.mmp
+txtc\Txtc.mmp
+txti\Txti.mmp
+txts\Txts.mmp
+txtu\Txtu.mmp
+txin\Txin.mmp
+
+Common classes: txut
+
+The txut project provides source for a small utilities
+DLL, which holds code that must be shared between the Client and the
+Server-side Text MTM components.
+
+TTxtProgress encapsulates progress information. The
+Server-side MTM records its progress using this class when performing copy and
+move operations. The User Interface MTM can extract information from the class
+for display to the user.
+
+CMTMTxtSettings encapsulates access to the MTM's
+settings as they are stored in the central repository.
+TMTMTxtSetting encapsulates the settings for a single TextMTM
+service. This contains only a single property: the folder to which the service
+is mapped.
+
+TxtUtils provides static utility functions.
+
+MTM installation: txin
+
+Example Code
+
+The example file can be found in examples/Messaging/txin
+
+// txin.cpp
+//
+// Copyright (c) 1999 Symbian Ltd.  All rights reserved.
+//
+
+// includes
+#if !defined(__E32BASE_H__)
+#include <e32base.h>
+#endif
+#if !defined(__E32CONS_H__)
+#include <e32cons.h>
+#endif
+#if !defined(__MSVAPI_H__)
+#include <msvapi.h>
+#endif
+
+LOCAL_D CConsoleBase* console;
+LOCAL_C void consoleUIInstallL();
+LOCAL_C void DoInstallL();
+
+// constants
+#ifdef __WINS__
+_LIT(KMTMDataFullName,"z:\\Resource\\messaging\\mtm\\txtmtm.RSC");
+#else
+_LIT(KMTMDataFullName,"c:\\Resource\\messaging\\mtm\\txtmtm.RSC");
+#endif
+
+// Dummy observer class to absorb Message Server session events
+class TDummyObserver : public MMsvSessionObserver
+    {
+public:
+    void HandleSessionEventL(TMsvSessionEvent /*aEvent*/, TAny* /*aArg1*/, TAny* /*aArg2*/, TAny* /*aArg3*/) {};
+    };
+
+LOCAL_C void DoInstallL()
+// Set up Message Server session and install Text MTM group
+    {
+    TDummyObserver ob;
+    CMsvSession* session = CMsvSession::OpenSyncL(ob);
+    CleanupStack::PushL(session);
+    TInt err=session->DeInstallMtmGroup(KMTMDataFullName);
+    if (err!=KErrNone && err!=KErrNotFound)
+        User::LeaveIfError(err);
+    User::LeaveIfError(session->InstallMtmGroup(KMTMDataFullName));
+
+    CleanupStack::PopAndDestroy(); // session
+    }
+
+LOCAL_C void consoleUIInstallL()
+// Set up simple console UI
+    {
+    _LIT(KTxtTitle,"TextMTM install");
+    _LIT(KFormatFailed,"failed: leave code=%d");
+
+    // Construct and install the active scheduler
+    CActiveScheduler* scheduler = new (ELeave) CActiveScheduler;
+    CleanupStack::PushL(scheduler);
+    CActiveScheduler::Install(scheduler);
+
+    console=Console::NewL(KTxtTitle,TSize(KConsFullScreen,KConsFullScreen));
+    CleanupStack::PushL(console);
+    TRAPD(error,DoInstallL()); // call install function
+    if (error)
+        console->Printf(KFormatFailed, error);
+    else
+    CleanupStack::PopAndDestroy(2); // scheduler, console
+    }
+
+GLDEF_C TInt E32Main()
+    {
+    __UHEAP_MARK;
+    CTrapCleanup* cleanup=CTrapCleanup::New(); // get clean-up stack
+    TRAPD(error,consoleUIInstallL());
+    delete cleanup; // destroy clean-up stack
+    __UHEAP_MARKEND;
+    return error;
+    }
+
+The txin project provides source for a utility application
+that registers the TextMTM with the Message Server.
+
+You can adapt this code for your own MTM projects. Such code would
+typically be run as part of the installation process.
+
+Copyright ©2008  Symbian Software Ltd.

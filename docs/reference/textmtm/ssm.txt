@@ -1,0 +1,1819 @@
+SYMBIAN OS V9.3
+
+ »
+Symbian OS v9.3 »
+Examples »
+Messaging example code »
+Messaging Text MTM example code »
+Server-side MTM implementation
+
+Server-side MTM implementation
+
+Example Code
+
+These files can be found in
+examples/Messaging/TextMTM/txts
+
+The files reproduced here are the main files contained in the examples
+directory. Some extra files may be needed to run the examples, and these will
+be found in the appropriate examples directory.
+
+// TXTMBOX.H
+//
+// Copyright (c) 1999 Symbian Ltd.  All rights reserved.
+//
+
+#ifndef __TXTMBOX_H__
+#define __TXTMBOX_H__
+
+#include <e32base.h>
+#include <F32FILE.H>
+#include <MSVSTD.H>
+#include <MSVENTRY.H>
+#include <E32DEF.H>
+#include "txut.h"
+
+//
+//  CTxtRefreshMBox: refresher class to synchronize real folder and service
+//
+
+class CTxtRefreshMBox : public CBase
+    {
+    public:
+        static CTxtRefreshMBox* NewL(RFs& aFs, TFileName& aRelativePath,
+            TMsvId aCurrentRootEntryId, CMsvServerEntry *aEntry, TMsvId aServiceEntryId,
+            const TMTMTxtSettings& aTxtSettings);
+        ~CTxtRefreshMBox();
+        TBool DoStepL(); // Returns ETrue if finished.
+    private: // Construction
+        CTxtRefreshMBox(RFs& aFs,TFileName& aRelativePath, TMsvId aCurrentRootEntryId,
+            CMsvServerEntry *aEntry, TMsvId aServiceEntryId, const TMTMTxtSettings& aTxtSettings)
+            : iFs(aFs) , iRelativePath(aRelativePath), iCurrentRootEntryId(aCurrentRootEntryId),
+            iEntry(aEntry), iTxtSettings(aTxtSettings), iServiceEntryId(aServiceEntryId)
+            {};
+        void ConstructL();
+    private: // Tools
+        TInt CreateChild(const TDesC& aDescription, const TDesC& aDetails,
+            TUid aMessageType, const TTime& aDate, const TInt aSize);
+        void DeleteEntryL();
+        TMsvId InsertFileL();
+    private:
+        RFs&  iFs;
+        TFileName& iRelativePath;
+        TMsvId  iCurrentRootEntryId;
+        CDir* iFilelist;
+        CMsvServerEntry* iEntry;
+        CMsvEntrySelection* iExistingEntries;
+
+        TInt iCurrentFile; // index for file list
+        TInt iCurrentEntry;    // index for entry list
+        const TMTMTxtSettings& iTxtSettings;
+        TMsvId iServiceEntryId;
+    };
+#endif
+
+// TXTSCPMV.H
+//
+// Copyright (c) 1999 Symbian Ltd.  All rights reserved.
+//
+
+#ifndef _TXTSCPMV_H_
+#define _TXTSCPMV_H_
+
+#if !defined(__MSVSTD_H__)
+#include <msvstd.h>
+#endif
+#if !defined(__MSVENTRY_H__)
+#include <msventry.h>
+#endif
+
+#if !defined(__TXUT_H__)
+#include "txut.h" //for TTxtProgress
+#endif
+
+#define ETxtRetrievingMessage  1
+#define ETxtFinished          0
+
+const TInt KMsgTxtRefreshMailboxPriority = 1;
+
+class CParaFormatLayer;
+class CCharFormatLayer;
+class CMsvServerEntry;
+class CTxtCopyMoveBase;
+
+//
+// CTxtActiveOper: performs an operation on exactly one Msv Entry.
+// Derive from this for the several move/copy/delete operations
+//
+// The methods have a RFs at their disposal, for access to the current
+// folder for the operation in the file system.
+//
+
+class CTxtActiveOper : public CActive
+    {
+public:
+    CTxtActiveOper(RFs& aFs, CMsvServerEntry& aServerEntry);
+    virtual ~CTxtActiveOper();
+    void Start(TMsvId& aSourceId, TMsvId& aDestId, TRequestStatus& aStatus);
+    void SetCurrentCaller(CTxtCopyMoveBase* aCurrentCaller);
+public:
+    virtual CTxtActiveOper* CopyConstructL()=0;
+    // CopiedHeader reports whether messages are copied and entries need to be created.
+    // the destination entry id will then be passed on in the Start method
+    virtual TBool CopiedHeader() const = 0;
+    // DeleteSourceAfterwards specifies whether the source entry needs to be deleted
+    // afterwards. This will then be done automatically also.
+    virtual TBool DeleteSourceAfterwards() const = 0;
+    // MoveIsToService specifies whether the messages that are moved are moved to the service.
+    // Some additional operations need to be done to make the entry a valid entry,
+    // the flag iServiceId has to be set, and the correctness of the iDetails has
+    // to be assured. Also the file name has to be altered if it already exists.
+    virtual TBool MoveIsToService() const = 0;
+protected:
+    // RunL will then do the actual transfer. It should call ReportFinished when the operation
+    // has completed.
+    void RunL();
+    virtual void DoRunL()=0;
+    virtual void DoCancel();
+protected:
+    TRequestStatus*     iReportStatus;
+    CMsvServerEntry&    iServerEntry;
+    RFs                 &iFs;
+    TMsvId              iSourceId;
+    TMsvId              iDestId;
+    CTxtCopyMoveBase*   iCurrentCaller;   // Currently being called from.
+    TFileName iFileName;                 // Current source entry info
+    };
+
+//
+// CTxtCopyMoveBase: defines some base functionality for transferring
+// between the server and the local file system. It needs a CTxtActiveOper
+// class at construction, that will actually copy the body text over asynchronously.
+//
+
+class CTxtCopyMoveBase : public  CActive
+    {
+public:
+    static CTxtCopyMoveBase* NewL(CTxtActiveOper* aActiveOperation, const CMsvEntrySelection& aSource,
+        CMsvServerEntry& aDestination, TMsvId& aServiceEntryId, TParse& aParse);
+    CTxtCopyMoveBase* CopyConstructL(const CMsvEntrySelection& aSource);
+    ~CTxtCopyMoveBase();
+    void Start(TRequestStatus& aStatus);
+    TTxtProgress& Progress();
+protected:
+    CTxtCopyMoveBase(CTxtActiveOper* aActiveOperation, const CMsvEntrySelection& aSource,
+        CMsvServerEntry& aDestination, TMsvId& aServiceEntryId, TParse& aParse);
+    void ConstructL();
+    void DoCancel();
+    void RunL();
+    void DoRunL();
+private:
+    void CheckDeleteSource();
+    void SetupNewEntryL(TMsvId& SourceMsgId, TMsvId& newDestMsvId);
+private:
+    TInt iTxtCopyMoveState;
+    CTxtActiveOper*             iActiveOperation;
+    const CMsvEntrySelection&  iSource;
+    CMsvServerEntry&            iDestination;
+    TMsvId                      iServiceEntryId;
+    TMsvId                      iDestId;
+    TInt                        iMsgCounter;
+    TTxtProgress                iProgress;
+    TRequestStatus*             iReportStatus;
+public:
+    // iServiceDestinationpath is used as a current folder, when transferring to the RFs
+    TParse& iServiceDestinationpath;
+    };
+
+//
+// CTxtActiveOper-derived classes, defining the actual moving around of
+// body texts.
+//
+
+//
+// CTxtCopyToLocalOp, CTxtCopyFromLocalOp, CTxtCopyWithinServiceOp:
+// The copy operations
+//
+
+class CTxtCopyToLocalOp : public CTxtActiveOper
+    {
+public:
+    CTxtActiveOper* CopyConstructL();
+    CTxtCopyToLocalOp(RFs& aFs, CMsvServerEntry& aServerEntry)
+        : CTxtActiveOper(aFs, aServerEntry) {};
+    TBool CopiedHeader() const;
+    virtual TBool DeleteSourceAfterwards() const;
+    TBool MoveIsToService() const;
+protected:
+    void DoRunL();
+private:
+    void DoMessageCopyToLocalL();
+    };
+
+class CTxtCopyFromLocalOp : public CTxtActiveOper
+    {
+public:
+    CTxtActiveOper* CopyConstructL();
+    CTxtCopyFromLocalOp(RFs& aFs, CMsvServerEntry& aServerEntry)
+        : CTxtActiveOper(aFs, aServerEntry) {};
+    TBool CopiedHeader() const;
+    virtual TBool DeleteSourceAfterwards() const;
+    TBool MoveIsToService() const;
+protected:
+    void DoRunL();
+private:
+    void DoMessageCopyFromLocalL(const TMsvEntry& aEntry);
+    };
+
+class CTxtCopyWithinServiceOp : public CTxtActiveOper
+    {
+public:
+    CTxtActiveOper* CopyConstructL();
+    CTxtCopyWithinServiceOp(RFs& aFs, CMsvServerEntry& aServerEntry)
+        : CTxtActiveOper(aFs, aServerEntry) {};
+    TBool CopiedHeader() const;
+    virtual TBool DeleteSourceAfterwards() const;
+    TBool MoveIsToService() const ;
+protected:
+    void DoRunL();
+private:
+    void DoMessageCopyWithinServiceL();
+    };
+
+//
+// CTxtMoveToLocalOp, CTxtMoveFromLocalOp, CTxtMoveWithinServiceOp:
+// The move operations: these are only a special case of copying,
+// where the original needs to be deleted.
+//
+
+class CTxtMoveToLocalOp : public CTxtCopyToLocalOp
+    {
+public:
+    CTxtActiveOper* CopyConstructL();
+    CTxtMoveToLocalOp(RFs& aFs, CMsvServerEntry& aServerEntry)
+        : CTxtCopyToLocalOp(aFs, aServerEntry) {};
+    TBool DeleteSourceAfterwards() const;
+    };
+
+class CTxtMoveFromLocalOp : public CTxtCopyFromLocalOp
+    {
+public:
+    CTxtActiveOper* CopyConstructL();
+    CTxtMoveFromLocalOp(RFs& aFs, CMsvServerEntry& aServerEntry)
+        : CTxtCopyFromLocalOp(aFs, aServerEntry) {};
+    TBool DeleteSourceAfterwards() const;
+    };
+
+class CTxtMoveWithinServiceOp : public CTxtCopyWithinServiceOp
+    {
+public:
+    CTxtActiveOper* CopyConstructL();
+    CTxtMoveWithinServiceOp(RFs& aFs, CMsvServerEntry& aServerEntry)
+        : CTxtCopyWithinServiceOp(aFs, aServerEntry) {};
+    TBool DeleteSourceAfterwards() const;
+    };
+
+//
+// CTxtDeleteOp: Delete operation
+//
+
+class CTxtDeleteOp : public CTxtActiveOper
+    {
+public:
+    CTxtActiveOper* CopyConstructL();
+    CTxtDeleteOp(RFs& aFs, CMsvServerEntry& aServerEntry)
+        : CTxtActiveOper(aFs, aServerEntry) {};
+    TBool CopiedHeader() const;
+    TBool DeleteSourceAfterwards() const;
+    TBool MoveIsToService() const;
+protected:
+    void DoRunL();
+    };
+
+inline void CTxtActiveOper::SetCurrentCaller(CTxtCopyMoveBase* aCurrentCaller)
+    {
+    iCurrentCaller = aCurrentCaller;
+    }
+
+#endif
+
+//
+// Copyright (c) 1999 Symbian Ltd.  All rights reserved.
+//
+
+#ifndef __TXTSERV_H__
+#define __TXTSERV_H__
+
+#include <mtsr.h>
+#include <MSVSTORE.H>
+#include <MSVUIDS.H>
+#include <MSVIDS.H>
+
+#include "TXTSPAN.H"
+#include "txut.h"
+
+//
+//  ETxtOperations: The operations the mtm can be in (iCurrentOperation)
+//
+enum ETxtOperations
+    {
+    ETxtOpIdle,
+    ETxtOpCopyMoveDel
+    };
+
+class CTxtCopyMoveBase;
+class CTxtActiveOper;
+
+//
+//  CTextServerMtm: The Server-side MTM implementation
+//
+class CTextServerMtm : public CBaseServerMtm
+    {
+public:
+    // Constructor, initialisation, and destructor
+    IMPORT_C static CTextServerMtm* NewL(CRegisteredMtmDll& aRegisteredMtmDll, CMsvServerEntry* aInitialEntry);
+    ~CTextServerMtm();
+    void SetInitialEntry(CMsvServerEntry* aEntry);
+
+    // Copy and move
+    void CopyToLocalL(const CMsvEntrySelection& aSelection,TMsvId aDestination, TRequestStatus& aStatus);
+    void CopyFromLocalL(const CMsvEntrySelection& aSelection,TMsvId aDestination, TRequestStatus& aStatus);
+    void CopyWithinServiceL(const CMsvEntrySelection& aSelection,TMsvId aDestination, TRequestStatus& aStatus);
+    void MoveToLocalL(const CMsvEntrySelection& aSelection,TMsvId aDestination, TRequestStatus& aStatus);
+    void MoveFromLocalL(const CMsvEntrySelection& aSelection,TMsvId aDestination, TRequestStatus& aStatus);
+    void MoveWithinServiceL(const CMsvEntrySelection& aSelection,TMsvId aDestination, TRequestStatus& aStatus);
+
+    // Create, change, delete
+    void DeleteAllL(const CMsvEntrySelection& aSelection, TRequestStatus& aStatus);
+    void CreateL(TMsvEntry aNewEntry, TRequestStatus& aStatus);
+    void ChangeL(TMsvEntry aNewEntry, TRequestStatus& aStatus);
+
+    // Command and progress
+    void StartCommandL(CMsvEntrySelection& aSelection, TInt aCommand,
+        const TDesC8& aParameter, TRequestStatus& aStatus);
+    TBool CommandExpected();
+    const TDesC8& Progress();
+
+protected:
+    // Active object completion
+    void DoCancel();
+    void DoRunL();
+    void DoComplete(TInt aError);
+
+private:
+    CTextServerMtm(CRegisteredMtmDll& aRegisteredMtmDll, CMsvServerEntry* aInitialEntry);
+    void ConstructL();
+    void DoOperationL(CTxtActiveOper* aActiveOperation, const CMsvEntrySelection& aSelection,
+        TMsvId aDestination, TRequestStatus& aStatus);
+    void ConnectToServiceL();
+    void DoRefreshL();
+
+    // General asserts
+    void AssertConnected();
+    void AssertHasServerEntry();
+    void AssertIdle();
+
+private:
+    TTxtProgressBuf iProgressBuf;
+    TInt iCurrentOperation;
+    CMsvServerEntry* iEntry;
+    TRequestStatus* iReportStatus;
+    RFs  iFs;
+    TMsvId  iServiceEntryId;
+    TMTMTxtSettings* iTxtSettings;
+
+    CTxtCopyMoveBase* iTxtCopyMove; // Needed for copy, move, delete ops
+    TParse iParse; // Needed for the move to remote operations, to keep track of the current folder.
+    };
+
+// Assert functions
+inline void CTextServerMtm::AssertConnected()
+    {
+    __ASSERT_DEBUG(iServiceEntryId != KMsvNullIndexEntryId, gPanic(ETxtsInvalidService));
+    __ASSERT_DEBUG(iTxtSettings != NULL, gPanic(ETxtsInvalidService));
+    }
+
+inline void CTextServerMtm::AssertHasServerEntry()
+    {
+    __ASSERT_DEBUG(iEntry != NULL, gPanic(ETxtsInvalidService));
+    }
+
+inline void CTextServerMtm::AssertIdle()
+    {
+    __ASSERT_DEBUG(iCurrentOperation==ETxtOpIdle,gPanic(ETxtsAlreadyBusy));
+    }
+
+#endif
+
+// TXTSPAN.H
+//
+// Copyright (c) 1999 Symbian Ltd.  All rights reserved.
+//
+
+#if !defined(__TXTSPAN_H__)
+#define __TXTSPAN_H__
+
+#if !defined(__E32BASE_H__)
+#include <e32base.h>
+#endif
+
+//
+//  TTxtsPanic: MTM panics
+//
+enum TTxtsPanic
+    {
+    ETxtsNoBodyText,
+    ETxtsInvalidFileName,
+    ETxtsInvalidService,
+    ETxtsStrayRequest,
+    ETxtsInvalidNullOperation,
+    ETxtsInvalidDestination,
+    ETxtsAlreadyBusy,
+    ETxtsInvalidChangeDetails,
+    ETxtsInvalidEntryIndex,
+    };
+
+GLREF_C void gPanic(TTxtsPanic aPanic);
+
+#endif
+
+// TXTMBOX.CPP
+//
+// Copyright (c) 1999 Symbian Ltd.  All rights reserved.
+//
+
+#if !defined(__TXTSPAN_H__)
+#include "TXTSPAN.H"
+#endif
+
+#if !defined(__MSVUIDS_H__)
+#include <MSVUIDS.H>
+#endif
+
+#if !defined(__MSVIDS_H__)
+#include <MSVIDS.H>
+#endif
+
+#include "txtmbox.h"
+
+//
+//  CTxtRefreshMBox: refresher class to synchronise real file system and service
+//
+
+CTxtRefreshMBox* CTxtRefreshMBox::NewL(RFs& aFs, TFileName& aRelativePath, TMsvId aCurrentRootEntryId,
+                                       CMsvServerEntry *aEntry, TMsvId aServiceEntryId,
+                                       const TMTMTxtSettings& aTxtSettings)
+//
+//  1. sort files and entries by description.
+//
+    {
+    CTxtRefreshMBox* self = new (ELeave)CTxtRefreshMBox(aFs, aRelativePath,
+        aCurrentRootEntryId, aEntry, aServiceEntryId, aTxtSettings);
+    CleanupStack::PushL(self);
+    self->ConstructL();
+    CleanupStack::Pop(); // self
+    return self;
+    }
+
+void CTxtRefreshMBox::ConstructL()
+    {
+    // Find absolute path of folder to refresh
+    TFileName fullPath = iTxtSettings.RootFolder();
+    fullPath.Append(iRelativePath);
+
+    // Get directory list
+    User::LeaveIfError(iFs.GetDir(fullPath, KEntryAttDir | KEntryAttNormal,ESortByName
+        | EDirsAnyOrder | EAscending, iFilelist));
+
+    // Get sorted list of current entries
+    iExistingEntries = new (ELeave) CMsvEntrySelection;
+    TMsvSelectionOrdering order(KMsvNoGrouping, EMsvSortByDescription);
+    User::LeaveIfError(iEntry->SetEntry(iCurrentRootEntryId));
+    iEntry->SetSort( order );
+    iEntry->GetChildren(*iExistingEntries);
+
+    iCurrentFile  = 0;
+    iCurrentEntry = 0;
+    }
+
+CTxtRefreshMBox::~CTxtRefreshMBox()
+    {
+    delete iExistingEntries;
+    delete iFilelist;
+    }
+
+void CTxtRefreshMBox::DeleteEntryL()
+// Delete current entry
+    {
+    __ASSERT_DEBUG(iCurrentEntry < iExistingEntries->Count(), gPanic(ETxtsInvalidEntryIndex));
+
+    User::LeaveIfError(iEntry->SetEntry(iCurrentRootEntryId));
+    iEntry->DeleteEntry((*iExistingEntries)[iCurrentEntry]); // deletes recursively
+    }
+
+TInt CTxtRefreshMBox::CreateChild(const TDesC& aDescription, const TDesC& aDetails, TUid aMessageType,
+                                  const TTime& aDate, const TInt aSize)
+//
+// Create a child. return its Id.
+//
+    {
+    TMsvEntry newChildEntry;
+    newChildEntry.iType= aMessageType;
+    newChildEntry.iMtm = KUidMsgTypeText;
+    newChildEntry.iDescription.Set(aDescription);
+    newChildEntry.iDetails.Set(aDetails);
+    newChildEntry.iServiceId = iServiceEntryId;
+    newChildEntry.iSize = aSize;
+    newChildEntry.iDate=aDate;
+    iEntry->CreateEntry(newChildEntry);
+    return newChildEntry.Id();
+    }
+
+TMsvId CTxtRefreshMBox::InsertFileL()
+// Insert file in entries list
+//
+// Return the new id if this is a folder entry, or KMsvNullIndexEntryId if it isn't
+//
+    {
+    __ASSERT_DEBUG(iCurrentFile < iFilelist->Count(), gPanic(ETxtsInvalidEntryIndex));
+    User::LeaveIfError(iEntry->SetEntry( iCurrentRootEntryId ));
+    TEntry fileEntry = (*iFilelist)[iCurrentFile];
+    TTime date;
+    TInt size;
+    if (fileEntry.IsDir())
+        {
+        date.HomeTime();
+        size=0;
+        return CreateChild(fileEntry.iName, fileEntry.iName, KUidMsvFolderEntry, date, size);
+        }
+    else
+        {
+        TFileName filename = iTxtSettings.RootFolder();
+        filename.Append(iRelativePath);
+        filename.Append(fileEntry.iName);
+        RFile file;
+        User::LeaveIfError(file.Open(iFs,filename,EFileRead));
+
+        file.Modified(date);
+        file.Size(size);
+        file.Close();
+        CreateChild(fileEntry.iName, iRelativePath, KUidMsvMessageEntry, date, size);
+
+        return KMsvNullIndexEntryId;
+        }
+    }
+
+TBool CTxtRefreshMBox::DoStepL()
+// Main method
+//
+//  2. walk over the list:
+//  3.   if file name smaller than that in current pos in list:
+//  4.     if file doesn't exist in list, insert it in list, and move to next file.
+//  5.   else if file equals description
+//  6.     skip both
+//  7.   else delete TMsvEntry on the other side, and go to next in list.
+//  =
+//  a. at the end of either list: if the file list was finished, delete all in the entry list from
+//     current position. if entry list was finished, insert all files starting at current.
+//  b. when skipping a entry, and the entry is a folder, do the folder also.
+//
+    {
+    // If both file list and entry list are done, task is done.
+    TInt nrFiles = iFilelist->Count();
+    TInt existingEntries = iExistingEntries->Count();
+    if (iCurrentFile  == nrFiles && iCurrentEntry == existingEntries)
+        return ETrue;
+
+    TMsvId folderId = KMsvNullIndexEntryId;
+
+    // End of the file list: delete all entries following.
+    if (iCurrentFile == nrFiles)
+        {
+        // Delete current entry.
+        DeleteEntryL();
+        // Step to next entry.
+        iCurrentEntry++;
+        }
+    // End of entries list. Append current file to end of list.
+    else if (iCurrentEntry == existingEntries)
+        {
+        // Insert file in entries list.
+        // if file is folder, do the folder recursively
+        folderId = InsertFileL();
+        // step to next file
+        iCurrentFile++;
+        }
+    else
+        {
+        // Continue walking
+        User::LeaveIfError(iEntry->SetEntry( (*iExistingEntries)[iCurrentEntry] ));
+
+        TInt compare = (*iFilelist)[iCurrentFile].iName.CompareF(iEntry->Entry().iDescription);
+
+        // If current file name smaller than name of current entry, then the file doesn't yet
+        // exist in the list, and needs to be added.
+        if ( compare < 0 )
+            {
+            // Insert file in entries list.
+            // if file is folder, do the folder recursively
+            folderId = InsertFileL();
+            // step to next file
+            iCurrentFile++;
+            }
+        // Files are equal. Both should be the same.
+        else if (compare == 0)
+            {
+            // if file is folder, do the folder recursively
+            if (iEntry->Entry().iType == KUidMsvFolderEntry)
+                folderId = (*iExistingEntries)[iCurrentEntry];
+            // Skip both file and entry
+            iCurrentFile++;
+            iCurrentEntry++;
+            }
+        // File name is greater than name of current entry, so the current entry
+        // shouldn't be there.
+        else
+            {
+            // Delete entry.
+            DeleteEntryL();
+            // Step to next entry.
+            iCurrentEntry++;
+            }
+        }
+
+    // If just passing folder, do the folder recursively.
+    if (folderId != KMsvNullIndexEntryId)
+        {
+        User::LeaveIfError(iEntry->SetEntry(folderId));
+
+        // Set absolute name
+        TFileName subDir = iRelativePath;
+        subDir.Append(iEntry->Entry().iDescription);
+        subDir.Append(KPathDelimiter);
+
+        CTxtRefreshMBox *folderSynchroniser = CTxtRefreshMBox::NewL(iFs, subDir, folderId, iEntry, iServiceEntryId, iTxtSettings);
+        CleanupStack::PushL(folderSynchroniser);
+        while (!folderSynchroniser->DoStepL()) ;
+        CleanupStack::PopAndDestroy(); //folderSynchroniser
+        }
+
+    return EFalse;
+    }
+
+// TXTSCPMV.CPP
+//
+// Copyright (c) 1999 Symbian Ltd.  All rights reserved.
+//
+
+#if !defined(__E32STD_H__)
+#include <e32std.h>
+#endif
+
+#if !defined(__TXTETEXT_H__)
+#include <txtetext.h>
+#endif
+
+#if !defined(__TXTRICH_H__)
+#include <txtrich.h>
+#endif
+
+#if !defined(__APPARC_H__)
+#include <apparc.h>
+#endif
+
+#if !defined(__MSVUIDS_H__)
+#include <MSVUIDS.H>
+#endif
+
+#if !defined(__MSVIDS_H__)
+#include <MSVIDS.H>
+#endif
+
+#include "txtserv.h"
+#include "txtscpmv.h"
+#include "txtspan.h"
+
+//
+// CTxtActiveOper: base class for move, copy and delete operations
+//
+
+CTxtActiveOper::CTxtActiveOper(RFs& aFs, CMsvServerEntry& aServerEntry)
+    : CActive(0), iServerEntry(aServerEntry), iFs(aFs)
+    {
+    CActiveScheduler::Add(this);
+    iFs.Connect();
+    }
+
+CTxtActiveOper::~CTxtActiveOper()
+    {
+    Cancel();
+    }
+
+void CTxtActiveOper::Start(TMsvId& aSourceId, TMsvId& aDestId, TRequestStatus& aStatus)
+//
+// Start asynchronous transfer.
+//
+    {
+    iSourceId = aSourceId;
+    iDestId   = aDestId;
+
+    iStatus = KRequestPending;
+    iReportStatus = &aStatus;
+    SetActive();
+    aStatus = KRequestPending;
+    TRequestStatus *sP=&iStatus;
+    User::RequestComplete(sP, KErrNone);
+    }
+
+void CTxtActiveOper::DoCancel()
+    {
+    }
+
+void CTxtActiveOper::RunL()
+//
+// Default operation: do nothing
+//
+    {
+    TRAPD(errorCode, DoRunL());
+    // Within this class, a leave is an external (service) error
+    // This basically means the DoRunL implementation is not allowed to leave with an error
+    // after calling User::RequestComplete
+    if (errorCode)
+        {
+        iCurrentCaller->Progress().iErrorCode = errorCode;
+        User::RequestComplete(iReportStatus, KErrNone);
+        }
+    }
+
+//
+// CTxtCopyMoveBase: walks over all the items in aSource, and starts aActiveOperation
+// for each one of them, waiting for completion.
+//
+
+CTxtCopyMoveBase* CTxtCopyMoveBase::NewL(CTxtActiveOper* aActiveOperation, const CMsvEntrySelection& aSource,
+                                     CMsvServerEntry& aDestination, TMsvId& aServiceEntryId, TParse& aParse)
+    {
+    CTxtCopyMoveBase* self = new (ELeave) CTxtCopyMoveBase(aActiveOperation,aSource,
+        aDestination, aServiceEntryId, aParse);
+    CleanupStack::PushL(self);
+    self->ConstructL();
+    CleanupStack::Pop();
+    return self;
+    }
+
+CTxtCopyMoveBase* CTxtCopyMoveBase::CopyConstructL(const CMsvEntrySelection& aSource)
+    {
+    CTxtActiveOper* newActive = iActiveOperation->CopyConstructL();
+    return NewL(newActive, aSource, iDestination, iServiceEntryId, iServiceDestinationpath);
+    }
+
+CTxtCopyMoveBase::CTxtCopyMoveBase(CTxtActiveOper* aActiveOperation, const CMsvEntrySelection& aSource,
+                                   CMsvServerEntry& aDestination, TMsvId& aServiceEntryId, TParse& aParse)
+    : CActive( KMsgTxtRefreshMailboxPriority ),
+    iActiveOperation(aActiveOperation), iSource(aSource), iDestination(aDestination),
+    iServiceEntryId(aServiceEntryId), iServiceDestinationpath(aParse)
+    {
+    }
+
+void CTxtCopyMoveBase::ConstructL()
+    {
+    iDestId = iDestination.Entry().Id();
+    iActiveOperation->SetCurrentCaller(this);
+    if (iActiveOperation->MoveIsToService())
+        {
+        __ASSERT_ALWAYS(iDestination.Entry().iServiceId == iServiceEntryId, gPanic(ETxtsInvalidService));
+        }
+    CActiveScheduler::Add(this);      // Add CTxtCopyMoveBase to scheduler's queue
+    }
+
+CTxtCopyMoveBase::~CTxtCopyMoveBase()
+    {
+    Cancel();
+    delete iActiveOperation;
+    iActiveOperation = NULL;
+    }
+
+void CTxtCopyMoveBase::DoCancel()
+//
+// Cancel any current operation
+//
+    {
+    delete iActiveOperation;
+    iActiveOperation = NULL;
+    iTxtCopyMoveState =    ETxtFinished;
+    }
+
+void CTxtCopyMoveBase::Start(TRequestStatus& aStatus)
+//
+// Start me up
+//
+    {
+    iReportStatus = &aStatus;
+
+    iMsgCounter = -1;
+    // set up progress object
+    iProgress.iTotalMsgs=iSource.Count();
+    iProgress.iMsgsProcessed=0;
+    iProgress.iErrorCode=KErrNone;
+
+    if(iSource.Count())
+        {
+        iTxtCopyMoveState=ETxtRetrievingMessage;
+        }
+    else
+        {
+        iTxtCopyMoveState=ETxtFinished;
+        }
+    aStatus = KRequestPending;
+    SetActive();
+    TRequestStatus *sP=&iStatus;
+    User::RequestComplete(sP, KErrNone);
+    }
+
+void CTxtCopyMoveBase::RunL()
+    {
+    TRAPD(errorCode, DoRunL());
+    // In this class a leave is an internal error
+    // No leave is allowed after calling User::RequestComplete in DoRunL because
+    // of this implementation
+    if (errorCode)
+        {
+        User::RequestComplete(iReportStatus, errorCode);
+        }
+    }
+
+void CTxtCopyMoveBase::CheckDeleteSource()
+// Delete previous source message if necessary
+    {
+    if (iMsgCounter>=0)
+        {
+        if (iActiveOperation->DeleteSourceAfterwards())
+            {
+            //delete the previous source
+            iDestination.SetEntry(iSource[iMsgCounter]);
+            TMsvId parent = iDestination.Entry().Parent();
+            iDestination.SetEntry(parent);
+            iDestination.DeleteEntry(iSource[iMsgCounter]);
+            }
+        }
+    }
+
+void CTxtCopyMoveBase::SetupNewEntryL(TMsvId& aSourceMsgId, TMsvId& aNewDestMsvId)
+// Create new entry index details based on source
+    {
+    // Get the destination path, and put it in the details
+    // section of the message
+    iDestination.SetEntry(aSourceMsgId);
+    TMsvEntry entry;
+    entry.iServiceId       = iDestination.Entry().iServiceId;
+    entry.iRelatedId       = iDestination.Entry().iRelatedId;
+    entry.iType            = iDestination.Entry().iType;
+    entry.iMtm             = iDestination.Entry().iMtm;
+    entry.iDate            = iDestination.Entry().iDate;
+    entry.iSize            = iDestination.Entry().iSize;
+    entry.iError           = iDestination.Entry().iError;
+//  entry.iWdpPortNumber   = iDestination.Entry().iWdpPortNumber;
+    entry.iMtmData1        = iDestination.Entry().iMtmData1;
+    entry.iMtmData2        = iDestination.Entry().iMtmData2;
+    entry.iMtmData3        = iDestination.Entry().iMtmData3;
+    // Copy the details and description for protection
+    TFileName name=iDestination.Entry().iDescription;
+    TFileName path=iDestination.Entry().iDetails;
+    entry.iDescription.Set(name);
+    entry.iDetails.Set(path);
+
+    // If the move is to the service, make sure the entry is valid
+    if (iActiveOperation->MoveIsToService())
+        {
+        __ASSERT_DEBUG(name.Length()>0,gPanic(ETxtsInvalidFileName));
+        __ASSERT_DEBUG(name.Locate(KPathDelimiter)<0,gPanic(ETxtsInvalidFileName));
+
+        if (name.Length()==0)
+            User::Leave(KErrArgument);
+        if (name.Locate(KPathDelimiter)>=0)
+            User::Leave(KErrArgument);
+
+        entry.iDetails.Set(iServiceDestinationpath.FullName());
+        entry.iServiceId = iServiceEntryId;
+        }
+    else
+        {
+        entry.iServiceId = KMsvLocalServiceIndexEntryId;
+        }
+
+    // Create the new entry
+    iDestination.SetEntry(iDestId);
+    iDestination.CreateEntry(entry);
+
+    aNewDestMsvId=entry.Id();
+    iProgress.iNewId = aNewDestMsvId;
+    }
+
+void CTxtCopyMoveBase::DoRunL()
+    {
+    // Check if error occurred on last stage
+    User::LeaveIfError(iStatus.Int());      // Leave if internal error has occurred.
+    if (iProgress.iErrorCode != KErrNone)    // External error occurred
+        {
+        User::RequestComplete(iReportStatus,KErrNone);
+        return;
+        }
+
+    // Delete previous source message if necessary
+    CheckDeleteSource();
+
+    switch (iTxtCopyMoveState)
+        {
+        case ETxtRetrievingMessage:
+        // Operate on the next message
+            {
+            iMsgCounter++;
+
+            // For copy/move ops, make a new entry on the other side.
+            TMsvId newSourceMsgId=iSource[iMsgCounter];
+            TMsvId newDestMsvId=KMsvNullIndexEntryId;
+            if (iActiveOperation->CopiedHeader()) SetupNewEntryL(newSourceMsgId,newDestMsvId);
+
+            iProgress.iMsgsProcessed++; // Update progress info
+            // Check if finished
+            if(iMsgCounter == iSource.Count()-1)
+                {
+                iTxtCopyMoveState = ETxtFinished;
+                }
+            // Do the operation-specific part
+            iActiveOperation->Start(newSourceMsgId,newDestMsvId,iStatus);
+            SetActive();
+            }
+            break;
+        case ETxtFinished:
+        // Have now finished this operation, so pass the completion up
+            __ASSERT_DEBUG(iReportStatus != NULL, gPanic(ETxtsStrayRequest));
+            User::RequestComplete(iReportStatus,KErrNone);
+            break;
+        }
+    }
+
+TTxtProgress& CTxtCopyMoveBase::Progress()
+//
+// Report the refreshing news back to the UI
+//
+    {
+    return iProgress;
+    }
+
+//
+// Implementation of the several body-moving classes
+//
+
+void CTxtCopyToLocalOp::DoRunL()
+//
+// Copy one remote entry to local, getting the source text and storing
+// it in the associated CMsvStore
+//
+    {
+    User::LeaveIfError(iStatus.Int());
+
+    User::LeaveIfError(iServerEntry.SetEntry(iSourceId));
+    TMsvEntry entry = iServerEntry.Entry();
+
+    // Build a new source file file name
+    User::LeaveIfError(iServerEntry.SetEntry( iDestId ));
+    TxtUtils::GetEntryFileNameL(iFileName, entry);
+
+    DoMessageCopyToLocalL();
+    }
+
+void CTxtCopyToLocalOp::DoMessageCopyToLocalL()
+// Copy remote message to local: i.e. read file contents into message store
+    {
+    // Description of the body is the original file
+    CMsvStore* wstore=NULL;
+    wstore=iServerEntry.EditStoreL();
+    CleanupStack::PushL(wstore);
+    User::LeaveIfNull(wstore);
+
+    // Read file text into rich text object
+    CParaFormatLayer* paraLayer = CParaFormatLayer::NewL();
+    CleanupStack::PushL(paraLayer);
+    CCharFormatLayer* charLayer = CCharFormatLayer::NewL();
+    CleanupStack::PushL(charLayer);
+    CRichText* body = CRichText::NewL(paraLayer,charLayer, CEditableText::EFlatStorage, 70 );
+    CleanupStack::PushL(body);
+    body->ImportTextFileL(0,iFileName,CPlainText::EOrganiseByLine);
+
+    // Store in body
+    wstore->StoreBodyTextL(*body);
+    wstore->CommitL();
+
+    // Clean up
+    CleanupStack::PopAndDestroy(4); //body, charLayer, paraLayer, wstore
+    TInt err=KErrNone;
+    if (DeleteSourceAfterwards())
+        err=iFs.Delete(iFileName);
+    User::RequestComplete(iReportStatus, err);
+    }
+
+void CTxtCopyFromLocalOp::DoRunL()
+//
+// Copy entries from local to remote, storing the plain text contents of
+// the associated rich text in a newly created file.
+//
+    {
+    // Error on previous stages
+    User::LeaveIfError(iStatus.Int());
+
+    // Get details of destination entry
+    User::LeaveIfError(iServerEntry.SetEntry( iDestId ));
+    TMsvEntry entry = iServerEntry.Entry();
+
+    // Find file from entry details
+    TxtUtils::GetEntryFileNameL(iFileName, entry);
+
+    // Check if file already exists.
+    RFile file;
+    if (file.Open(iFs,iFileName,EFileRead) == KErrNone)
+        {
+        file.Close();
+        // If so, create a new unique filename and update entry
+        User::LeaveIfError(CApaApplication::GenerateFileName(iFs,iFileName));
+        TParse newName;
+        newName.Set(iFileName,NULL,NULL);
+        entry.iDescription.Set(newName.NameAndExt());
+        User::LeaveIfError(iServerEntry.ChangeEntry(entry));
+        }
+
+    // Set the context back
+    User::LeaveIfError(iServerEntry.SetEntry( iSourceId ));
+
+    DoMessageCopyFromLocalL(entry);
+    }
+
+void CTxtCopyFromLocalOp::DoMessageCopyFromLocalL(const TMsvEntry& aEntry)
+// Copy local message to remote service: i.e. create a file
+    {
+    CMsvStore* rstore=iServerEntry.ReadStoreL();
+    CleanupStack::PushL(rstore);
+
+    if (rstore->HasBodyTextL())
+        {
+        // Get message text and write it to file
+        CParaFormatLayer* paraLayer = CParaFormatLayer::NewL();
+        CleanupStack::PushL(paraLayer);
+        CCharFormatLayer* charLayer = CCharFormatLayer::NewL();
+        CleanupStack::PushL(charLayer);
+        CRichText* body = CRichText::NewL(paraLayer,charLayer, CEditableText::EFlatStorage, 70);
+        CleanupStack::PushL(body);
+        rstore->RestoreBodyTextL(*body);
+        //User::LeaveIfError(iFs.MkDir(iFileName));
+        body->ExportAsTextL(iFileName,CPlainText::EOrganiseByLine,70);
+
+        // Change date modified to reflect what's in the TMsvEntry
+        RFile outFile;
+        if (outFile.Open(iFs, iFileName, EFileWrite) == KErrNone)
+            {
+            outFile.SetModified(aEntry.iDate);
+            outFile.Close();
+            }
+        CleanupStack::PopAndDestroy(3); //paraLayer, charLayer, body
+        }
+
+    CleanupStack::PopAndDestroy(); //rstore
+
+    User::RequestComplete(iReportStatus, KErrNone);
+    }
+
+void CTxtCopyWithinServiceOp::DoRunL()
+//
+// Copy files over within the service.
+//
+    {
+    TInt err=KErrNone;
+    User::LeaveIfError(iStatus.Int());
+
+    User::LeaveIfError(iServerEntry.SetEntry(iSourceId));
+    TMsvEntry sourceEntry = iServerEntry.Entry();
+
+    // Source settings
+    TFileName sourceFileName;
+    TxtUtils::GetEntryFileNameL(sourceFileName, sourceEntry);
+    iFileName = sourceFileName;
+
+    // Destination settings
+    err = iServerEntry.SetEntry(iDestId);
+    if (err)
+        {
+        User::RequestComplete(iReportStatus, err);
+        return;
+        }
+
+    DoMessageCopyWithinServiceL();
+    }
+
+void CTxtCopyWithinServiceOp::DoMessageCopyWithinServiceL()
+// Copy remote message to local: i.e. read file contents into message store
+    {
+    TMsvEntry destEntry = iServerEntry.Entry();
+    TFileName destFileName;
+    TxtUtils::GetEntryFileNameL(destFileName, destEntry);
+
+    iFs.MkDir(destFileName);
+
+    RFile outFile;
+    // Test if destination file already exists
+    if (outFile.Open(iFs, destFileName, EFileRead) == KErrNone)
+        {
+        outFile.Close();
+        User::RequestComplete(iReportStatus, KErrAlreadyExists);
+        return;
+        }
+    // Create destination file
+    TInt err = outFile.Create(iFs, destFileName, EFileWrite);
+    if (err)
+        {
+        User::RequestComplete(iReportStatus, err);
+        return;
+        }
+    // Open input file
+    RFile inFile;
+    err = inFile.Open(iFs, iFileName, EFileRead);
+    if (err)
+        {
+        inFile.Close();
+        User::RequestComplete(iReportStatus, err);
+        return;
+        }
+
+    // Copy the file over
+    TFileText inTextFile;
+    TFileText outTextFile;
+    inTextFile.Set(inFile);
+    outTextFile.Set(outFile);
+    TBuf<201> buf;
+    TInt len = 200;
+    while (len>0)
+        {
+        buf.FillZ();
+        inTextFile.Read(buf);
+        len=buf.Length();
+        outTextFile.Write(buf);
+        }
+    // Change date modified to reflect what's in the TMsvEntry
+    outFile.SetModified(destEntry.iDate);
+
+    // Clean up
+    inFile. Close();
+    outFile.Close();
+    if (DeleteSourceAfterwards())
+        err=iFs.Delete(iFileName);
+    User::RequestComplete(iReportStatus, KErrNone);
+    }
+
+void CTxtDeleteOp::DoRunL()
+//
+// Deleting files.
+//
+    {
+    TInt err=KErrNone;
+    User::LeaveIfError(iStatus.Int());
+    //
+    User::LeaveIfError(iServerEntry.SetEntry(iSourceId));
+    TMsvEntry entry = iServerEntry.Entry();
+    TxtUtils::GetEntryFileNameL(iFileName, entry);
+
+    err=iFs.Delete(iFileName);
+    User::RequestComplete(iReportStatus, err);
+    }
+
+//
+// These CopyConstructL methods allow other classes to get an exact copy
+// of the class derived from CTxtActiveOper. Needed to recursively perform an
+// operation on a set of entries.
+//
+
+// CTxtCopyToLocalOp
+
+CTxtActiveOper* CTxtCopyToLocalOp::CopyConstructL()
+    {
+    return new (ELeave) CTxtCopyToLocalOp(iFs, iServerEntry);
+    }
+
+TBool CTxtCopyToLocalOp::CopiedHeader() const
+    {
+    return ETrue;
+    }
+TBool CTxtCopyToLocalOp::DeleteSourceAfterwards() const
+    {
+    return EFalse;
+    }
+
+TBool CTxtCopyToLocalOp::MoveIsToService() const
+    {
+    return EFalse;
+    }
+
+// CTxtCopyFromLocalOp
+
+CTxtActiveOper* CTxtCopyFromLocalOp::CopyConstructL()
+    {
+    return new (ELeave) CTxtCopyFromLocalOp(iFs, iServerEntry);
+    }
+
+TBool CTxtCopyFromLocalOp::CopiedHeader() const
+    {
+    return ETrue;
+    }
+
+TBool CTxtCopyFromLocalOp::DeleteSourceAfterwards() const
+    {
+    return EFalse;
+    }
+
+TBool CTxtCopyFromLocalOp::MoveIsToService() const
+    {
+    return ETrue;
+    }
+
+// CTxtCopyWithinServiceOp
+
+CTxtActiveOper* CTxtCopyWithinServiceOp::CopyConstructL()
+    {
+    return new (ELeave) CTxtCopyWithinServiceOp(iFs, iServerEntry);
+    }
+
+TBool CTxtCopyWithinServiceOp::CopiedHeader() const
+    {
+    return ETrue;
+    }
+
+TBool CTxtCopyWithinServiceOp::DeleteSourceAfterwards() const
+    {
+    return EFalse;
+    }
+
+TBool CTxtCopyWithinServiceOp::MoveIsToService() const
+    {
+    return ETrue;
+    }
+
+// CTxtMoveToLocalOp
+
+CTxtActiveOper* CTxtMoveToLocalOp::CopyConstructL()
+    {
+    return new (ELeave) CTxtMoveToLocalOp(iFs, iServerEntry);
+    }
+
+TBool CTxtMoveToLocalOp::DeleteSourceAfterwards() const
+    {
+    return ETrue;
+    }
+
+// CTxtMoveFromLocalOp
+
+CTxtActiveOper* CTxtMoveFromLocalOp::CopyConstructL()
+    {
+    return new (ELeave) CTxtMoveFromLocalOp(iFs, iServerEntry);
+    }
+
+TBool CTxtMoveFromLocalOp::DeleteSourceAfterwards() const
+    {
+    return ETrue;
+    }
+
+// CTxtMoveWithinServiceOp
+
+CTxtActiveOper* CTxtMoveWithinServiceOp::CopyConstructL()
+    {
+    return new (ELeave) CTxtMoveWithinServiceOp(iFs, iServerEntry);
+    }
+
+TBool CTxtMoveWithinServiceOp::DeleteSourceAfterwards() const
+    {
+    return ETrue;
+    }
+
+// CTxtDeleteOp
+
+CTxtActiveOper* CTxtDeleteOp::CopyConstructL()
+    {
+    return new (ELeave) CTxtDeleteOp(iFs, iServerEntry);
+    }
+
+TBool CTxtDeleteOp::CopiedHeader() const
+    {
+    return EFalse;
+    }
+
+TBool CTxtDeleteOp::DeleteSourceAfterwards() const
+    {
+    return ETrue;
+    }
+
+TBool CTxtDeleteOp::MoveIsToService() const
+    {
+    return EFalse;
+    }
+
+// TXTSERV.CPP
+//
+// Copyright (c) 1999 Symbian Ltd.  All rights reserved.
+//
+
+#if !defined(__MSVENTRY_H__)
+#include <msventry.h>
+#endif
+
+#if !defined(__TXTRICH_H__)
+#include <txtrich.h>
+#endif
+
+#if !defined(_TXTCMDS_H_)
+#include "txtcmds.h"
+#endif
+#if !defined(__TXUT_H__)
+#include "txut.h"    // Current service settings
+#endif
+
+#include "txtserv.h"
+#include "txtscpmv.h"
+#include "txtmbox.h"
+
+//
+//  Factory function, constructor, initialisation, and destructor functions
+//
+
+EXPORT_C CTextServerMtm* CTextServerMtm::NewL(CRegisteredMtmDll& aRegisteredMtmDll, CMsvServerEntry* aInitialEntry)
+// Exported factory function
+    {
+    CleanupStack::PushL(aInitialEntry);
+    CTextServerMtm* self=new (ELeave) CTextServerMtm(aRegisteredMtmDll, aInitialEntry);
+    CleanupStack::Pop();
+
+    CleanupStack::PushL(self);
+    self->ConstructL();
+    CleanupStack::Pop();
+    return self;
+    }
+
+CTextServerMtm::CTextServerMtm(CRegisteredMtmDll& aRegisteredMtmDll, CMsvServerEntry* aInitialEntry)
+    :  CBaseServerMtm(aRegisteredMtmDll, aInitialEntry),
+        iCurrentOperation(ETxtOpIdle),
+        iServiceEntryId(aInitialEntry->Entry().Id())
+    {
+    }
+
+void CTextServerMtm::ConstructL()
+    {
+    iReportStatus=NULL;
+    CActiveScheduler::Add(this);
+    User::LeaveIfError(iFs.Connect());
+    }
+
+CTextServerMtm::~CTextServerMtm()
+    {
+    Cancel();
+    delete iTxtCopyMove;
+    delete iTxtSettings;
+    }
+
+//
+// Copy and move functions
+//
+
+void CTextServerMtm::CopyToLocalL(const CMsvEntrySelection& aSelection, TMsvId aDestination,
+                                  TRequestStatus& aStatus)
+// Get remote entries (by copying)
+    {
+    ConnectToServiceL();
+    CTxtActiveOper* activeOperation = new (ELeave) CTxtCopyToLocalOp(iFs,*iServerEntry);
+    DoOperationL(activeOperation, aSelection,aDestination, aStatus);
+    }
+
+void CTextServerMtm::CopyFromLocalL(const CMsvEntrySelection& aSelection, TMsvId aDestination,
+                                    TRequestStatus& aStatus)
+// Transfer to remote (by copying)
+    {
+    ConnectToServiceL();
+    CTxtActiveOper* activeOperation = new (ELeave) CTxtCopyFromLocalOp(iFs,*iServerEntry);
+    DoOperationL(activeOperation, aSelection,aDestination, aStatus);
+    }
+
+void CTextServerMtm::CopyWithinServiceL(const CMsvEntrySelection& aSelection, TMsvId aDestination,
+                                        TRequestStatus& aStatus)
+// Copy entries within service
+    {
+    ConnectToServiceL();
+    CTxtActiveOper* activeOperation = new (ELeave) CTxtCopyWithinServiceOp(iFs,*iServerEntry);
+    DoOperationL(activeOperation, aSelection,aDestination, aStatus);
+    }
+
+void CTextServerMtm::MoveToLocalL(const CMsvEntrySelection& aSelection, TMsvId aDestination,
+                                  TRequestStatus& aStatus)
+// Get remote entries (by moving)
+    {
+    ConnectToServiceL();
+    CTxtActiveOper* activeOperation = new (ELeave) CTxtMoveToLocalOp(iFs, *iServerEntry);
+    DoOperationL(activeOperation, aSelection,aDestination, aStatus);
+    }
+
+void CTextServerMtm::MoveFromLocalL(const CMsvEntrySelection& aSelection, TMsvId aDestination,
+                                    TRequestStatus& aStatus)
+// Transfer to remote (by moving)
+    {
+    ConnectToServiceL();
+    CTxtActiveOper* activeOperation = new (ELeave) CTxtMoveFromLocalOp(iFs, *iServerEntry);
+    DoOperationL(activeOperation, aSelection,aDestination, aStatus);
+    }
+
+void CTextServerMtm::MoveWithinServiceL(const CMsvEntrySelection& aSelection, TMsvId aDestination,
+                                        TRequestStatus& aStatus)
+// Move entries within service
+    {
+    ConnectToServiceL();
+    CTxtActiveOper* activeOperation = new (ELeave) CTxtMoveWithinServiceOp(iFs,*iServerEntry);
+    DoOperationL(activeOperation, aSelection,aDestination, aStatus);
+    }
+
+//
+// Create, change, delete functions
+//
+
+void CTextServerMtm::DeleteAllL(const CMsvEntrySelection& aSelection, TRequestStatus& aStatus)
+// Delete entries recursively
+    {
+    ConnectToServiceL();
+    CTxtActiveOper* activeOperation = new (ELeave) CTxtDeleteOp(iFs, *iServerEntry);
+    DoOperationL(activeOperation, aSelection,KMsvNullIndexEntryId, aStatus);
+    }
+
+void CTextServerMtm::CreateL(TMsvEntry /*aNewEntry*/, TRequestStatus& aStatus)
+// Remote creation (other than by copying) not supported
+//
+    {
+    TRequestStatus *sP = &aStatus;
+    User::RequestComplete(sP, KErrNotSupported);
+    }
+
+void CTextServerMtm::ChangeL(TMsvEntry /*aNewEntry*/, TRequestStatus& aStatus)
+// Change entry
+//
+// This function could change file names in the file system. It would then also have
+// to change the details field of all the children of a changed folder name.
+// Not supported for now.
+//
+    {
+    TRequestStatus *sP = &aStatus;
+    User::RequestComplete(sP, KErrNotSupported);
+    }
+
+void CTextServerMtm::ConnectToServiceL()
+// Retrieves service settings before doing a "remote" operation
+    {
+    iServerEntry->SetEntry(iServiceEntryId);
+    __ASSERT_DEBUG(iServerEntry->Entry().iType == KUidMsvServiceEntry, gPanic(ETxtsInvalidService));
+    // Retrieve settings
+    if (iTxtSettings == NULL) iTxtSettings = new (ELeave) TMTMTxtSettings;
+    CMTMTxtSettings* settings = CMTMTxtSettings::NewL();
+    CleanupStack::PushL(settings);
+    settings->LoadSettingsL(iServerEntry->Entry().Id(), *iTxtSettings);
+    CleanupStack::PopAndDestroy(); // settings
+    }
+
+void CTextServerMtm::DoOperationL(CTxtActiveOper* aActiveOperation, const CMsvEntrySelection& aSelection,
+                                  TMsvId aDestination, TRequestStatus& aStatus)
+// Do any of the copy/move from or to local, or delete operations, defined by aActiveOperation
+    {
+    CleanupStack::PushL(aActiveOperation);
+
+    __ASSERT_DEBUG(aActiveOperation,gPanic(ETxtsInvalidNullOperation));
+    AssertIdle();
+    AssertConnected();
+
+    iReportStatus=&aStatus;
+    iCurrentOperation=ETxtOpCopyMoveDel;
+
+    if (aDestination != KMsvNullIndexEntryId)
+        {
+        // Get folder name for destination
+        iServerEntry->SetEntry(aDestination);
+        TUid type = iServerEntry->Entry().iType;
+        if (type == KUidMsvServiceEntry)
+            {
+            iParse.Set(KNullDesC,NULL,NULL);
+            }
+        else if (type == KUidMsvFolderEntry)
+            {
+            iParse.Set(iServerEntry->Entry().iDetails,NULL,NULL);
+            iParse.AddDir(iServerEntry->Entry().iDescription);
+            }
+        else
+            {
+            gPanic(ETxtsInvalidDestination);
+            }
+        }
+
+    CleanupStack::Pop(); //aActiveOperation now owned by iTxtCopyMove
+    iTxtCopyMove=CTxtCopyMoveBase::NewL(aActiveOperation,aSelection, *iServerEntry, iServiceEntryId, iParse);
+    aStatus=iStatus = KRequestPending;
+    iTxtCopyMove->Start(iStatus);
+    SetActive();
+    }
+
+//
+// Command and progress functions
+//
+
+void CTextServerMtm::StartCommandL(CMsvEntrySelection& /*aSelection*/, TInt aCommand,
+                                   const TDesC8& /*aParameter*/, TRequestStatus& aStatus)
+// Run MTM-specific command on selection of entries
+// Only command supported is Refresh
+    {
+    AssertIdle();
+
+    switch (aCommand)
+        {
+        case KTXTMTMRefresh:
+            {
+            ConnectToServiceL();
+            DoRefreshL();
+            TRequestStatus* sP=&aStatus;
+            User::RequestComplete(sP,KErrNone);
+            }
+            break;
+        default:
+            TRequestStatus* sP=&aStatus;
+            User::RequestComplete(sP, KErrNotSupported);
+            break;
+        }
+    }
+
+TBool CTextServerMtm::CommandExpected()
+// Prevent object deletion on command completion
+// Allow unloading
+    {
+    return EFalse;
+    }
+
+const TDesC8& CTextServerMtm::Progress()
+// Pass-back progress information
+    {
+    switch (iCurrentOperation)
+        {
+        case ETxtOpCopyMoveDel:
+            iProgressBuf() = iTxtCopyMove->Progress();
+            break;
+        default:
+            break;
+        }
+    return iProgressBuf;
+    }
+
+//
+//  Active object completion functions
+//
+
+void CTextServerMtm::DoCancel()
+// Cancel current operation
+    {
+    // The only operations that are actually asynchronous are the
+    // copy, move, delete. Others complete synchronously.
+    switch (iCurrentOperation)
+        {
+        case ETxtOpCopyMoveDel:
+            {
+            delete iTxtCopyMove;
+            iTxtCopyMove=NULL;
+            }
+            break;
+        default:
+            AssertIdle();
+            break;
+        }
+    iCurrentOperation=ETxtOpIdle;
+    TRequestStatus* pS=&iStatus;
+    User::RequestComplete(pS, KErrCancel);
+    }
+
+void CTextServerMtm::DoComplete(TInt aError)
+// Active object complete leave handler
+//
+// Never expect this to be called
+// as CTextServerMtm::DoRunL() does not leave
+    {
+    User::RequestComplete(iReportStatus,aError);
+    iReportStatus=NULL;
+    }
+
+void CTextServerMtm::DoRunL()
+// Active object completion
+//
+// Run is used in this object to clean up after operations have finished.
+//
+    {
+    __ASSERT_DEBUG(iReportStatus != NULL,gPanic(ETxtsStrayRequest));
+    // Pass on an error code if there was one.
+
+    // Shouldn't have any errors in iStatus, but put them in Progress
+    // anyway for safety
+
+    if (iStatus!=KErrNone)
+        iProgressBuf().iErrorCode=iStatus.Int();
+
+    // Determine the kind of clean up to do after the active process has stopped
+    switch (iCurrentOperation)
+        {
+        case ETxtOpCopyMoveDel:
+            {
+            iProgressBuf() = iTxtCopyMove->Progress();
+            delete iTxtCopyMove;
+            iTxtCopyMove=NULL;
+            }
+            break;
+        default:
+            break;
+        }
+    iCurrentOperation=ETxtOpIdle;
+    // Always return KErrNone; errors are returned in Progress
+    User::RequestComplete(iReportStatus,KErrNone);
+    iReportStatus=NULL;
+    }
+
+//
+// Methods needed to refresh the service
+//
+
+void CTextServerMtm::DoRefreshL()
+// Perform refresh
+    {
+    AssertConnected();
+    TFileName relativePath(KNullDesC);
+
+    CTxtRefreshMBox *folderSynchroniser = CTxtRefreshMBox::NewL(iFs, relativePath,
+        iServiceEntryId, iServerEntry, iServiceEntryId, *iTxtSettings);
+    CleanupStack::PushL(folderSynchroniser);
+    while (!folderSynchroniser->DoStepL()) ;
+    CleanupStack::PopAndDestroy(); //folderSynchroniser
+    }
+
+// TXTSMAIN.CPP
+//
+// Copyright (c) 1999 Symbian Ltd.  All rights reserved.
+//
+
+#include <e32std.h>
+#include "txtspan.h"
+
+GLDEF_C void gPanic(TTxtsPanic aPanic)
+    {
+    _LIT(KTXTSPanic,"TXTS");
+    User::Panic(KTXTSPanic,aPanic);
+    }
+
+// TXTS.MMP
+//
+// Copyright (c) 2000 Symbian Ltd.  All rights reserved.
+
+TARGET        txts.dll
+TARGETTYPE    dll
+
+UID 0x10003C5E 0x10003C3E
+VENDORID 0x70000001
+CAPABILITY All -TCB
+
+SOURCE        txtsmain.cpp txtserv.cpp txtscpmv.cpp txtmbox.cpp
+
+USERINCLUDE   ..\txut
+SYSTEMINCLUDE \epoc32\include
+
+LIBRARY       euser.lib efsrv.lib msgs.lib etext.lib txut.lib apparc.lib
+
+#if defined(WINS)
+    deffile .\txtsWINS.def
+#else
+    deffile .\txtsEABI.def
+#endif
+
+nostrictdef
+NOEXPORTLIBRARY
+
+// create MTM registration file
+START RESOURCE txtmtm.rss
+TARGETPATH      \resource\messaging\mtm
+END
+
+// txtdat.RSS
+//
+// Copyright (c) 2002 Symbian Ltd.  All rights reserved.
+//
+
+#include <mtmconfig.rh>
+
+RESOURCE MTM_INFO_FILE
+    {
+    mtm_type_uid = 0x10005247;
+    technology_type_uid = 0x10005247;
+    components =
+        {
+        MTM_COMPONENT_V2
+            {
+            human_readable_name = "TextMTM";
+            component_uid = KUidMtmServerComponentVal;
+            entry_point = 1;
+            version = VERSION_V2 {};
+            filename = "z:\\system\\libs\\txts.dll";
+            },
+        MTM_COMPONENT_V2
+            {
+            human_readable_name = "TextMTM";
+            component_uid = KUidMtmClientComponentVal;
+            entry_point = 1;
+            version = VERSION_V2 {};
+            filename = "z:\\system\\libs\\txtc.dll";
+            },
+        MTM_COMPONENT_V2
+            {
+            human_readable_name = "TextMTM";
+            component_uid = KUidMtmUiComponentVal;
+            entry_point = 1;
+            version = VERSION_V2 {};
+            filename = "z:\\system\\libs\\txtu.dll";
+            },
+        MTM_COMPONENT_V2
+            {
+            human_readable_name = "TextMTM";
+            component_uid = KUidMtmUiDataComponentVal;
+            entry_point = 1;
+            version = VERSION_V2 {};
+            filename = "z:\\system\\libs\\txti.dll";
+            }
+        };
+    }
+
+// flags to indicate that can send messages, and handle body text
+RESOURCE MTM_CAPABILITIES
+    {
+    send_capability = 1;
+    body_capability = 1;
+    }
+
+// additional capabilities required by clients of the MTM
+// none in the case of text mtm
+RESOURCE MTM_SECURITY_CAPABILITY_SET
+    {
+    }
+
+The Server-side Text MTM simulates with the local file system the actions
+normally undertaken by a message transport protocol. A Text service entry maps
+a local file directory, from which message header information can be obtained
+(in a similar fashion to POP3), and from which messages can be get and put.
+
+A file or folder in the mapped directory is regarded as a remote entry,
+and recorded by an entry in the message index. The name of the file to which a
+message corresponds is stored in the index Description field, and the full
+folder path in the index Details field. No message store is associated with
+these remote entries.
+
+Under a local folder, for example, the Inbox, each message has a message
+store that contains a rich text stream representing the body text.
+
+Messages can be deleted, moved, or copied. When a local message to
+transferred to a Text service, the Server-side MTM constructs a new file,
+obtaining its name and location from the index fields. When the transfer is
+from the service to a local folder, the Server-side MTM creates a rich text
+stream and reads the file text into it.
+
+The Text server DLL currently supports one MTM-specific operation,
+KTXTMTMRefresh, which refreshes the folder tree below a service
+entry.
+
+Move, copy, and delete implementation
+
+Move, copy, and delete operations all operate on a collection of
+message entries, often involving creating new index entries, and deleting
+existing ones. This common functionality is provided by the class
+CTxtCopyMoveBase.
+
+A CTxtCopyMoveBase instance is provided with an object to
+perform the specific operation required. The classes
+CTxtCopyToLocalOp, CTxtCopyFromLocalOp,
+CTxtCopyWithinServiceOp, CTxtMoveToLocalOp,
+CTxtMoveFromLocalOp, CTxtMoveWithinServiceOp and
+CTxtDeleteOp each define the functionality for a specific
+operation.
+
+Each of these classes is derived from CTxtActiveOper. The
+move operation classes are derived from their copy counterparts, and add the
+extra deletion after copying.
+
+Service refresh implementation
+
+The contents of folders under the file system can be changed at any
+time outside of the application, by the user or some other application. In
+order for these changes to be visible in the messaging application, the
+Server-side MTM provides a refresh capability.
+
+The refresh capability is provided by the refresher class
+CTxtRefreshMBox. It ensures that the current entries accurately
+reflect the state of the corresponding file folder, adding or removing entries
+under the service as required.
+
+Copyright ©2008  Symbian Software Ltd.

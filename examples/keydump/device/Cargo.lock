@@ -11,14 +11,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "symbian"
+version = "0.1.0"
+dependencies = [
+ "symbian-crypto",
+ "symbian-sys",
+]
+
+[[package]]
 name = "symbian-app"
 version = "0.1.0"
 dependencies = [
+ "symbian",
  "symbian-gfx",
  "symbian-keys",
  "symbian-sys",
  "symbian-ui",
 ]
+
+[[package]]
+name = "symbian-crypto"
+version = "0.1.0"
 
 [[package]]
 name = "symbian-gfx"

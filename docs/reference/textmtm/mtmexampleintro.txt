@@ -1,0 +1,78 @@
+SYMBIAN OS V9.3
+
+ »
+Symbian OS v9.3 »
+Examples »
+Messaging example code »
+Messaging Text MTM example code »
+Introduction
+
+Introduction
+
+The TextMTM (examples\Messaging\TextMTM) is an example
+MTM project, which shows many aspects of dealing with the Messaging APIs.
+Developers can use it as a basis for experimenting with the MTM architecture,
+and for studying the MTM interfaces.
+
+Rather than implementing a real message transport protocol, the
+TextMTM simulates this by treating the local file system as a remote mail
+server. The TextMTM allows a user to create a service representing a folder in
+the file system. The service then contains entries for each folder and file
+under that folder, so functioning as a mirror of the folder contents.
+
+The UI MTM component allows users to get messages from the "remote"
+server, to edit the contents of a text message, and to copy messages back to a
+TextMTM service. Moving and deleting messages is also allowed.
+
+TextMTM projects
+
+The TextMTM is made up of a number of components, and so the source
+has a number of projects.
+
+The following project is a utility project, used for deploying the
+MTM.
+
+Project
+
+Description
+
+txin
+
+Utility application for MTM installation
+
+The following projects supply the source for the MTM.
+
+Project
+
+Description
+
+txtc
+
+Client-side MTM implementation. This defines the methods
+required for a CBaseMtm-derived class. It is instantiated by a
+client application to perform MTM-specific tasks.
+
+txti
+
+UI Data MTM implementation. This presents the messaging
+application with useful information, without the need for actually fully
+loading all the DLLs necessary to handle text messages.
+
+txts
+
+Server-side MTM implementation. This provides all the
+functionality to handle messages on the server side, and supports moving,
+copying, deleting, and creating of entries.
+
+txtu
+
+User Interface MTM implementation. This is loaded when the
+user decides to actually perform some MTM-specific task, such as editing a
+message.
+
+txut
+
+A small utilities DLL where code resides that has to be
+shared between the MTM implementations.
+
+Copyright ©2008  Symbian Software Ltd.

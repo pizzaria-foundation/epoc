@@ -1,0 +1,23 @@
+[package]
+name = "system-probe"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Its own workspace root. A no_std staticlib carrying a #[panic_handler] collides with
+# std's when cargo builds the test harness, so it is excluded from the SDK workspace and
+# built only for the ARM target.
+[workspace]
+
+[lib]
+crate-type = ["staticlib"]
+
+[dependencies]
+devdump = { path = "../../..", default-features = false, features = ["probe-system"] }
+symbian-app = { path = "../../../../../crates/symbian-app" }
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"

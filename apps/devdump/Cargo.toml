@@ -1,0 +1,53 @@
+[package]
+name = "devdump"
+description = "One install, one report: everything the handset will tell us in a single trip"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+symbian-ui = { workspace = true }
+symbian-gfx = { workspace = true }
+symbian-sys = { workspace = true }
+symbian = { workspace = true }
+symbian-report = { workspace = true }
+symbian-app = { workspace = true }
+
+[dev-dependencies]
+# Host-only. The simulator pulls in a windowing library, which has no business anywhere
+# near the device build — keeping it here means it never gets there.
+symbian-sim = { workspace = true }
+symbian-ui = { workspace = true, features = ["testing"] }
+
+[features]
+default = []
+# Forwards to symbian-app's. tools/symbuild turns this on when EPOCADB_HOST is set, via
+# DEV_BRIDGE_FEATURE in app.conf — so a build with no host to talk to compiles no bridge.
+dev-bridge = ["symbian-app/dev-bridge"]
+# One feature per probe, and each probe binary enables exactly one.
+#
+# Not a runtime switch, because the choice is a *link-time* one: a probe that talks to the
+# Message Server calls `shim_msv_*`, which only exists in a binary whose app.conf set
+# USE_MSG — and with --no-undefined the linker checks referenced symbols before
+# --gc-sections gets a chance to sweep them. So code for a probe that is not being built
+# must not be compiled at all, or every other probe fails to link.
+#
+# The same wall is what keeps the risky imports isolated: `probe-msg` is the only feature
+# that can drag msgs.dso into an image.
+probe-system = []
+probe-libsweep = []
+probe-caps = []
+probe-dll = []
+probe-net = []
+probe-fs = []
+probe-msg = []
+probe-mtm = []
+probe-ncn = []
+probe-etel = []
+probe-sensors = []
+probe-bt = []
+probe-location = []
+probe-repo = []

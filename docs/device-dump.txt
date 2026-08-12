@@ -1,0 +1,691 @@
+== BEGIN launcher
+
+== probes
+  .    system [ddsystem.exe]: HAL inventory, drives and volumes, screen, clock, RAM
+  .    libsweep [ddlibs.exe]: which of the SDK's import libraries actually load on this handset
+  .    caps [ddcaps.exe]: what the ROM patch granted: HasCapability against the operation itself
+  .    dll [dddll.exe]: loading our own polymorphic DLL and calling ordinal 1
+  .    net [ddnet.exe]: IAPs and bearers, and which networking DLLs the handset has
+  .    fs [ddfs.exe]: data cage, path limits, file attributes, atomic save
+  .    msg [ddmsg.exe]: Message Server: registered MTMs and folder counts (imports msgs.dso)
+
+== screen
+  .    width: 320
+  .    height: 240
+  .    TDisplayMode: 11
+  .    pure red reads back as: 0xffff0000
+
+== run
+
+-- entering system
+  ok   system  ok  ok=4 fail=0
+
+-- entering libsweep
+  ok   libsweep  ok  ok=3 fail=0
+
+-- entering caps
+  ok   caps  ok  ok=25 fail=0
+
+-- entering dll
+  ok   dll  ok  ok=7 fail=0
+
+-- entering net
+  ok   net  ok  ok=0 fail=0
+
+-- entering fs
+  ok   fs  ok  ok=6 fail=1
+
+-- entering msg
+  ok   msg  ok  ok=2 fail=0
+
+== summary
+  .    probes: 7
+  .    ran to completion: 7
+  .    did not: 0
+== END launcher ok=7 fail=0
+
+== BEGIN system
+
+-- entering hal
+
+== HAL
+  .    EManufacturer: 2
+  .    EManufacturerHardwareRev: 256
+  .    EManufacturerSoftwareRev: 256
+  .    EManufacturerSoftwareBuild: 256
+  .    EModel: 536956368
+  .    EMachineUid: 536956368
+  .    EDeviceFamily: 1
+  .    EDeviceFamilyRev: 2064
+  .    ECPU: 0
+  .    ECPUArch: 1024
+  .    ECPUABI: 1
+  .    ECPUSpeed: 192000
+  .    ESystemStartupReason: 0
+  .    ESystemException: -32769
+  .    ESystemTickPeriod: 15625
+  .    EMemoryRAM: 125698048
+  .    EMemoryRAMFree: 51228672
+  .    EMemoryROM: 8519680
+  .    EMemoryPageSize: 4096
+  .    EPowerGood: 1
+  .    EPowerBatteryStatus: not supported
+  .    EPowerBackupStatus: 0
+  .    EPowerBackup: not supported
+  .    EPowerExternal: not supported
+  .    EKeyboard: not supported
+  .    EKeyboardDeviceKeys: not supported
+  .    EKeyboardAppKeys: not supported
+  .    EKeyboardClick: 0
+  .    EKeyboardClickState: not supported
+  .    EKeyboardClickVolume: not supported
+  .    EKeyboardClickVolumeMax: not supported
+  .    EDisplayXPixels: 320
+  .    EDisplayYPixels: 240
+  .    EDisplayXTwips: 2721
+  .    EDisplayYTwips: 2041
+  .    EDisplayColors: 16777216
+  .    EDisplayState: 1
+  .    EDisplayContrast: not supported
+  .    EDisplayContrastMax: not supported
+  .    EBacklight: 1
+  .    EBacklightState: not supported
+  .    EDisplayBrightness: 0
+  .    EDisplayBrightnessMax: not supported
+  .    EPen: not supported
+  .    EPenX: 0
+  .    EPenY: 0
+  .    EPenDisplayOn: not supported
+  .    EPenClick: not supported
+  .    EPenClickState: not supported
+  .    EPenClickVolume: 0
+  .    EPenClickVolumeMax: not supported
+  .    EMouse: not supported
+  .    ENanoTickPeriod: not supported
+  .    EFastCounterFrequency: not supported
+  .    EFastCounterCountsUp: 65535
+
+-- entering drives
+
+== drives
+  ok   RFs::DriveList
+  .    C:: nand flash  free 191960 KB of 265272 KB  id 47564559
+  .    D:: ram  free 50028 KB of 50046 KB  id f10997b8
+  .    E:: not present, removable  (no volume mounted)
+  .    Z:: rom, rom, write-protected  free 0 KB of 0 KB  id 00000000  "RomDrive"
+
+-- entering clock
+
+== clock
+  ok   wall clock is set  unix 1781363932
+  .    utc offset (s): -10800
+  ok   monotonic clock advances or holds  0 us between two reads
+
+-- entering memory
+
+== memory
+  .    free RAM (KB): 50028
+  .    total RAM (KB): 122752
+  .    this process's heap (KB): 2
+
+-- entering identity
+
+== identity
+  .    this probe's UID3: 0xe0dd0010
+  ok   C:\Data\ is reachable  control
+== END system ok=4 fail=0
+
+== BEGIN libsweep
+
+-- entering controls
+
+== controls
+  ok   euser.dll  present  [0]
+  ok   avkon.dll  present  [0]
+  ok   efsrv.dll  present  [0]
+
+-- entering notable
+
+== notable
+  .    libssl.dll: present  [0]  TLS — the entire TLS story on this handset is whether this loads
+  .    libcrypto.dll: present  [0]  OpenSSL 0.9.8a: AES, RSA, bignum — but no SHA-256, which predates it
+  .    libc.dll: present  [0]  Open C: BSD sockets and stdio
+  .    libz.dll: present  [0]  inflate
+  .    msgs.dll: present  [0]  the Message Server — what an MTM would be built on
+  .    mtur.dll: present  [0]  the MTM registries
+  .    etel.dll: present  [0]  telephony
+  .    etelmm.dll: present  [0]  RMobilePhone: operator, signal, IMEI
+  .    sensrvclient.dll: present  [0]  the sensor framework
+  .    btdevice.dll: present  [0]  Bluetooth
+  .    lbs.dll: present  [0]  location
+  .    centralrepository.dll: present  [0]  central repository
+  .    edbms.dll: present  [0]  DBMS
+  .    http.dll: present  [0]  the platform's own HTTP stack
+  .    securesocket.dll: present  [0]  the platform's own TLS sockets
+  .    sqldb.dll: present  [0]  Symbian SQL
+  .    random.dll: present  [0]  CSystemRandom, a real CSPRNG
+  .    fepbase.dll: present  [0]  the FEP base, for the keyboard's Fn layer
+
+-- entering sweep
+
+== sweep
+  .    agentdialog.dll: present  [0]
+  .    aknicon.dll: present  [0]
+  .    akninputlanguage.dll: present  [0]
+  .    aknnotify.dll: present  [0]
+  .    aknpictograph.dll: present  [0]
+  .    aknskins.dll: present  [0]
+  .    aknskinsrv.dll: present  [0]
+  .    aknswallpaperutils.dll: present  [0]
+  .    alarmclient.dll: present  [0]
+  .    alarmshared.dll: present  [0]
+  .    animation.dll: present  [0]
+  .    animationshared.dll: present  [0]
+  .    apengine.dll: present  [0]
+  .    apfile.dll: present  [0]
+  .    apgrfx.dll: present  [0]
+  .    apmime.dll: present  [0]
+  .    apparc.dll: present  [0]
+  .    apsettingshandlerui.dll: present  [0]
+  .    asn1.dll: present  [0]
+  .    audioequalizereffect.dll: present  [0]
+  .    audioequalizerutility.dll: present  [0]
+  .    avkon.dll: present  [0]
+  .    bafl.dll: present  [0]
+  .    bassboosteffect.dll: present  [0]
+  .    bcardeng.dll: present  [0]
+  .    bifu.dll: present  [0]
+  .    bioc.dll: present  [0]
+  .    biodb.dll: present  [0]
+  .    bios.dll: present  [0]
+  .    bitgdi.dll: present  [0]
+  .    bitmaptransforms.dll: present  [0]
+  .    biut.dll: present  [0]
+  .    bluetooth.dll: present  [0]
+  .    bmpanim.dll: present  [0]
+  .    bnf.dll: present  [0]
+  .    browserengine.dll: present  [0]
+  .    btcmtm.dll: present  [0]
+  .    btdevice.dll: present  [0]
+  .    btextnotifiers.dll: present  [0]
+  .    btmanclient.dll: present  [0]
+  .    c32.dll: present  [0]
+  .    caf.dll: present  [0]
+  .    cafutils.dll: present  [0]
+  .    caleninterimutils.dll: present  [0]
+  .    caleninterimutils2.dll: present  [0]
+  .    calinterimapi.dll: present  [0]
+  .    ccon.dll: present  [0]
+  .    cenrepnotifhandler.dll: present  [0]
+  .    centralrepository.dll: present  [0]
+  .    certstore.dll: present  [0]
+  .    charconv.dll: present  [0]
+  .    clkdatetimeview.dll: present  [0]
+  .    clock.dll: present  [0]
+  .    cmmanager.dll: present  [0]
+  .    cntmodel.dll: present  [0]
+  .    cntview.dll: present  [0]
+  .    commdb.dll: present  [0]
+  .    commondialogs.dll: present  [0]
+  .    commonengine.dll: present  [0]
+  .    commonui.dll: present  [0]
+  .    commsdat.dll: present  [0]
+  .    conarc.dll: present  [0]
+  .    cone.dll: present  [0]
+  .    connmon.dll: present  [0]
+  .    contentlistingframework.dll: present  [0]
+  .    convnames.dll: present  [0]
+  .    convutils.dll: present  [0]
+  .    crypto.dll: present  [0]
+  .    ctframework.dll: present  [0]
+  .    dfpaeabi.dll: present  [0]
+  .    dfprvct2_2.dll: present  [0]
+  .    dial.dll: present  [0]
+  .    directorylocalizer.dll: present  [0]
+  .    distanceattenuationeffect.dll: present  [0]
+  .    dopplerbase.dll: present  [0]
+  .    downloadmgr.dll: present  [0]
+  .    downloadmgruilib.dll: present  [0]
+  .    drmaudioplayutility.dll: present  [0]
+  .    drmhelper.dll: present  [0]
+  .    drmlicensechecker.dll: present  [0]
+  .    drtaeabi.dll: present  [0]
+  .    drtrvct2_2.dll: present  [0]
+  .    dtdmdl.dll: present  [0]
+  .    ecam.dll: present  [0]
+  .    ecmtclient.dll: absent  [-1]
+  .    ecom.dll: present  [0]
+  .    econs.dll: present  [0]
+  .    edbms.dll: present  [0]
+  .    effectbase.dll: present  [0]
+  .    efile.dll: absent  [-1]
+  .    efsrv.dll: present  [0]
+  .    egul.dll: present  [0]
+  .    eikcdlg.dll: present  [0]
+  .    eikcoctl.dll: present  [0]
+  .    eikcore.dll: present  [0]
+  .    eikctl.dll: present  [0]
+  .    eikdlg.dll: present  [0]
+  .    eiksrv.dll: present  [0]
+  .    eiksrvc.dll: present  [0]
+  .    ektran.dll: present  [0]
+  .    environmentalreverbeffect.dll: present  [0]
+  .    environmentalreverbutility.dll: present  [0]
+  .    eposlandmarks.dll: present  [0]
+  .    eposlmdbmanlib.dll: present  [0]
+  .    eposlmmultidbsearch.dll: present  [0]
+  .    eposlmsearchlib.dll: present  [0]
+  .    esock.dll: present  [0]
+  .    esocksvr.dll: present  [0]
+  .    estlib.dll: present  [0]
+  .    estor.dll: present  [0]
+  .    etel.dll: present  [0]
+  .    etel3rdparty.dll: present  [0]
+  .    etext.dll: present  [0]
+  .    euser.dll: present  [0]
+  .    exiflib.dll: present  [0]
+  .    ezip.dll: present  [0]
+  .    ezlib.dll: present  [0]
+  .    f32agentui.dll: present  [0]
+  .    favouritesengine.dll: present  [0]
+  .    fbscli.dll: present  [0]
+  .    featdiscovery.dll: present  [0]
+  .    fepbase.dll: present  [0]
+  .    field.dll: present  [0]
+  .    flogger.dll: present  [0]
+  .    fntstr.dll: present  [0]
+  .    fontutils.dll: present  [0]
+  .    form.dll: present  [0]
+  .    ftpprot.dll: absent  [-1]
+  .    ftpsess.dll: absent  [-1]
+  .    gb2312_shared.dll: absent  [-1]
+  .    gdi.dll: present  [0]
+  .    gfp.dll: present  [0]
+  .    gifscaler.dll: present  [0]
+  .    grid.dll: present  [0]
+  .    gsmu.dll: present  [0]
+  .    hal.dll: present  [0]
+  .    hash.dll: present  [0]
+  .    hlplch.dll: present  [0]
+  .    hlpmodel.dll: present  [0]
+  .    http.dll: present  [0]
+  .    hwrmlightclient.dll: present  [0]
+  .    hwrmvibraclient.dll: present  [0]
+  .    imageconversion.dll: present  [0]
+  .    imagetransform.dll: present  [0]
+  .    imcm.dll: present  [0]
+  .    imps.dll: present  [0]
+  .    imut.dll: present  [0]
+  .    inetprotutil.dll: present  [0]
+  .    insock.dll: present  [0]
+  .    irc.dll: present  [0]
+  .    irda.dll: present  [0]
+  .    irobex.dll: present  [0]
+  .    irs.dll: present  [0]
+  .    irtranp.dll: present  [0]
+  .    jisx0201.dll: absent  [-1]
+  .    jisx0208.dll: absent  [-1]
+  .    jpegyuvdecoder.dll: present  [0]
+  .    lbs.dll: present  [0]
+  .    libc.dll: present  [0]
+  .    libcrypt.dll: present  [0]
+  .    libcrypto.dll: present  [0]
+  .    libdl.dll: present  [0]
+  .    libgles_cm.dll: present  [0]
+  .    libglib.dll: present  [0]
+  .    libgmodule.dll: present  [0]
+  .    libgobject.dll: present  [0]
+  .    libgthread.dll: present  [0]
+  .    liblogger.dll: present  [0]
+  .    libm.dll: present  [0]
+  .    libpthread.dll: present  [0]
+  .    libssl.dll: present  [0]
+  .    libz.dll: present  [0]
+  .    linebreak.dll: present  [0]
+  .    listenerdopplereffect.dll: present  [0]
+  .    listenerlocationeffect.dll: present  [0]
+  .    listenerorientationeffect.dll: present  [0]
+  .    lmkcommonui.dll: present  [0]
+  .    locationbase.dll: present  [0]
+  .    logcli.dll: present  [0]
+  .    logwrap.dll: present  [0]
+  .    loudnesseffect.dll: present  [0]
+  .    mediaclient.dll: present  [0]
+  .    mediaclientaudio.dll: present  [0]
+  .    mediaclientaudioinputstream.dll: present  [0]
+  .    mediaclientaudiostream.dll: present  [0]
+  .    mediaclientimage.dll: present  [0]
+  .    mediaclientvideo.dll: present  [0]
+  .    mgfetch.dll: present  [0]
+  .    midiclient.dll: present  [0]
+  .    mmfcontrollerframework.dll: present  [0]
+  .    mmfstandardcustomcommands.dll: present  [0]
+  .    mmscli.dll: present  [0]
+  .    msgeditorutils.dll: present  [0]
+  .    msgs.dll: present  [0]
+  .    mtur.dll: present  [0]
+  .    netmeta.dll: present  [0]
+  .    nifman.dll: present  [0]
+  .    npdlib.dll: present  [0]
+  .    numberconversion.dll: present  [0]
+  .    obexclientmtm.dll: present  [0]
+  .    obexmtmutil.dll: present  [0]
+  .    obexservermtm.dll: present  [0]
+  .    ocrsrv.dll: present  [0]
+  .    orientationbase.dll: present  [0]
+  .    palette.dll: present  [0]
+  .    pbkeng.dll: present  [0]
+  .    pbkview.dll: present  [0]
+  .    pdrprt.dll: present  [0]
+  .    pdrstr.dll: present  [0]
+  .    pkcs10.dll: present  [0]
+  .    pkixcert.dll: present  [0]
+  .    platformenv.dll: present  [0]
+  .    platformver.dll: present  [0]
+  .    pops.dll: present  [0]
+  .    powermgrcli.dll: present  [0]
+  .    prev.dll: present  [0]
+  .    print.dll: present  [0]
+  .    profileengine.dll: present  [0]
+  .    ptiengine.dll: present  [0]
+  .    pushmsgentry.dll: present  [0]
+  .    random.dll: present  [0]
+  .    redircli.dll: present  [0]
+  .    remconclient.dll: present  [0]
+  .    remconcoreapi.dll: present  [0]
+  .    remconextapi1.dll: present  [0]
+  .    remconinterfacebase.dll: present  [0]
+  .    remcontypes.dll: present  [0]
+  .    richbio.dll: present  [0]
+  .    roomleveleffect.dll: present  [0]
+  .    rtp.dll: present  [0]
+  .    satinfo.dll: present  [0]
+  .    scdv.dll: present  [0]
+  .    schsvr.dll: present  [0]
+  .    scppnwdl.dll: present  [0]
+  .    sdpagent.dll: present  [0]
+  .    sdpcodec.dll: present  [0]
+  .    sdpdatabase.dll: present  [0]
+  .    securesocket.dll: present  [0]
+  .    sendas2.dll: present  [0]
+  .    sendui.dll: present  [0]
+  .    senservconn.dll: present  [0]
+  .    senservdesc.dll: present  [0]
+  .    senservmgr.dll: present  [0]
+  .    senutils.dll: present  [0]
+  .    senxml.dll: present  [0]
+  .    servicehandler.dll: present  [0]
+  .    sipclient.dll: present  [0]
+  .    sipcodec.dll: present  [0]
+  .    sipprofilecli.dll: present  [0]
+  .    smcm.dll: present  [0]
+  .    smss.dll: present  [0]
+  .    smts.dll: present  [0]
+  .    sourcedopplereffect.dll: present  [0]
+  .    sourcelocationeffect.dll: present  [0]
+  .    sourceorientationeffect.dll: present  [0]
+  .    spdctrl.dll: present  [0]
+  .    sqldb.dll: present  [0]
+  .    ssl.dll: present  [0]
+  .    stereowideningeffect.dll: present  [0]
+  .    stereowideningutility.dll: present  [0]
+  .    sysutil.dll: present  [0]
+  .    tagma.dll: present  [0]
+  .    telsess.dll: present  [0]
+  .    timezonelocalization.dll: present  [0]
+  .    tzclient.dll: present  [0]
+  .    uiklaf.dll: present  [0]
+  .    undo.dll: present  [0]
+  .    vcal.dll: present  [0]
+  .    vcard.dll: present  [0]
+  .    versit.dll: present  [0]
+  .    vibractrl.dll: present  [0]
+  .    viewcli.dll: present  [0]
+  .    wapmsgcli.dll: present  [0]
+  .    wapp.dll: present  [0]
+  .    wappushutils.dll: present  [0]
+  .    watcher.dll: absent  [-1]
+  .    wnode.dll: present  [0]
+  .    worldclient.dll: present  [0]
+  .    wpeng.dll: present  [0]
+  .    ws32.dll: present  [0]
+  .    wtlscert.dll: present  [0]
+  .    wutil.dll: present  [0]
+  .    x500.dll: present  [0]
+  .    x509.dll: present  [0]
+  .    xmlframework.dll: present  [0]
+
+== beyond the SDK
+  .    why: these have no .dso in this SDK, so nothing could link them today — but the handset          may carry them, and RLibrary::Load is how that gets asked
+  .    etelmm.dll: present  [0]
+  .    etelpckt.dll: present  [0]
+  .    sensrvclient.dll: present  [0]
+  .    sensrvutil.dll: present  [0]
+  .    httpfilterauthentication.dll: present  [0]
+  .    httpfiltercommon.dll: present  [0]
+  .    locationmanager.dll: absent  [-1]
+
+== sweep summary
+  .    asked: 292
+  .    loaded: 283
+  .    absent: 9
+== END libsweep ok=3 fail=0
+
+== BEGIN caps
+
+-- entering granted
+
+== granted (RProcess::HasCapability)
+  ok   TCB  held
+  ok   CommDD  held
+  ok   PowerMgmt  held
+  ok   MultimediaDD  held
+  ok   ReadDeviceData  held
+  ok   WriteDeviceData  held
+  ok   DRM  held
+  ok   TrustedUI  held
+  ok   ProtServ  held
+  ok   DiskAdmin  held
+  ok   NetworkControl  held
+  ok   AllFiles  held
+  ok   SwEvent  held
+  ok   NetworkServices  held
+  ok   LocalServices  held
+  ok   ReadUserData  held
+  ok   WriteUserData  held
+  ok   Location  held
+  ok   SurroundingsDD  held
+  ok   UserEnvironment  held
+
+-- entering attempted
+
+== attempted (RFs::Att, which creates and destroys nothing)
+  ok   C:\sys\bin\  reachable  [0]  needs AllFiles, kernel says held  — the executable directory, unreadable without AllFiles
+  ok   C:\private\10003a3f\  reachable  [0]  needs AllFiles, kernel says held  — AppArc's data cage — another application's private directory
+  ok   Z:\sys\bin\  reachable  [0]  needs TCB, kernel says held  — the ROM's executable directory
+  ok   C:\resource\  reachable  [0]  needs WriteDeviceData, kernel says held  — the shared resource directory, writable only with WriteDeviceData
+  ok   C:\Data\  reachable  [0]  needs ReadUserData, kernel says held  — the user's own files (a control: this should succeed everywhere)
+
+== divergence
+  .    paths where the two answers disagree: 0
+== END caps ok=25 fail=0
+
+== BEGIN dll
+
+-- entering RLibrary::Load
+
+== dlltest.dll
+  ok   loads  RLibrary::Load err 0
+  ok   UID1 is KDynamicLibraryUid  0x10000079 0x1000008d 0xe07d11e5
+  ok   Lookup(1) returns a function  non-null
+  ok   the call returns KErrNone  returned 0
+  ok   it wrote our sentinel  0x5a1234a5 (want 0x5a1234a5)
+  ok   it received our argument  0xc0ffee01 (want 0xc0ffee01)
+  ok   its own import of euser resolved  User::TickCount() from inside the DLL 63502
+== END dll ok=7 fail=0
+
+== BEGIN net
+
+-- entering libraries
+
+== networking libraries
+  .    http.dll: present  [0]  the platform's own HTTP stack — would make README's HTTP todo unnecessary
+  .    httpfilterauthentication.dll: present  [0]  HTTP auth filter
+  .    securesocket.dll: present  [0]  the platform's own TLS sockets
+  .    libssl.dll: present  [0]  Open C's OpenSSL 0.9.8a — TLS, if this handset has Open C
+  .    libcrypto.dll: present  [0]  Open C's crypto: AES, RSA, bignum. No SHA-256; 0.9.8a predates it
+  .    libc.dll: present  [0]  Open C: BSD sockets and stdio
+  .    esock.dll: present  [0]  the socket server (control: selftest already links it)
+  .    insock.dll: present  [0]  IPv4 (control)
+  .    connmon.dll: present  [0]  connection monitoring
+  .    netmeta.dll: present  [0]  connection preferences
+
+-- entering access points
+
+== access points
+  .    RConnection count: 0
+
+== index base
+  .    index 0: err -2
+  .    index 1: err -1
+
+== note
+  .    not attempted: no bearer is started and no socket opened: a dial can raise a dialog and wait for a human, which would turn this probe's deadline into a measurement of somebody's attention span
+== END net ok=0 fail=0
+
+== BEGIN fs
+
+-- entering data cage
+
+== data cage
+  ok   RFs::PrivatePath  C:\Private\e0dd0080\
+  .    note: drive-relative with a trailing separator; the drive is prepended by hand
+
+-- entering read and write
+
+== read and write
+  ok   write 4096 bytes  write_atomic
+  ok   read back the same length
+  ok   read back the same bytes
+
+-- entering atomic save
+
+== atomic save
+  ok   overwrite replaces rather than appends  read back 6 bytes
+
+-- entering short reads
+
+== short reads
+  .    first RFile::Read returned: 65536
+  ok   a single read is not a whole-file read  it returned everything this time — which is not a guarantee
+
+-- entering path limits
+
+== path limits
+  .    longest filename accepted: 200
+  .    refused at 240: err -6
+
+-- entering rename semantics
+
+== rename
+  FAIL rename over an existing file is refused  it succeeded — the atomic-save delete-first dance may be unnecessary here
+== END fs ok=6 fail=1
+
+== BEGIN msg
+
+-- entering mtm registry directory
+
+== mtm registration resources
+  .    C:\resource\messaging\mtm\: 0 entries
+  .    Z:\resource\messaging\mtm\: 54 entries
+  .      file: audiomessagereg.r10
+  .      file: audiomessagereg.r51
+  .      file: audiomessagereg.r76
+  .      file: audiomessagereg.r83
+  .      file: BioMtm.r10
+  .      file: BioMtm.r51
+  .      file: BioMtm.r76
+  .      file: BioMtm.r83
+  .      file: btmtmui.r10
+  .      file: btmtmui.r51
+  .      file: btmtmui.r76
+  .      file: btmtmui.r83
+  .      file: fsmtms.rsc
+  .      file: imap4.r10
+  .      file: imap4.r51
+  .      file: imap4.r76
+  .      file: imap4.r83
+  .      file: Mms.r10
+  .      file: Mms.r51
+  .      file: Mms.r76
+  .      file: Mms.r83
+  .      file: Not.r10
+  .      file: Not.r51
+  .      file: Not.r76
+  .      file: Not.r83
+  .      file: pop3.r10
+  .      file: pop3.r51
+  .      file: pop3.r76
+  .      file: pop3.r83
+  .      file: PushRegistry.r10
+  .      file: PushRegistry.r51
+  .      file: PushRegistry.r76
+  .      file: PushRegistry.r83
+  .      file: ROMTMREG.rsc
+  .      file: ShareOnlineMtm.r10
+  .      file: ShareOnlineMtm.r51
+  .      file: ShareOnlineMtm.r76
+  .      file: ShareOnlineMtm.r83
+  .      file: sms.r10
+  .      file: sms.r51
+  .      file: sms.r76
+  .      file: sms.r83
+  .      file: smtp.r10
+  .      file: smtp.r51
+  .      file: smtp.r76
+  .      file: smtp.r83
+  .      file: SyncMTMs.r10
+  .      file: SyncMTMs.r51
+  .      file: SyncMTMs.r76
+  .      file: SyncMTMs.r83
+  .      file: Uni.r10
+  .      file: Uni.r51
+  .      file: Uni.r76
+  .      file: Uni.r83
+
+-- entering CMsvSession::OpenSyncL
+
+== session
+  ok   CMsvSession::OpenSyncL
+  .    open took (us): 252000
+
+-- entering registered MTMs
+
+== registered MTMs
+  ok   CClientMtmRegistry
+  .    registered: 15
+  .    0x102072d6: Message  tech 0x102072d5
+  .    0x101f7c5c: Sync mailbox  tech 0x10001671
+  .    0x10001028: E-mail  (IMAP4)  tech 0x10001671
+  .    0x1000102c: Text message  (SMS)  tech 0x10008a30
+  .    0x200009d5: Upload  tech 0x200009d5
+  .    0x101f6dc2: qtn_mce_inbox_write_ro  tech 0x10009157
+  .    0x10009158: Service message  tech 0x10009157
+  .    0x10001029: E-mail  (POP3)  tech 0x10001671
+  .    0x100059c8: Multimedia message  tech 0x100058e2
+  .    0x100058e1: Multimedia message  tech 0x100058e2
+  .    0x1000102a: E-mail  (SMTP)  tech 0x10001671
+  .    0x10009ed5: Via Bluetooth  (OBEX/Bluetooth)  tech 0x10009ed6
+  .    0x10001262: dummy smart msg.  tech 0x10008a30
+  .    0x1020745b: ams  tech 0x100058e2
+  .    0x20002665: E-mail  tech 0x10001671
+
+-- entering folders
+
+== standard folders
+  .    root: 1
+  .    inbox: 156
+  .    outbox: 0
+  .    drafts: 1
+  .    sent: 1
+== END msg ok=2 fail=0

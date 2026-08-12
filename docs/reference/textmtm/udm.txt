@@ -1,0 +1,575 @@
+SYMBIAN OS V9.3
+
+ »
+Symbian OS v9.3 »
+Examples »
+Messaging example code »
+Messaging Text MTM example code »
+UI Data MTM implementation
+
+UI Data MTM implementation
+
+Note: This example is designed to work with Techview and
+there is no guarantee that it will work on other interfaces
+
+The txti project demonstrates a UI Data MTM. The central
+class is CTxtiMtmUiData, derived from the User Interface MTM base
+class CBaseMtmUiData.
+
+txti implements the following MTM functionality:
+
+Example Code
+
+These files can be found in
+examples/Messaging/TextMTM/txti
+
+The files reproduced here are the main files contained in the examples
+directory. Some extra files may be needed to run the examples, and these will
+be found in the appropriate examples directory.
+
+// TXTI.H
+//
+// Copyright (c) 1999 Symbian Ltd.  All rights reserved.
+//
+
+#if !defined(__TXTI_H__)
+#define __TXTI_H__
+
+#if !defined(__MSVSTD_H__)
+#include <MSVSTD.H>
+#endif
+
+#if !defined(__MTUDBAS_H__)
+#include <MTUDCBAS.H>
+#endif
+
+//
+// CTxtiMtmUiData: UI Data MTM
+//
+
+class CTxtiMtmUiData : public CBaseMtmUiData
+    {
+public:
+    // Construction, initialisation, and destruction
+    static CTxtiMtmUiData* NewL(CRegisteredMtmDll& aRegisteredDll);
+    ~CTxtiMtmUiData();
+    void PopulateArraysL();
+    void GetResourceFileName(TFileName& aFileName) const;
+
+    // MTM-specific functionality
+    TInt OperationSupportedL(TInt aOperationId, const TMsvEntry& aContext) const;
+    TInt QueryCapability(TUid aCapability, TInt& aResponse) const;
+
+    // Context-specific information
+    TBool CanEditEntryL(const TMsvEntry& aContext, TInt& aReasonResourceId) const;
+    TBool CanViewEntryL(const TMsvEntry& aContext, TInt& aReasonResourceId) const;
+    TBool CanOpenEntryL(const TMsvEntry& aContext, TInt& aReasonResourceId) const;
+    TBool CanCloseEntryL(const TMsvEntry& aContext, TInt& aReasonResourceId) const;
+    TBool CanDeleteFromEntryL(const TMsvEntry& aContext, TInt& aReasonResourceId) const;
+    TBool CanCopyMoveToEntryL(const TMsvEntry& aContext, TInt& aReasonResourceId) const;
+    TBool CanCopyMoveFromEntryL(const TMsvEntry& aContext, TInt& aReasonResourceId) const;
+    TBool CanReplyToEntryL(const TMsvEntry& aContext, TInt& aReasonResourceId) const;
+    TBool CanForwardEntryL(const TMsvEntry& aContext, TInt& aReasonResourceId) const;
+    TBool CanCreateEntryL(const TMsvEntry& aContext,TMsvEntry& aNewEntry, TInt& aReasonResourceId) const;
+    TBool CanDeleteServiceL(const TMsvEntry& aService, TInt& aReasonResourceId) const;
+    TBool CanCancelL(const TMsvEntry& aContext, TInt& aReasonResourceId) const;
+
+    HBufC* StatusTextL(const TMsvEntry& aContext) const;
+
+// Context-specific icons
+    const CBitmapArray& ContextIcon(const TMsvEntry& aContext,TInt aStateFlags) const;
+private:
+    CTxtiMtmUiData(CRegisteredMtmDll& aRegisteredDll);
+    };
+
+#endif // __TXTI_H__
+
+// txtipan.h
+//
+// Copyright (c) 1999 Symbian Ltd.  All rights reserved.
+//
+
+#if !defined(__TXTIPAN_H__)
+#define __TXTIPAN_H__
+
+//
+//  TTxtiMtmUdPanic: MTM panics
+//
+
+enum TTxtiMtmUdPanic
+    {
+    ETxtiMtmUdWrongMtm,
+    ETxtiMtmUdFoldersNotSupported,
+    ETxtiMtmUdAttachmentsNotSupported,
+    ETxtiMtmUdNoIconForAttachment,
+    ETxtiMtmUdRootEntryGiven,
+    ETxtiMtmUdUnknownOperationId
+    };
+
+extern void Panic(TTxtiMtmUdPanic aPanic);
+
+#endif
+
+// TXTI.CPP
+//
+// Copyright (c) 1999 Symbian Ltd.  All rights reserved.
+//
+
+// Standard includes
+#include <coemain.h> // CCoeEnv
+
+// Messaging includes
+#include <mtclbase.h>
+#include <msvstd.hrh>
+#include <mtmdef.hrh>
+#include <msvuids.h>
+#include <msvids.h>
+
+// Specific includes
+#include "txut.h"
+#include "txtucmds.h"
+#include "txclient.h"
+#include "txti.h"
+#include "txtipan.h"
+#include <txti.rsg>
+#include <txti.mbg>
+#include <MTMUIDEF.HRH>
+
+// Constants
+const TInt KTxtiMtmUdZoomNumberOfStates = 1;
+
+#ifdef __WINS__
+// on wins, assume built to z:
+_LIT(KTxtiMtmUdResourceFile,"TXTI.RSC");
+_LIT(KTxtiMtmUdBitmapFile,"TXTI.MBM");
+#else
+_LIT(KTxtiMtmUdResourceFile,"c:\\resource\\messaging\\TXTI.RSC");
+_LIT(KTxtiMtmUdBitmapFile,"c:\\resource\\messaging\\TXTI.MBM");
+#endif //WINS
+
+_LIT(KTxtiReadyToSend,"Ready To Send");
+//
+//  TTxtiBitmapIndexes: index to bitmap sets
+//  3 sets for messages (at different priority levels), and 1 for a service
+//
+enum TTxtiBitmapIndexes
+    {
+    ETxtiLowPriority=0,
+    ETxtiNormalPriority,
+    ETxtiHighPriority,
+    ETxtiService,
+    ETxtiFolder
+    };
+
+// This constant is required for TechView. It's defined in MTMExtendedCapabilities.hrh
+// but we define it ourselves to keep this code generic, and not depend on TechView-specific headers
+#define KUidMtmQueryCanCreateNewMsgValue 0x10008b24
+
+//
+// CTxtiMtmUiData: UI Data MTM
+//
+
+//
+//  Construction, initialisation, and destruction
+//
+
+CTxtiMtmUiData* CTxtiMtmUiData::NewL(CRegisteredMtmDll& aRegisteredDll)
+    {
+    CTxtiMtmUiData* base=new(ELeave) CTxtiMtmUiData(aRegisteredDll);
+    CleanupStack::PushL(base);
+    base->ConstructL();
+    CleanupStack::Pop();
+    return base;
+    }
+
+CTxtiMtmUiData::~CTxtiMtmUiData()
+    {
+    }
+
+void CTxtiMtmUiData::PopulateArraysL()
+// Initialise bitmaps and function information
+    {
+    // Read MTM-specific operation information
+    ReadFunctionsFromResourceFileL(R_TEXTUD_FUNCTION_ARRAY);
+
+    // Populate bitmap array
+    CreateBitmapsL(KTxtiMtmUdZoomNumberOfStates, KTxtiMtmUdBitmapFile, EMbmTxtiTextl1, EMbmTxtiFold1);
+    }
+
+CTxtiMtmUiData::CTxtiMtmUiData(CRegisteredMtmDll& aRegisteredDll)
+    :   CBaseMtmUiData(aRegisteredDll)
+    {}
+
+void CTxtiMtmUiData::GetResourceFileName(TFileName& aFileName) const
+// Resource file loading
+    {
+    aFileName=KTxtiMtmUdResourceFile;
+    }
+
+//
+//  MTM-specific functionality
+//
+
+TInt CTxtiMtmUiData::OperationSupportedL(TInt aOperationId, const TMsvEntry& aContext) const
+// Context-sensitive operation query
+    {
+    TInt aReasonResourceId=0;  // 0 means "operation is available"
+
+    if (aContext.iMtm!=KUidMsgTypeText) return R_TEXTUD_NOT_SUPPORTED;
+
+    const TBool isMessage=aContext.iType==KUidMsvMessageEntry;
+    const TBool isService=aContext.iType==KUidMsvServiceEntry;
+
+    if (aOperationId==ETxtuCommandRefreshMBox)
+        {
+        // Only allow refresh on services
+        if (!isService)
+            aReasonResourceId=R_TEXTUD_ONLY_REFRESH_SERVICES;
+        }
+    else if (aOperationId==ETxtuCommandExportText)
+        {
+        // Only allow export on local messages
+        if ( (!isMessage) || (aContext.iServiceId != KMsvLocalServiceIndexEntryId) )
+            aReasonResourceId=R_TEXTUD_ONLY_MESSAGES;
+        }
+    return aReasonResourceId;
+    }
+
+TInt CTxtiMtmUiData::QueryCapability(TUid aCapability, TInt& aResponse) const
+// Query for capability
+    {
+    switch (aCapability.iUid)
+        {
+    // Supported valued capabilities
+    case KUidMtmQueryMaxBodySizeValue:
+        aResponse=KMaxTextMessageSize;
+        break;
+    case KUidMtmQueryMaxTotalMsgSizeValue:
+        aResponse=KMaxTextMessageSize;
+        break;
+
+    // Supported non-valued capabilities
+    // boolean returns
+    case KUidMtmQuerySupportedBodyValue:
+    case KUidMtmQueryCanSendMsgValue:
+    case KUidMtmQueryOffLineAllowedValue:
+    case KUidMtmQueryCanReceiveMsgValue:
+    case KUidMtmQueryCanCreateNewMsgValue:
+        aResponse=ETrue;
+        break;
+
+    // Non-supported capabilities
+    // Boolean returns
+    case KUidMtmQuerySupportAttachmentsValue:
+        aResponse=EFalse;
+        break;
+    default:
+        return KErrNotSupported;
+        };
+    return KErrNone;
+    }
+
+const CBaseMtmUiData::CBitmapArray& CTxtiMtmUiData::ContextIcon(const TMsvEntry& aContext, TInt /*aStateFlags*/) const
+// Get context-specific icon
+// Text UI Data MTM has 3 sets of message icons relating to the priority of the message
+    {
+    __ASSERT_ALWAYS(aContext.iMtm==KUidMsgTypeText, Panic(ETxtiMtmUdWrongMtm));
+    __ASSERT_ALWAYS(aContext.iType!=KUidMsvAttachmentEntry, Panic(ETxtiMtmUdNoIconForAttachment));
+
+    TInt retIndex=ETxtiLowPriority;
+    if (aContext.iType == KUidMsvServiceEntry)
+        retIndex=ETxtiService;
+    else if (aContext.iType == KUidMsvFolderEntry)
+        retIndex=ETxtiFolder;
+    else if (aContext.Priority()==EMsvMediumPriority)
+        retIndex=ETxtiNormalPriority;
+    else if (aContext.Priority()==EMsvHighPriority)
+        retIndex=ETxtiHighPriority;
+    return *iIconArrays->At(retIndex);
+    }
+
+//
+// Context-specific information
+//
+
+TBool CTxtiMtmUiData::CanOpenEntryL(const TMsvEntry& aContext, TInt& aReasonResourceId) const
+    {
+    __ASSERT_ALWAYS(aContext.iMtm==KUidMsgTypeText, Panic(ETxtiMtmUdWrongMtm));
+    __ASSERT_ALWAYS(aContext.iType!=KUidMsvAttachmentEntry, Panic(ETxtiMtmUdAttachmentsNotSupported));
+
+    aReasonResourceId=0;
+    if ( aContext.iType != KUidMsvMessageEntry )
+        {
+        aReasonResourceId=R_TEXTUD_ONLY_MESSAGES;
+        return KErrNotSupported;
+        }
+    else
+        return KErrNone;
+    }
+
+TBool CTxtiMtmUiData::CanCloseEntryL(const TMsvEntry& aContext, TInt& aReasonResourceId) const
+    {
+    __ASSERT_ALWAYS(aContext.iMtm==KUidMsgTypeText, Panic(ETxtiMtmUdWrongMtm));
+    __ASSERT_ALWAYS(aContext.iType!=KUidMsvAttachmentEntry, Panic(ETxtiMtmUdAttachmentsNotSupported));
+
+    aReasonResourceId=0;
+    if ( aContext.iType != KUidMsvMessageEntry )
+        {
+        aReasonResourceId=R_TEXTUD_ONLY_MESSAGES;
+        return KErrNotSupported;
+        }
+    else
+        return KErrNone;
+    }
+
+TBool CTxtiMtmUiData::CanViewEntryL(const TMsvEntry& aContext, TInt& aReasonResourceId) const
+    {
+    __ASSERT_ALWAYS(aContext.iMtm==KUidMsgTypeText, Panic(ETxtiMtmUdWrongMtm));
+    __ASSERT_ALWAYS(aContext.iType!=KUidMsvAttachmentEntry, Panic(ETxtiMtmUdAttachmentsNotSupported));
+
+    aReasonResourceId=0;
+    if ( aContext.iType != KUidMsvMessageEntry )
+        {
+        aReasonResourceId=R_TEXTUD_ONLY_MESSAGES;
+        return KErrNotSupported;
+        }
+    else
+        return KErrNone;
+    }
+
+TBool CTxtiMtmUiData::CanEditEntryL(const TMsvEntry& aContext, TInt& aReasonResourceId) const
+    {
+    __ASSERT_ALWAYS(aContext.iMtm==KUidMsgTypeText, Panic(ETxtiMtmUdWrongMtm));
+    __ASSERT_ALWAYS(aContext.iType!=KUidMsvAttachmentEntry, Panic(ETxtiMtmUdAttachmentsNotSupported));
+
+    aReasonResourceId=0;
+    if ( aContext.iType == KUidMsvFolderEntry )
+        {
+        aReasonResourceId=R_TEXTUD_CAN_NOT_EDIT_FOLDERS;
+        return KErrNotSupported;
+        }
+    else
+        return KErrNone;
+    }
+
+TBool CTxtiMtmUiData::CanDeleteFromEntryL(const TMsvEntry& aContext, TInt& aReasonResourceId) const
+    {
+    __ASSERT_ALWAYS(aContext.iMtm==KUidMsgTypeText, Panic(ETxtiMtmUdWrongMtm));
+    __ASSERT_ALWAYS(aContext.iType!=KUidMsvAttachmentEntry, Panic(ETxtiMtmUdAttachmentsNotSupported));
+
+    aReasonResourceId=0;
+    return KErrNone;
+    }
+
+TBool CTxtiMtmUiData::CanCopyMoveToEntryL(const TMsvEntry& aContext, TInt& aReasonResourceId) const
+    {
+    __ASSERT_ALWAYS(aContext.iMtm==KUidMsgTypeText, Panic(ETxtiMtmUdWrongMtm));
+    __ASSERT_ALWAYS(aContext.iType!=KUidMsvAttachmentEntry, Panic(ETxtiMtmUdAttachmentsNotSupported));
+
+    aReasonResourceId=0;
+    return KErrNone;
+    }
+
+TBool CTxtiMtmUiData::CanCopyMoveFromEntryL(const TMsvEntry& aContext, TInt& aReasonResourceId) const
+    {
+    __ASSERT_ALWAYS(aContext.iMtm==KUidMsgTypeText, Panic(ETxtiMtmUdWrongMtm));
+    __ASSERT_ALWAYS(aContext.iType!=KUidMsvAttachmentEntry, Panic(ETxtiMtmUdAttachmentsNotSupported));
+
+    aReasonResourceId=0;
+    return KErrNone;
+    }
+
+TBool CTxtiMtmUiData::CanReplyToEntryL(const TMsvEntry& aContext, TInt& aReasonResourceId) const
+//
+// MTM UI does not support replying.
+//
+    {
+    __ASSERT_ALWAYS(aContext.iMtm==KUidMsgTypeText, Panic(ETxtiMtmUdWrongMtm));
+    __ASSERT_ALWAYS(aContext.iType!=KUidMsvAttachmentEntry, Panic(ETxtiMtmUdAttachmentsNotSupported));
+
+    aReasonResourceId=R_TEXTUD_NOT_SUPPORTED;
+    return KErrNotSupported;
+    }
+
+TBool CTxtiMtmUiData::CanForwardEntryL(const TMsvEntry& aContext, TInt& aReasonResourceId) const
+//
+// MTM UI does not supports forwarding.
+//
+    {
+    __ASSERT_ALWAYS(aContext.iMtm==KUidMsgTypeText, Panic(ETxtiMtmUdWrongMtm));
+    __ASSERT_ALWAYS(aContext.iType!=KUidMsvAttachmentEntry, Panic(ETxtiMtmUdAttachmentsNotSupported));
+
+    aReasonResourceId=R_TEXTUD_NOT_SUPPORTED;
+    return KErrNotSupported;
+    }
+
+TBool CTxtiMtmUiData::CanCreateEntryL(const TMsvEntry& aParent, TMsvEntry& aNewEntry,
+                                      TInt& aReasonResourceId) const
+    {
+    __ASSERT_ALWAYS(aNewEntry.iMtm==KUidMsgTypeText, Panic(ETxtiMtmUdWrongMtm));
+    __ASSERT_ALWAYS(aNewEntry.iType!=KUidMsvAttachmentEntry, Panic(ETxtiMtmUdAttachmentsNotSupported));
+
+    aReasonResourceId=0;
+    // --- Can create services if they are off root ---
+    if (aNewEntry.iType == KUidMsvServiceEntry)
+        return (aParent.Id() == KMsvRootIndexEntryIdValue);
+
+    // --- Can create messages in local folders ---
+    if (aNewEntry.iType == KUidMsvMessageEntry)
+        return (aParent.iMtm.iUid == KMsvLocalServiceIndexEntryIdValue);
+
+    return KErrNotSupported;
+    }
+
+TBool CTxtiMtmUiData::CanDeleteServiceL(const TMsvEntry& aService, TInt& aReasonResourceId)const
+    {
+    __ASSERT_ALWAYS(aService.iMtm==KUidMsgTypeText, Panic(ETxtiMtmUdWrongMtm));
+
+    aReasonResourceId=0;
+    return KErrNone;
+    }
+
+TBool CTxtiMtmUiData::CanCancelL(const TMsvEntry& /*aContext*/, TInt& /*aReasonResourceId*/) const
+    {
+    return EFalse;
+    }
+
+HBufC* CTxtiMtmUiData::StatusTextL(const TMsvEntry& /*aContext*/) const
+    {
+    HBufC* statusBuffer = HBufC::NewL(15);
+    *statusBuffer = KTxtiReadyToSend;
+    return statusBuffer;
+    }
+
+// TXTIDLL.CPP
+//
+// Copyright (c) 1999 Symbian Ltd.  All rights reserved.
+//
+
+#if !defined(__E32STD_H__)
+#include <e32std.h>
+#endif
+
+#if !defined(__TXTI_H__)
+#include "txti.h"
+#endif
+#if !defined(__TXTIPAN_H__)
+#include "txtipan.h"
+#endif
+
+//
+// Global function declarations
+//
+
+#ifndef EKA2
+GLDEF_C TInt E32Dll(TDllReason/* aReason*/)
+// DLL entry point
+    {
+    return (KErrNone);
+    }
+#endif
+
+GLDEF_C void Panic(TTxtiMtmUdPanic aPanic)
+// Panic function
+    {
+    _LIT(KTXTIPanic,"TXTI");
+    User::Panic(KTXTIPanic, aPanic);
+    }
+
+EXPORT_C CBaseMtmUiData* NewMtmUiDataLayerL(CRegisteredMtmDll& aRegisteredDll)
+// Factory function
+    {
+    return CTxtiMtmUiData::NewL(aRegisteredDll);
+    }
+
+// TXTI.MMP
+//
+// Copyright (c) 2000 Symbian Ltd.  All rights reserved.
+//
+
+target          TXTI.DLL
+targettype      DLL
+
+uid 0x10003C61 0x10005237
+VENDORID 0x70000001
+CAPABILITY   All -TCB
+
+source          TXTI.CPP TXTIDLL.CPP
+
+START RESOURCE txti.rss
+header
+TARGETPATH      \resource\messaging
+END
+
+userinclude     ..\txut ..\txtu ..\txtc
+systeminclude   \epoc32\include
+SYSTEMINCLUDE \epoc32\include\techview
+
+library         euser.lib mtur.lib msgs.lib
+
+#if defined(WINS)
+    deffile .\txtiWINS.def
+#else
+    deffile .\txtiEABI.def
+#endif
+nostrictdef
+NOEXPORTLIBRARY
+
+start bitmap Txti.mbm
+header
+sourcepath .
+TARGETPATH  \resource\messaging
+source 4 textl1.bmp textn1.bmp texth1.bmp servn1.bmp fold1.bmp
+end
+
+// TXTI.RSS
+//
+// Copyright (c) 1999 Symbian Ltd.  All rights reserved.
+//
+
+NAME TXTI
+
+#include <eikon.RH>
+#include <MTUD.RH>
+#include "txtucmds.h"
+
+RESOURCE RSS_SIGNATURE
+    { }
+
+// MTM-specific function array
+RESOURCE MTUD_FUNCTION_ARRAY r_textud_function_array
+    {
+    functions=
+        {
+        MTUD_FUNCTION { functiontext="Refresh service"; command=ETxtuCommandRefreshMBox; key='r'; flags=EMtudCommandTransferReceive; },
+        MTUD_FUNCTION { functiontext="Export text to file"; command=ETxtuCommandExportText; key='e'; flags=EMtudCommandTransferSend;}
+        };
+    }
+
+// User information strings
+RESOURCE TBUF80 r_textud_only_refresh_services    { buf="Can only refresh service entries"; }
+RESOURCE TBUF80 r_textud_can_not_edit_folders  {buf="Can not edit folders";}
+RESOURCE TBUF80 r_textud_only_messages  {buf="This can only be done on local messages";}
+RESOURCE TBUF80 r_textud_not_supported  {buf="This action is not supported";}
+
+Icons
+
+Icons are provided for messages, folders, and services, for use in the
+message browser. They are built into a Symbian OS multi-bitmap file
+txti.mbm. ContextIcon() selects the correct icon
+depending on the entry context.
+
+MTM-specific operations
+
+Menu specifications for the two MTM-specific operations, Refresh and
+Export text to file, are provided in the resource
+r_textud_function_array. OperationSupportedL()
+determines whether these operations are appropriate to the entry context.
+
+Context-specific information (Can<Operation>
+functions)
+
+Implementations of these functions check that that the specific
+operation is available and appropriate to the context.
+
+Copyright ©2008  Symbian Software Ltd.

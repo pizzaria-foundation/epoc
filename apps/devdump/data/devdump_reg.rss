@@ -1,0 +1,14 @@
+//  devdump registration resource. Without this the package installs, reports success,
+//  and the application is simply not in the menu.
+#include <appinfo.rh>
+#include <devdump.rsg>
+
+UID2 KUidAppRegistrationResourceFile
+UID3 0xE0DD0000
+
+RESOURCE APP_REGISTRATION_INFO
+    {
+    app_file = "devdump";
+    localisable_resource_file = "\\resource\\apps\\devdump";
+    localisable_resource_id = R_DEVDUMP_LOCALISABLE_APP_INFO;
+    }

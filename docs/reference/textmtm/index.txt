@@ -1,0 +1,25 @@
+SYMBIAN OS V9.3
+
+ »
+Symbian OS v9.3 »
+Examples »
+Messaging example code »
+Messaging Text MTM example code
+
+Messaging Text MTM  example code
+
+Introduction
+
+Building and use
+
+Client-side MTM implementation
+
+UI Data MTM implementation
+
+User Interface MTM implementation
+
+Server-side MTM implementation
+
+TextMTM utilities
+
+Copyright ©2008  Symbian Software Ltd.

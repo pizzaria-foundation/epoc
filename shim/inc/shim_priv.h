@@ -139,6 +139,13 @@ void ShimImageCleanup();
 void ShimAudioCleanup();
 #endif
 
+/* Finalise every open statement, then close every open database. Guarded like the audio
+ * cleanup: an app that stores nothing in SQL should not import sqldb.dll, and an import
+ * the handset cannot satisfy stops the image loading with no error and no report file. */
+#ifdef SHIM_USE_SQL
+void ShimSqlCleanup();
+#endif
+
 /* The FEP-aware editor, or NULL when the scan-code path is selected.
  *
  * Returned from CShimControl::InputCapabilities, which the framework calls during its own

@@ -1,0 +1,27 @@
+//  The UI-data component's own resource file.
+//
+//  CBaseMtmUiData::ConstructL opens whatever GetResourceFileName returns, before it calls
+//  PopulateArraysL — so this file must exist and be loadable even though this MTM registers
+//  no menu commands of its own. An absent resource file is a Leave during construction,
+//  inside the Messaging application.
+//
+//  Installed to \resource\messaging\, which is where the framework looks and where every
+//  one of the platform's own MTMs keeps its UI-data resource (smum.rsc, mmsui.rsc, ...).
+
+//  NAME is required by rcomp for a resource file that declares named resources, and is
+//  exactly four characters. eikon.rh brings RSS_SIGNATURE, which the reference file has and
+//  which rcomp expects as the first resource.
+NAME MTMD
+
+#include <eikon.rh>
+#include <mtud.rh>
+
+RESOURCE RSS_SIGNATURE { }
+
+//  The empty command array. Declared rather than omitted so that adding a command later is
+//  an edit here instead of a new file and a new code path — and so the resource has content,
+//  which a compiler that skips empty files would otherwise leave us without.
+RESOURCE MTUD_FUNCTION_ARRAY r_mtmdemo_function_array
+    {
+    functions = { };
+    }

@@ -1,0 +1,12 @@
+[package]
+name = "symbian-report"
+description = "The report format every on-device probe writes, and the reader that merges them"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+symbian = { workspace = true }

@@ -26,8 +26,11 @@ pub extern crate alloc;
 pub use alloc as __alloc;
 
 pub mod cache;
+pub mod caps;
 pub mod error;
 pub mod fs;
+pub mod hal;
+pub mod msg;
 pub mod image;
 pub mod log;
 pub mod mem;
@@ -35,6 +38,8 @@ pub mod net;
 pub mod process;
 pub mod prop;
 pub mod random;
+pub mod vol;
+pub mod sql;
 
 /// Seconds since the Unix epoch, from the handset's clock.
 ///
@@ -83,6 +88,22 @@ pub fn own_uid3() -> u32 {
 /// microseconds and moves the work to after the window server has drawn something.
 pub fn timer_cancel(handle: i32) {
     unsafe { symbian_sys::shim_timer_cancel(handle) }
+}
+
+/// Arm a repeating timer, delivering a [`symbian_sys::SHIM_EV_TIMER`] every `ms`.
+///
+/// The handle it returns is what tells that event apart from any other timer's, and it is
+/// how an app gets a periodic tick at all: the [`crate`]'s `App` trait has no tick method,
+/// because on the device Avkon owns the loop and nothing calls into an app except through
+/// an event. Anything that has to advance on its own — a state machine, an animation, a
+/// poll — arms one of these and steps from the event.
+///
+/// Cancel with [`timer_cancel`].
+pub fn timer_every(ms: i32) -> Result<i32> {
+    let mut handle = 0i32;
+    // SAFETY: `handle` is a live local; the shim writes at most one i32 through it.
+    Error::check(unsafe { symbian_sys::shim_timer_every(ms, &mut handle) })?;
+    Ok(handle)
 }
 
 pub fn timer_after(ms: i32) -> Result<i32> {

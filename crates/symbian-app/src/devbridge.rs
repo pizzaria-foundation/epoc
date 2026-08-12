@@ -122,11 +122,14 @@ mod enabled {
                 }
                 Some(Command::Pull { path }) => serve_pull(b, &path),
                 // `CTL <line>`: application-defined, forwarded verbatim by the bridge
-                // because epocadb deliberately does not know anyone's verbs. This client
-                // defines none, so the honest answer is to say so rather than to drop the
-                // line — a host tool that sent one would otherwise wait for a reply that
-                // never comes, with the bridge looking hung.
-                Some(Command::Control(_)) => b.reply("ERR no control verbs"),
+                // because epocadb deliberately does not know anyone's verbs. An app that
+                // registered a handler gets to answer; one that did not still gets a reply,
+                // because a host tool that sent a verb into silence would wait for
+                // something that never comes, with the bridge looking hung.
+                Some(Command::Control(line)) => match super::control_reply(&line) {
+                    Some(reply) => b.reply(&reply),
+                    None => b.reply("ERR no control verbs"),
+                },
                 Some(Command::None) | None => {}
             }
             false
@@ -253,4 +256,33 @@ pub fn log_line(line: &str) {
 /// event handler; the bridge's sockets are its own and independent of the app's.
 pub fn on_event(ev: &symbian_ui::RawEvent) -> bool {
     with(|b| b.on_event(ev))
+}
+
+/// What an application does with a `CTL <line>` from the host.
+///
+/// Returns the reply to send, or `None` for a verb it does not recognise — which the
+/// bridge turns into an error reply rather than silence, because a host waiting on a
+/// dropped line cannot tell a slow device from a wrong verb.
+///
+/// A plain `fn` and not a closure: this is stored in a static, and the whole bridge is
+/// single-threaded by construction (see the note on `BRIDGE`). A handler that needs state
+/// keeps it in a static of its own and reads it from the app's tick — which also keeps the
+/// handler off the app's data, since it runs from inside the socket poll.
+pub type ControlFn = fn(&str) -> Option<alloc::string::String>;
+
+static mut CONTROL: Option<ControlFn> = None;
+
+/// Register the handler for `CTL` lines. Call it once, at startup.
+///
+/// Without one the bridge answers `ERR no control verbs`, which is what every app in this
+/// repository did until `apps/devdump` needed to be told to re-run without reinstalling.
+pub fn set_control_handler(f: ControlFn) {
+    // SAFETY: single-threaded; called from app startup, read from the same thread's poll.
+    unsafe { CONTROL = Some(f) };
+}
+
+fn control_reply(line: &str) -> Option<alloc::string::String> {
+    // SAFETY: single-threaded, as above.
+    let f = unsafe { CONTROL }?;
+    f(line)
 }

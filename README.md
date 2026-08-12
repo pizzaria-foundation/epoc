@@ -35,6 +35,11 @@ One front door for everything:
 Confirmed on hardware: a Rust chat client runs on the E72, draws through its own
 rasterizer, takes input from the full QWERTY, and talks to Telegram over TCP.
 
+Also confirmed, in one install by `apps/devdump` — the report is `docs/device-dump.txt`:
+a polymorphic DLL built here loads and its ordinal 1 is callable; the Message Server
+opens and reports 15 registered MTMs; all twenty capabilities are granted *and* honoured;
+and 283 of the 292 libraries asked about load, Open C among them.
+
     Toolchain, packaging, install   done    GCC 15.2 + binutils 2.45, arm-none-symbianelf
     Drawing, text, layout           done    symbian-gfx, symbian-ui: RGB565, own atlases
     Input                           done    QWERTY, overlaid keypad, Fn layer, D-pad, softkeys
@@ -48,15 +53,41 @@ rasterizer, takes input from the full QWERTY, and talks to Telegram over TCP.
     Image decode                    done    symbian::image, through the handset's own codecs:
                                             JPEG, PNG, GIF, BMP. Not WebP, which postdates it
     Audio decode                    done    symbian-audio: Ogg/Opus in, playable WAV out
+    SQL storage                     built   symbian::sql, over the platform's own SQLite
+                                            (sqldb.dll). Not yet run on hardware: whether
+                                            the E72 carries the DLL is what examples/sqlprobe
+                                            is for. Until that report exists, treat it as
+                                            unproven
     Device logging                  done    symbian::log!, switched by DEBUG= in app.conf
     Dev bridge                      done    epocadb: live logs, file push/pull, over Wi-Fi
     Host simulator                  done    symbian-sim: the real app in a window
     Contact sheets                  done    symbian-preview: any screen to a PNG
     Project scaffolding             done    epoc new
-    HTTP                            todo    nothing yet; TCP is there to build it on
-    TLS                             todo    see docs/ on why this matters for what you can port
+    Polymorphic DLLs                done    TARGETTYPE=DLL: edll.lib, own linker script,
+                                            exports pinned by app.conf, gated by e32dump
+    Device reconnaissance           done    apps/devdump: one .sis, a launcher and nine
+                                            isolated probes; the report is docs/device-dump.txt
+    Custom MTM registration         done    apps/mtmdemo: a Client MTM the Message Server
+                                            accepts. Registry 15 -> 16 on an E72, read from a
+                                            fresh session. See docs/device-notes.md
+    Message into the native Inbox   done    symbian::msg writes an entry the Messaging app
+                                            lists — no MTM needed for delivery
+    MTM icon in the native Inbox    done    apps/mtmdemo's UI Data component. Confirmed on an
+                                            E72: our bitmap, not the unknown-type envelope,
+                                            and deleting works from Nokia's own UI
+    Opening a message natively      done    apps/mtmdemo's UI MTM. Confirmed on an E72: the
+                                            native Messaging app opens our message with our
+                                            viewer, an Avkon dialog drawn inside its process
+    Replying natively               todo    needs an editor, and the platform's own editor-
+                                            launch mechanism (muiu.dll) has no public header
+    Native new-message notification blocked MNcnNotification kills the caller; the Avkon
+                                            classes have no public header in this SDK
+    HTTP                            todo    nothing yet; TCP is there to build it on — but the
+                                            handset has http.dll, so porting may be unnecessary
+    TLS                             todo    nothing yet, and two routes exist on the device:
+                                            securesocket.dll, and Open C's OpenSSL 0.9.8a
 
-463 tests, all on the host.
+553 tests, all on the host.
 
 
 ## Projects
@@ -107,7 +138,7 @@ both halves, including the `[patch]` block for working on an app and the SDK at 
       symbian-ui       widgets and the design system: surfaces, icons, palettes, the viewer
       symbian-keys     physical keyboard layouts and dead-key composition
       symbian-sys      the raw FFI boundary, mirroring shim/inc/symbian_shim.h
-      symbian          safe wrappers: files, sockets, images, the disk cache, the log
+      symbian          safe wrappers: files, sockets, images, SQL, the disk cache, the log
       symbian-app      the device entry points as one macro, and the dev bridge
       symbian-audio    Ogg/Opus in, playable RIFF/WAVE out - codecs the handset lacks
       symbian-crypto   hashes and ciphers the platform does not ship
@@ -118,7 +149,7 @@ both halves, including the `[patch]` block for working on an app and the SDK at 
 
     shim/              the C++ side: everything that can Leave, and the event pump
     tools/             epoc (new, build, db, preview), mkfont, e32dump, e32prep, btpush
-    examples/          hello-gui (C++), keyprobe and libprobe (device diagnostics)
+    examples/          hello-gui (C++), keyprobe, libprobe, sqlprobe (device diagnostics)
     docs/              start with getting-started.md
 
 Each crate has its own README with the decisions behind it.

@@ -13,16 +13,32 @@ members = [
     "crates/symbian-audio",
     "crates/symbian-preview",
     "crates/symbian-crypto",
+    "crates/symbian-report",
     "examples/netprobe",
     "examples/selftest",
     "examples/imgprobe",
     "examples/audioprobe",
+    "examples/sqlprobe",
+    "apps/devdump",
     "tools/preview",
 ]
 # Every app's device crate is deliberately absent: a no_std staticlib carrying a
 # #[panic_handler] collides with std's when cargo builds the test harness, so each one is its
 # own workspace root, built only for the ARM target. See any device/Cargo.toml.
-exclude = ["examples/selftest/device", "examples/netprobe/device"]
+exclude = [
+    "examples/selftest/device",
+    "examples/netprobe/device",
+    "apps/devdump/device",
+    "apps/devdump/probes/system/device",
+    "apps/devdump/probes/libsweep/device",
+    "apps/devdump/probes/caps/device",
+    "apps/devdump/probes/dll/device",
+    "apps/devdump/probes/net/device",
+    "apps/devdump/probes/fs/device",
+    "apps/devdump/probes/msg/device",
+    "apps/devdump/probes/mtm/device",
+    "apps/devdump/probes/ncn/device",
+]
 
 [workspace.package]
 version = "0.1.0"
@@ -42,6 +58,8 @@ symbian-app = { path = "crates/symbian-app" }
 symbian-audio = { path = "crates/symbian-audio" }
 symbian-preview = { path = "crates/symbian-preview" }
 symbian-crypto = { path = "crates/symbian-crypto" }
+symbian-report = { path = "crates/symbian-report" }
+devdump = { path = "apps/devdump" }
 opus = { path = "crates/opus" }
 epocadb = { path = "crates/epocadb" }
 selftest = { path = "examples/selftest" }

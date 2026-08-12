@@ -1,0 +1,67 @@
+//  GENERATED from this template by tools/symbuild — do not edit build/mtmdemoreg.rss.
+//
+//  The @ORD_*@ placeholders are filled from the .def elf2e32 wrote, so each entry_point is
+//  the ordinal the linker actually assigned rather than the one somebody assumed. elf2e32
+//  numbers exports by sorting their names, so declaration order in app.conf says nothing.
+//
+//  All four component slots are declared even though only the client is implemented.
+//  CObserverRegistry::HandleSessionEventL indexes the declared array by fixed slot — 0
+//  server, 1 client, 2 UI, 3 UI data — with no bounds check, so a registration that declares
+//  fewer components makes the Message Server's own client read past the end of the array.
+//  That is a panic, not a Leave, and it kills whichever process installed the group.
+
+#include <mtmconfig.rh>
+
+RESOURCE MTM_INFO_FILE
+    {
+    mtm_type_uid = @MTM_TYPE_UID@;
+    technology_type_uid = @MTM_TECHNOLOGY_UID@;
+    components =
+        {
+        MTM_COMPONENT_V2
+            {
+            human_readable_name = "@MTM_NAME@";
+            component_uid = KUidMtmServerComponentVal;
+            entry_point = @ORD_SERVER@;
+            version = VERSION_V2 {};
+            filename = "@DLL@";
+            },
+        MTM_COMPONENT_V2
+            {
+            human_readable_name = "@MTM_NAME@";
+            component_uid = KUidMtmClientComponentVal;
+            entry_point = @ORD_CLIENT@;
+            version = VERSION_V2 {};
+            filename = "@DLL@";
+            },
+        MTM_COMPONENT_V2
+            {
+            human_readable_name = "@MTM_NAME@";
+            component_uid = KUidMtmUiComponentVal;
+            entry_point = @ORD_UI@;
+            version = VERSION_V2 {};
+            filename = "@DLL@";
+            },
+        MTM_COMPONENT_V2
+            {
+            human_readable_name = "@MTM_NAME@";
+            component_uid = KUidMtmUiDataComponentVal;
+            entry_point = @ORD_UIDATA@;
+            version = VERSION_V2 {};
+            filename = "@DLL@";
+            }
+        };
+    }
+
+//  SendAs. This MTM cannot send — there is no server component behind the slot — so it
+//  advertises nothing rather than appearing in "Send via…" with nothing behind it.
+RESOURCE MTM_CAPABILITIES
+    {
+    send_capability = 0;
+    body_capability = 1;
+    }
+
+//  Must exist, must be third, may be empty.
+RESOURCE MTM_SECURITY_CAPABILITY_SET
+    {
+    }

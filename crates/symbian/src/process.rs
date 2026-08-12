@@ -31,3 +31,59 @@ pub fn is_running(uid3: u32) -> bool {
     // SAFETY: no pointers; the shim walks the process list and returns 1/0/negative.
     unsafe { sys::shim_process_running(uid3) == 1 }
 }
+
+/// [`start`], but abandons the wait after `timeout_ms` and kills the child.
+///
+/// [`start`] waits on the child's rendezvous with no escape, which is right for a
+/// controller that cannot proceed without its daemon. It is wrong for anything launching a
+/// child it does not trust: one that neither signals nor dies hangs the caller for good,
+/// and "every asynchronous request needs a way to abandon it, and the one that never
+/// completes is exactly the one that needs it" (`docs/device-notes.md`).
+///
+/// Returns [`Error::Platform`] carrying `KErrTimedOut` (-33) if the deadline wins.
+pub fn start_with_timeout(path: &Utf16Path, timeout_ms: i32) -> Result<()> {
+    let units = path.as_units();
+    // SAFETY: `units` is valid for `units.len()` u16 and only read.
+    Error::check(unsafe {
+        sys::shim_process_start_timeout(units.as_ptr(), units.len() as i32, timeout_ms)
+    })
+}
+
+/// Launching and watching a child process, as an interface rather than a set of calls.
+///
+/// The reason this is a trait: `apps/devdump`'s launcher is a state machine whose whole job
+/// is to survive children that refuse to load, die halfway and hang. Those are precisely
+/// the cases a device cannot be asked to reproduce on demand — the whole point is that they
+/// happen once, on a handset, at the far end of an install. Behind a trait, the state
+/// machine runs on the host against a fake that produces all three on request, and the
+/// device supplies only [`ShimProcs`].
+///
+/// Same shape and same reasoning as [`crate::fs::Fs`] / [`crate::fs::MemFs`].
+pub trait Procs {
+    /// Launch and wait for the child's rendezvous, up to `timeout_ms`.
+    ///
+    /// An `Err` here is the interesting outcome, not a malfunction: it is what an image the
+    /// loader refuses looks like from the outside — the failure that otherwise produces
+    /// nothing at all.
+    fn start(&mut self, path: &Utf16Path, timeout_ms: i32) -> Result<()>;
+    /// Whether a process with this UID3 is alive *right now*.
+    ///
+    /// Liveness, not completion. A child that panicked mid-write stops being alive exactly
+    /// like one that finished, so a caller that needs to tell those apart must read what
+    /// the child left behind.
+    fn is_running(&mut self, uid3: u32) -> bool;
+}
+
+/// [`Procs`] over the shim. Zero-sized; there is nothing to hold.
+#[derive(Copy, Clone, Debug, Default)]
+pub struct ShimProcs;
+
+impl Procs for ShimProcs {
+    fn start(&mut self, path: &Utf16Path, timeout_ms: i32) -> Result<()> {
+        start_with_timeout(path, timeout_ms)
+    }
+
+    fn is_running(&mut self, uid3: u32) -> bool {
+        is_running(uid3)
+    }
+}

@@ -561,6 +561,12 @@ CShimAppUi::~CShimAppUi()
     /* Before the files for the same reason: the media framework keeps the clip open. */
     ShimAudioCleanup();
 #endif
+#ifdef SHIM_USE_SQL
+    /* Before the files only for tidiness — the SQL server owns its own file handles and
+     * none of ours. What does matter is that it runs at all: a connection left open past
+     * process exit keeps server-side state alive until the server notices. */
+    ShimSqlCleanup();
+#endif
     ShimFilesCleanup();
 #ifdef SHIM_USE_FEP
     ShimFepCleanup();

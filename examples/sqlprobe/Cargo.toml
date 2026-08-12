@@ -1,0 +1,12 @@
+[package]
+name = "sqlprobe"
+description = "Asks the handset whether it has SQLite, and what it costs"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+symbian-ui = { path = "../../crates/symbian-ui" }
+symbian-gfx = { path = "../../crates/symbian-gfx" }
+symbian-sys = { path = "../../crates/symbian-sys" }
+symbian = { path = "../../crates/symbian" }

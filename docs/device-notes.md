@@ -686,6 +686,323 @@ a failure gets investigated.
 An empty search result is evidence of nothing until the search itself has been tested against
 a string you know is there.
 
+## The one-trip dump, and what the E72 actually is
+
+`apps/devdump` ran seven isolated probes in one install on 11 August 2026. All seven ran to
+completion — no image refused, nothing crashed, nothing timed out. The full report is
+committed at `docs/device-dump.txt`; this is what it settled.
+
+Read the section below it first if you are about to write a probe of your own: it took three
+installs to get this one report, and none of the three failures was on the handset.
+
+**The DLL track works on hardware.** `RLibrary::Load` of a `symbuild`-built polymorphic DLL
+returns `KErrNone`, `Type()[0]` is `KDynamicLibraryUid`, `Lookup(1)` returns a callable
+function, and calling it writes our sentinel through the pointer we passed and echoes the
+argument we sent. Its own `User::TickCount` import resolved from inside the DLL, so both the
+export table and the import table are real. Everything MTMs, ECom and FEPs are built on is
+therefore reachable from this toolchain.
+
+**The ROM patch grants everything, and the grants are honoured.** All twenty capabilities
+report held, and — the part `HasCapability` alone cannot tell you — the operations agree:
+`C:\sys\bin\`, `Z:\sys\bin\`, `C:\resource\` and AppArc's own data cage all answered
+`RFs::Att` with `KErrNone`. Divergence between the kernel's answer and the operation's: zero
+paths. Capability is not a constraint on this handset and does not need to be designed
+around.
+
+**283 of 292 libraries load.** The nine that do not are `ecmtclient`, `efile`, `ftpprot`,
+`ftpsess`, `gb2312_shared`, `jisx0201`, `jisx0208`, `watcher` and `locationmanager` — none
+of which anything here wants. Everything that had been an open question is present:
+
+| | |
+|---|---|
+| Open C | ✅ `libc`, `libcrypto`, `libssl`, `libz` all load — **the handset has it** |
+| HTTP | ✅ `http.dll` — the platform's own stack. The README's "HTTP todo" is moot |
+| TLS | ✅ two ways: `securesocket.dll` and Open C's OpenSSL 0.9.8a |
+| messaging | ✅ `msgs`, `mtur` |
+| telephony | ✅ `etel`, `etelmm` (the latter has no `.dso` in this SDK at all) |
+| sensors, BT, location | ✅ `sensrvclient`, `btdevice`, `lbs` |
+| storage | ✅ `centralrepository`, `edbms`, `sqldb` |
+| already known | ✅ `random`, `fepbase`, confirming the earlier run |
+
+`etelmm.dll` matters twice over: it holds `RMobilePhone`, and the SDK ships no import library
+for it — so it would never have appeared in a sweep generated from `epoc32/release/armv5/lib`
+alone. That is why `apps/devdump/src/dlls.rs` carries an `EXTRA` list.
+
+**The messaging stack, measured.** `CMsvSession::OpenSyncL` succeeds in 252 ms. Fifteen MTMs
+are registered, including SMS `0x1000102c`, two MMS entries (`0x100058e1`, `0x100059c8`),
+IMAP4/POP3/SMTP `0x10001028`/`29`/`2a` and OBEX `0x10009ed5`. The inbox held 156 entries.
+
+And the fact that matters for writing one: **`C:\resource\messaging\mtm\` is empty and
+`Z:\resource\messaging\mtm\` holds 54 files.** Every registration on this phone is in ROM, so
+`C:` is the empty, writable directory a new MTM's `.mtm` would go into, with nothing to
+collide with.
+
+**The handset.** `EMachineUid` `0x20015090`, ARMv5, `ECPUSpeed` 192000, 125,698,048 bytes of
+RAM with ~50 MB free, 8.5 MB of ROM, 4 KB pages. Screen 320×240, `EDisplayColors` 16777216,
+`TDisplayMode` 11, and pure red reads back as `0xffff0000` — which confirms the earlier
+finding rather than re-deriving it. Drives: `C:` NAND flash with 191,960 KB free of 265,272,
+`D:` a 50 MB RAM disk, `E:` present but **not mounted — no memory card**, `Z:` the read-only
+ROM. `RFs::PrivatePath` came back as `C:\Private\e0dd0080\`, with a capital P.
+
+### Two things the rest of this file gets wrong
+
+**`RFs::Rename` overwrote an existing file.** The capabilities-and-filesystem section below
+says it refuses with `KErrAlreadyExists`, and that the atomic replace therefore has to delete
+the destination first — opening the window where neither name holds the new data. On this
+handset, renaming over an existing file inside the private cage simply succeeded. That is the
+only `FAIL` in the whole report, and what failed was the probe's expectation.
+
+The delete-first dance in `fs::write_atomic` is not therefore wrong to keep — one handset and
+one directory is not the same as the general case, and the cost of keeping it is a window
+that only loses an update. But the claim as written is not what this device does.
+
+**`ENanoTickPeriod` is not supported here.** There is a section below about it being in
+microseconds and about every duration this SDK printed once being a thousand times too small.
+On this handset `HAL::Get` answers `KErrNotSupported` for it, along with
+`EFastCounterFrequency`. What exists is `ESystemTickPeriod` = 15625 µs, a 64 Hz tick — which
+is consistent with the monotonic clock reading 0 µs of difference between two back-to-back
+calls.
+
+### The three installs it cost, none of them the handset's fault
+
+Recorded because every one of them is the same category of mistake — an instrument that
+reported something other than what it measured — and because the fixes are all now pinned by
+tests.
+
+**Nothing drove the state machine.** `symbian_ui::App` has no tick method: on the device
+Avkon owns the loop and nothing calls into an app except through an event. The launcher was
+written with a `tick()` and a comment saying "the host calls this from its timer", and no host
+does. It sat in its first phase forever, drew `running: starting`, and — because the only line
+on that screen naming a mechanism was the dev bridge — read as a network problem. Two installs
+went into the bridge before the launcher was suspected. `symbian::timer_every` now exists, and
+a `NO TICKER` label appears if the timer fails to arm, so this presents as itself rather than
+as slowness.
+
+**A subdirectory that was never created.** `RFs::MkDirAll` ignores the last component of a
+path that does not end in a separator, so `MkDirAll("C:\Data\dump")` ensures `C:\Data\` and
+creates no `dump`. Every write then answered `KErrPathNotFound` and the output ladder fell
+through to the private data cage — where the file manager cannot see it and, because the cage
+is per-UID3, each of the eight binaries landed in a *different* one. The report existed eight
+times and was unassemblable. Output is flat in `C:\Data\` now, named `dump-NN-<probe>.txt`;
+there is no directory left to fail to create.
+
+**The label was used as a path.** `Report::path_label` is prose in the cage case, and the
+launcher was passing it to `strip_filename` to find sibling sections — so a failed ladder
+produced a reader searching a directory made of English. `Report::dir()` and
+`Report::reachable()` are separate from the label now, and the launcher branches on
+`reachable`, not on whether a string is non-empty.
+
+## A custom MTM registers on this handset, and four things had to be true first
+
+`InstallMtmGroup` on a `.mtm` in `C:\resource\messaging\mtm\` works: the registry went
+**15 → 16** and the type was still there when read from a session that had never seen the
+install. So a third-party message type is possible on the E72, and everything after it — a
+UI Data MTM, an icon, opening a message — is ordinary work rather than an open question.
+
+It took eight device runs to establish, and seven of them were spent on the four traps below.
+Every one of them presents as the same thing: the process dies with no panic dialog, no log,
+and the probe's last breadcrumb pointing at whatever line happened to be next.
+
+**The registration must declare all four component slots, even the ones that do not exist.**
+`CObserverRegistry::HandleSessionEventL` handles `EMsvMtmGroupInstalled` with
+
+```cpp
+*mtmgroupdata->MtmDllInfoArray()[index]
+```
+
+where `index` is the fixed slot of the component type — 0 server, 1 client, 2 UI, 3 UI data —
+indexing the array the registration declared, with no bounds check. Declare only a client
+component and the client registry reads element `[1]` of a one-element array. Symbian's array
+classes bounds-check *always*, not only in debug, so this is a panic on a release ROM too —
+and a panic is not a Leave, so no `TRAP` catches it.
+
+It also fires on a **later scheduler turn** than the install, which is why the crash never
+appeared where the cause was. The documentation says a group may declare only some
+components; about registration it is right, about what happens next it is not. Every real MTM
+declares four: the SDK's reference example does, and the handset's own `sms.rsc` names
+`smum.dll` twice to fill the UI and UI-data slots.
+
+**Ordinals come from a name sort, so the registration must be generated.** `apps/mtmdemo`
+declares its exports as client, server, UI, UI-data and gets ordinals **1, 2, 4, 3** —
+because `NewMtmUiDataL` sorts before `NewMtmUiL`. A hand-written `entry_point` would have
+sent the framework into the UI-data factory when it asked for the UI one, inside the
+Messaging application's process. `symbuild` now generates the `.rss` from the `.def` elf2e32
+writes (`MTM_RESOURCE_TEMPLATE`), so the two cannot disagree.
+
+**Counting the registry only means anything from a new session.** `CClientMtmRegistry` is a
+per-process copy, filled at construction and refreshed thereafter only when the session
+dispatches the server's group-installed event — which cannot happen while the caller is
+still inside its own `RunL`. Three runs read the pre-install snapshot and recorded "the
+server rejected it". Rebuilding the registry object does not help; the session's copy is
+what is stale. Close the session, open another, and count from that.
+
+**Do not `RLibrary::Load` an ECom plugin to see whether it is there.** A probe did that to
+`ncnnotification.dll` as a "safe" presence check — load and close cannot fault, and for an
+ordinary DLL that is true. An ECom implementation's lifetime belongs to `REComSession`, and
+loading one behind its back left the process in a state where the *next* `CMsvSession::OpenSyncL`
+died. The check broke the thing it was added to protect.
+
+### The Messaging application does honour a third party's icons
+
+Confirmed on the handset: with a UI Data component registered, a message of ours draws with
+**our** bitmap instead of the "unknown type" envelope, and the service draws with its own.
+Two different icons, chosen by entry type, from an `.mbm` we shipped.
+
+This was not deducible. **No UI Data MTM in the handset's ROM ships an `.mbm` at all** — the
+Messaging application resolves its own icons through `CMceBitmapResolver` and AknSkins — so
+the live possibility was that a third party's `ContextIcon()` was never consulted and the
+`EAknsMinorQgnPropMceUnknownRead` envelope was permanent. It is consulted.
+
+Three things had to be right, and each failed loudly enough to be worth writing down:
+
+**A DLL must hold at least the capabilities of the process that loads it.** `apps/mtmdemo`
+first shipped with `CAPABILITY none`, under a comment claiming a DLL inherits its loader's
+capabilities and its own set merely restricts who may load it. That is backwards. With
+`none`, no privileged process can load it — and the symptom was the Messaging application
+answering **"Unable to execute file for security reasons"** when the user tried to delete one
+of our messages, because deleting is what made it go and instantiate the MTM. `ALL -TCB` is
+what the SDK's reference MMP asks for and what fixes it.
+
+**The UI-data resource file needs `NAME` and `RSS_SIGNATURE`.** rcomp answers `Label not
+found` and nothing else. `NAME` is exactly four characters; `RSS_SIGNATURE` comes from
+`eikon.rh`. `CBaseMtmUiData::ConstructL` opens this file *before* calling `PopulateArraysL`,
+so it must exist and load, and it must be installed to `\resource\messaging\` alongside the
+`.mbm`.
+
+**The order of bitmaps in the `.mbm` is the icon enum.** `CreateBitmapsL(zoom, file, first,
+last)` walks the file from first to last, so whatever order the bitmaps were converted in is
+the order `iIconArrays` ends up in. There is no name-based lookup to check it against.
+
+And one deliberate divergence from the SDK's reference, which matters more than any of the
+above: **nothing in a UI Data component may panic.** `txti` opens almost every method with
+`__ASSERT_ALWAYS(aContext.iMtm==KUidMsgTypeText, Panic(...))`, which is reasonable for sample
+code under TechView where a panic is a developer's problem. This component runs inside the
+user's Messaging application, where the same line is a way to close it because a caller
+passed an unexpected entry. Every method takes the defensive branch instead — including
+`ContextIcon`, which clamps its index rather than trusting the array it is about to
+dereference.
+
+### What the answers control
+
+The `Can*L` family is the menu. `CanDeleteFromEntryL` returning `ETrue` is what lets a user
+get rid of our messages at all — refusing it would leave them in the inbox with no way out
+short of uninstalling. Each of the others is a menu item that must not appear before the
+component behind it exists: a `CanReplyToEntryL` answering `ETrue` with no UI MTM to reply is
+a menu item that leaves with `KErrNotSupported` when tapped.
+
+### Opening works too, and the viewer is drawn inside Nokia's process
+
+`CanOpenEntryL` and `CanViewEntryL` returning `ETrue`, plus a `CBaseMtmUi` whose `OpenL` opens
+a dialog, and **the native Messaging application opens a third party's message with a third
+party's viewer**. Confirmed on the E72: tapping one of our inbox entries showed the body text
+the probe had written into its `CMsvStore`.
+
+This was the second thing that could not be deduced. The first was whether MCE honours our
+icons; this was whether it calls our `OpenL` at all, or resolves opening the way it resolves
+icons — through its own view machinery, with a third party getting nothing.
+
+**There is no editor application in this, and there cannot be one.** The obvious shape for a
+UI MTM is "launch an editor and return an operation that watches it", and both routes to it
+are closed:
+
+- The SDK's reference implementation does not do it. `CTextMtmUi::LaunchEditorApplicationL`
+  is a stub whose own comment reads *"In a real MTM, would launch the appropriate
+  editor/viewer... Here we just pretend"*. It gives the shape of the return value and no
+  mechanism.
+- S60's own mechanism is `muiu.dll` — `CMuiuMsgEditorService`, `RMuiuMsgEditorService`,
+  `CMsgEditorServerWatchingOperation` — which ships as a binary with no header and no import
+  library in this SDK. The Messaging application uses it; a third party cannot.
+
+What replaces it is better for a viewer anyway. A UI MTM is *loaded into* the application
+showing the message list, and `CBaseMtmUi` hands it that application's `CCoeEnv`
+(`mtmuibas.h:504`). So the question is not how to launch a viewer but what to draw, and the
+answer is entirely public: `CAknMessageQueryDialog` over `R_AVKON_MESSAGE_QUERY_DIALOG`
+(`0x8cc0059`, already in `avkon.rsg`) — a scrollable text dialog with a heading, needing no
+resource of our own. Avkon is already loaded in that process because it *is* that process.
+
+Two things that surprised the compiler rather than the handset:
+
+- **The system format layers are not on `CCoeEnv`.** `CRichText::NewL` needs a
+  `CParaFormatLayer` and a `CCharFormatLayer`, and `SystemParaFormatLayerL` lives on
+  `CEikonEnv` (`eikenv.h:290`) — what a UI MTM is given is the base `CCoeEnv`. Reaching them
+  means asserting the host is an Eikon application and casting on that assertion.
+  `CEikonEnv::NewDefaultParaFormatLayerL` is a *static* factory and needs no such claim; the
+  text is extracted as plain characters immediately after, so which layers they were never
+  reaches the screen.
+- `CParaFormatLayer` is declared in `txtfmlyr.h`, not in any of the ten `frm*.h` headers.
+
+And one deliberate limit: the viewer caps the body at 4096 characters. The dialog holds the
+text in one descriptor and a message from a chat service has no natural size limit — running
+out of memory here kills the user's Messaging application, and truncation is both visible and
+survivable.
+
+### What still does not work: the platform's new-message notification
+
+`MNcnNotification::NewMessages` kills the calling process. `ncnnotification.dll` is present,
+the ECom resolution is reached, and the call does not return — with the inbox folder's id and
+with a real service id alike. The interface is documented for *email* plugins (`aMailBox`,
+"New email"), and `CNcnSession` panics its client with `EPanicNcnRequestActive`, so a
+plausible reading is that it is unusable from outside the mail plugins it was written for.
+
+The consequence for design: a message delivered into the inbox arrives **quietly**. It is
+visible in the Messaging application and it is not announced. Anything wanting the indicator
+and tone would have to go at `CAknSoftNotifier` and `CAknSmallIndicator`, which are exported
+from `aknnotify.dso` and have no public header in this SDK.
+
+### And what works without any of it
+
+A message written straight into the inbox with `CMsvEntry::CreateL`, `SetNew`, `SetUnread`
+and a body in its `CMsvStore` **appears in the native Messaging application** with no MTM
+registered at all — under the "unknown type" envelope, and it cannot be opened. Icon and
+opening both need registered UI components; delivery does not need anything. That is the
+cheap half of the integration and it was working before any of the above was understood.
+
+## Building a DLL: three things that fail silently and one that never runs
+
+The toolchain produced only EXEs until `apps/dlltest`. A polymorphic DLL — the shape
+every plugin interface on this platform uses, MTMs included — turned out to need four
+things the EXE path never exercises. Three of them fail by producing a perfectly valid
+file that does nothing on the handset.
+
+**`EXPORT_C` is what makes a symbol exist, not what decorates it.** GCC's
+`arm-none-symbianelf` target gives every symbol *hidden* visibility by default, which is
+the platform's own convention: a Symbian DLL exports only what it declares. A hidden
+symbol never reaches `.dynsym`, and `.dynsym` is the only place elf2e32 looks when it
+builds the export table (`vendor/gnupoc-git/tools/elf2e32/elf2e32.cpp:156`). Without
+`EXPORT_C` the DLL compiles, links, packages and installs with **`exportDirCount 0`** —
+`RLibrary::Load` succeeds and `RLibrary::Lookup(1)` returns NULL, on the device, with
+nothing to say why.
+
+**Ordinals come from a name sort, not from declaration order.** `findExports` collects
+every `STB_GLOBAL` FUNC or OBJECT with a nonzero value and sorts by name. So with more
+than one export the ordinals are alphabetical by mangled name, and adding a third export
+can renumber the other two underneath callers that already hardcoded them. `symbuild`
+generates a linker version script from `EXPORTS` in `app.conf`, which pins the set — but
+not the order. One export is safe by construction; several want a frozen `.def`
+(`elf2e32 --definput`).
+
+**Writable static data needs `EPOCALLOWDLLDATA`, which nothing here sets.** Keep DLLs
+free of non-const globals. `tools/e32dump.py --expect-dll` now refuses an image with a
+nonzero `dataSize` or `bssSize` and no such flag, along with the wrong UID1, a missing
+`KImageDll`, and an empty export table — the three host-checkable halves of the above.
+
+**Static constructors never run — and that is true of the EXEs too.** elf2e32 sets
+`KImageNoCallEntryPoint` unconditionally (`elf2e32.cpp:351`), so the loader does not call
+`_E32Dll`, so `__cpp_initialize__aeabi_` is never reached. Every `.exe` this toolchain has
+shipped carries the same flag. Nothing has depended on it yet; the first C++ plugin that
+expects a file-scope object to be constructed before its ordinal is called would find it
+zeroed, with no diagnostic. Initialise inside the exported function.
+
+One benign noise to not chase: linking a DLL prints `string table [6] is corrupt` for
+`euser.dso`, `dfpaeabi.dso`, `drtaeabi.dso` and `scppnwdl.dso`. Those files' `.strtab`
+ends in spaces rather than the NUL that ELF requires — a defect in Nokia's own import
+libraries, visible only on the DLL path because that is where ld reads their version
+definitions. The imports resolve correctly; `e32dump` confirms it.
+
+What is still unknown, and is only knowable on the handset: whether the device loader
+accepts the image at all, and whether `Lookup(1)` returns something callable. That is
+what `apps/devdump`'s 40-dll probe asks.
+
 ## Host toolchain
 
 **`-D__SUPPORT_CPP_EXCEPTIONS__` and `-fexceptions` are load-bearing.**
@@ -811,3 +1128,81 @@ bearing:
 Playback needs **no capability**. `UserEnvironment` is for recording; `MultimediaDD`
 appears on the priority-taking overloads but its own documentation says it grants
 *precedence*, not access, and the SDK's `CLFExample` plays audio under `capability none`.
+
+## Symbian SQL exists on the E72, and a bad index is fatal
+
+`examples/sqlprobe` on the handset: **`OPEN: yes`**. The E72 carries `sqldb.dll`, the app
+links it statically and starts, and `RSqlDatabase::Create` on a path under the app's private
+directory succeeded with no capability beyond the `WriteUserData` the report itself needed.
+So the platform's SQLite is real and reachable, which makes `symbian::sql` a store an
+application can rely on rather than a hopeful wrapper.
+
+The first numbers, from a fresh database on C:
+
+    create + open        40 ms
+    size after create    3072 bytes   (one page, plus the header)
+    CREATE TABLE         22 ms
+    CREATE INDEX         35 ms
+
+Every figure landed on an exact millisecond, which is the clock's resolution rather than a
+coincidence — `shim_now_us` reads the nanokernel tick, and on this device that tick is a
+millisecond. Any measurement finer than that has to be taken over a batch, which is why the
+insert phases time 200 rows and divide rather than timing one.
+
+**An out-of-range index kills the process.** Not `KErrArgument`, not a NULL: the SQL client
+asserts, and an assertion is a panic. A panic is not a Leave, so no TRAP catches it, nothing
+in the shim ABI can report it, and the application simply closes. The probe established this
+by binding a parameter at index 2 of a two-parameter statement on purpose — the deliberate
+one-based attempt in the index-base phase — and dying there.
+
+Three consequences, all of them now in the code:
+
+- **The guard has to live in Rust.** The platform offers no way to ask a prepared statement
+  how many parameters or columns it has, so there is nothing the shim can check. The `?`
+  count is taken off the statement text at prepare time and `symbian::sql::Stmt::bind`
+  refuses an index past it. Named parameters make that count meaningless, so the guard
+  stands aside rather than refusing something legal.
+- **A flush per phase is too coarse.** The report ended at `CREATE INDEX` and said nothing
+  about what came next, because the phase that died had not flushed yet. A diagnostic on a
+  platform where a single call can end the process needs a breadcrumb written *before* the
+  call, not a summary written after it. `SqlProbe::mark` does that now.
+- **A probe needs to resume across launches.** The same lesson `imgprobe` learned about rows,
+  arriving for phases: the next phase index is persisted before the phase runs, so a phase
+  that closes the app is skipped on the next launch instead of trapping the run there.
+
+`shim_sql.cpp`'s `default:` branch in `shim_sql_column_type` is therefore unreachable on this
+handset. It is kept, with a comment saying so, because it still catches the other thing it
+would be wrong to pass off as NULL: a column type a future platform adds.
+
+### Stepping a non-SELECT statement is fatal too
+
+The breadcrumbs paid for themselves on the next run. The report ended at `-> step`, naming
+the call exactly: `RSqlStatement::Next()` on a prepared INSERT. Stepping a statement that
+produces no row set panics for the same reason a bad index does, and closes the app with the
+same silence.
+
+That contradicted a design decision, so the decision was wrong. `Db::execute_with` used to
+step rather than execute, with a comment claiming one code path served both shapes and that a
+statement which unexpectedly returned rows would merely be stepped to exhaustion. The
+platform's answer is that the mistake in the other direction is not survivable. There are two
+paths now — `Stmt::exec` (`RSqlStatement::Exec`) for INSERT, UPDATE, DELETE and DDL, and
+`Stmt::step` (`Next`) for SELECT — and two host tests assert that a non-SELECT is never
+stepped and a query is never executed, because nothing else stands between a refactor and a
+phone that closes the app when a message is saved.
+
+Unlike the index check, this one gets no guard. Telling a SELECT from a non-SELECT means
+parsing SQL, and a guess that refused a legal `WITH … SELECT` or a `PRAGMA` would be worse
+than the documentation.
+
+### A resuming probe cannot keep findings in memory
+
+The same run exposed a bug in the instrument rather than the platform, worth recording
+because the next probe will be tempted by it. `sqlprobe` kept a `live` flag, set in the
+`open` phase, so that later phases could say "skipped" instead of repeating one failure. The
+crash forced a relaunch, the relaunch resumed at phase 4, and every phase from there reported
+"the database never opened" — because the phase that would have set the flag had run in a
+previous process. Eight phases of nothing.
+
+Any state a resuming diagnostic holds in memory is state it does not have. Each phase opens
+the database itself now, which costs an open per phase and cannot be wrong about a launch it
+was not present for.

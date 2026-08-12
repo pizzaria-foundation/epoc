@@ -76,6 +76,26 @@ source "$APP/app.conf"
 # telemetry through it (a capability-free, no-library primitive), so every app that draws
 # is observable. An app that genuinely wants it out can still set USE_PROP=0.
 : "${USE_PROP:=1}"
+# EXE or DLL. A DLL here means a Symbian *polymorphic* DLL — one loaded by
+# RLibrary::Load and entered through an ordinal, which is the shape every plugin
+# interface on this platform uses (MTMs, ECom, FEPs, recognisers).
+#
+# The two targets differ in more places than a flag: a different startup library
+# (edll.lib, not eexe.lib), a different entry symbol, a different linker script, a
+# different UID1, and an export table that an EXE simply does not have. They are
+# kept as one script rather than two because everything *between* those points —
+# the cargo invocation, the C++ flags, e32prep, the e32dump gate — is identical,
+# and the last thing this build needs is two copies of the ELF preparation drifting
+# apart. Each divergence below is marked `# DLL:`.
+#
+# A DLL target stops after producing build/$NAME.dll: no resource compilation (a
+# DLL has no menu entry, ever) and no .sis (it is bundled into the package of
+# whatever EXE loads it, through that app's EXTRA_DLLS).
+: "${TARGETTYPE:=EXE}"
+case "$TARGETTYPE" in
+  EXE|DLL) ;;
+  *) echo "app.conf TARGETTYPE must be EXE or DLL, not '$TARGETTYPE'" >&2; exit 1 ;;
+esac
 
 # An app built on the shim always needs the whole GUI set, so it is not worth
 # making every app.conf repeat it. apparc/cone/eikcore/avkon are the application
@@ -114,6 +134,17 @@ if [ "${USE_SHIM:-0}" = 1 ]; then
     # SDK's own CLFExample links this and ships `capability none`.
     SYMBIAN_LIBS="$SYMBIAN_LIBS mediaclientaudio"
   fi
+  if [ "${USE_SQL:-0}" = 1 ]; then
+    # sqldb is RSqlDatabase and RSqlStatement -- Symbian SQL, which is SQLite behind a
+    # client-server API. A non-secure database under the app's private path needs no
+    # capability.
+    #
+    # The header is in the public SDK and the exports are in sqldb.dso, but the API is
+    # marked @prototype and no shipped SDK example links it, so unlike mediaclientaudio
+    # there is no precedent here saying the handset has the DLL. examples/sqlprobe is
+    # that precedent: run it before setting this in an app that matters.
+    SYMBIAN_LIBS="$SYMBIAN_LIBS sqldb"
+  fi
   # An escape hatch for a library exactly one app needs, so that a one-off does not have
   # to earn a USE_* flag in this file and a branch in the source gate below.
   #
@@ -125,6 +156,36 @@ if [ "${USE_SHIM:-0}" = 1 ]; then
   if [ -n "${EXTRA_LIBS:-}" ]; then
     SYMBIAN_LIBS="$SYMBIAN_LIBS $EXTRA_LIBS"
   fi
+fi
+
+# Appended *outside* the USE_SHIM branch above, unlike every other USE_* library rule.
+#
+# Those rules only fire for a GUI app, because SYMBIAN_LIBS is only defaulted there — a
+# headless daemon names its own list. But a daemon is exactly where USE_MSG belongs (the
+# messaging probe in apps/devdump is one), and a flag that silently added no libraries in
+# the one place it is meant to be used would fail at the link with a page of undefined
+# references and no hint that the flag was the cause.
+#
+# msgs is CMsvSession and the message index; mtur the MTM registries on top of it
+# (CClientMtmRegistry lives there, not in msgs).
+#
+# The one library set in this file that is *known* to be a deployment risk. The E72's
+# msgs.dll is a 2009 Nokia build and this SDK's import library need not be the same one;
+# an ordinal we call that the handset does not export stops the image loading, with no
+# error, no log and no report file. Set this only in a binary that has nothing else to
+# lose — see apps/devdump.
+if [ "${USE_MSG:-0}" = 1 ]; then
+  # etext joins msgs and mtur because a message body is a CRichText, which lives there. It is
+  # a proven import — the device sweep loaded etext.dll — but it is still an import, and it is
+  # only here because writing a body needs it.
+  SYMBIAN_LIBS="${SYMBIAN_LIBS:-euser} msgs mtur etext"
+fi
+
+# The new-message notification. ecom only: MNcnNotification is resolved as an ECom plugin, so
+# there is no library for the implementation itself — which is also why nothing in the device
+# sweep could tell us whether ncnnotification.dll is present. Failure is a return code.
+if [ "${USE_NCN:-0}" = 1 ]; then
+  SYMBIAN_LIBS="${SYMBIAN_LIBS:-euser} ecom"
 fi
 
 BUILD="$APP/build"
@@ -304,9 +365,46 @@ if [ "${USE_SHIM:-0}" = 1 ] || [ "${USE_SHIM_DAEMON:-0}" = 1 ]; then
       shim_audio.cpp)
         [ "${USE_AUDIO:-0}" = 1 ] || continue
         ;;
+      # Same gate as the audio and image files: the source references RSqlDatabase, so it
+      # can only be compiled where sqldb.dso is on the link line.
+      shim_sql.cpp)
+        [ "${USE_SQL:-0}" = 1 ] || continue
+        ;;
       # Free-RAM and own-heap readings, for an app that watches its own footprint.
       shim_mem.cpp)
         [ "${USE_MEM:-0}" = 1 ] || continue
+        ;;
+      # Device inventory. hal is already in the shim's base library set, so this one
+      # costs no new import — it is gated only so a probe binary that does not ask
+      # about the hardware does not carry the code.
+      shim_hal.cpp)
+        [ "${USE_HAL:-0}" = 1 ] || continue
+        ;;
+      # Drive and volume enumeration. efsrv only, also already in the base set.
+      shim_vol.cpp)
+        [ "${USE_FS_INFO:-0}" = 1 ] || continue
+        ;;
+      # Capability self-check. euser only.
+      shim_caps.cpp)
+        [ "${USE_CAPS:-0}" = 1 ] || continue
+        ;;
+      # Read-only Message Server access. Unlike every other gate above, this one adds an
+      # import the handset may not satisfy — msgs.dso — so the file it guards belongs in
+      # a binary of its own and in nothing else. See the header of shim_msg.cpp.
+      shim_msg.cpp)
+        [ "${USE_MSG:-0}" = 1 ] || continue
+        ;;
+      # Loading a polymorphic DLL through RLibrary and calling its ordinal 1. euser only —
+      # the DLL under test is loaded at runtime, never linked, which is exactly what keeps
+      # it off every other binary's critical path.
+      shim_dllprobe.cpp)
+        [ "${USE_DLL_PROBE:-0}" = 1 ] || continue
+        ;;
+      # The platform's new-message notification, through the ECom interface it publishes for
+      # messaging plugins. Its own gate rather than riding USE_MSG, because it adds ecom.dso
+      # and because a binary may want the message store without raising notifications.
+      shim_ncn.cpp)
+        [ "${USE_NCN:-0}" = 1 ] || continue
         ;;
     esac
     SRCS+=("$src")
@@ -348,7 +446,7 @@ if [ ${#SRCS[@]} -gt 0 ]; then
       -I"$EPOCROOT/epoc32/include" -I"$EPOCROOT/epoc32/include/variant" \
       -I"$EPOCROOT/epoc32/include/stdapis" \
       -D__SYMBIAN32__ -D__GCCE__ -D__EPOC32__ -D__MARM__ -D__EABI__ \
-      -D__MARM_ARMV5__ -D__EXE__ -D_UNICODE -DNDEBUG \
+      -D__MARM_ARMV5__ "-D__${TARGETTYPE}__" -D_UNICODE -DNDEBUG \
       -D__SUPPORT_CPP_EXCEPTIONS__ \
       -D__PRODUCT_INCLUDE__="<variant/${VARIANT_HRH:-symbian_os_v9.3.hrh}>" \
       -DSHIM_APP_UID3="$UID3" \
@@ -356,9 +454,16 @@ if [ ${#SRCS[@]} -gt 0 ]; then
       ${USE_FEP:+$([ "$USE_FEP" = 1 ] && echo -DSHIM_USE_FEP)} \
       ${USE_IMAGE:+$([ "$USE_IMAGE" = 1 ] && echo -DSHIM_USE_IMAGE)} \
       ${USE_AUDIO:+$([ "$USE_AUDIO" = 1 ] && echo -DSHIM_USE_AUDIO)} \
+      ${USE_SQL:+$([ "$USE_SQL" = 1 ] && echo -DSHIM_USE_SQL)} \
       ${USE_PROC:+$([ "$USE_PROC" = 1 ] && echo -DSHIM_USE_PROC)} \
       ${USE_PROP:+$([ "$USE_PROP" = 1 ] && echo -DSHIM_USE_PROP)} \
       ${USE_MEM:+$([ "$USE_MEM" = 1 ] && echo -DSHIM_USE_MEM)} \
+      ${USE_HAL:+$([ "$USE_HAL" = 1 ] && echo -DSHIM_USE_HAL)} \
+      ${USE_FS_INFO:+$([ "$USE_FS_INFO" = 1 ] && echo -DSHIM_USE_FS_INFO)} \
+      ${USE_CAPS:+$([ "$USE_CAPS" = 1 ] && echo -DSHIM_USE_CAPS)} \
+      ${USE_MSG:+$([ "$USE_MSG" = 1 ] && echo -DSHIM_USE_MSG)} \
+      ${USE_DLL_PROBE:+$([ "$USE_DLL_PROBE" = 1 ] && echo -DSHIM_USE_DLL_PROBE)} \
+      ${USE_NCN:+$([ "$USE_NCN" = 1 ] && echo -DSHIM_USE_NCN)} \
       -fexceptions -fno-rtti \
       -Wall -Wno-narrowing -Wno-ctor-dtor-privacy -Wno-unknown-pragmas \
       -Wno-attributes \
@@ -408,13 +513,63 @@ for l in "${RT_LIBS[@]}"; do LINK_LIBS+=("-l:$l"); done
 # The two -u roots are functions the *kernel* calls, never our code: they are named
 # by the exception descriptor rather than referenced by a relocation, so a sweep
 # would take them. .emb_text is KEEP'd in the linker script for the same reason.
+#
+# DLL: four substitutions, plus one addition.
+#
+#   edll.lib for eexe.lib     — it carries _E32Dll and the exception descriptor.
+#   _E32Dll for _E32Startup   — the default ENTRY, still overridable.
+#   symbian-dll.lds           — see the header of that file.
+#   --version-script          — the addition, and the load-bearing one.
+#
+# elf2e32 builds a DLL's export table from .dynsym: every STB_GLOBAL FUNC or
+# OBJECT with a nonzero value, sorted by name and numbered from 1
+# (vendor/gnupoc-git/tools/elf2e32/elf2e32.cpp:156). Under -shared, ld puts every
+# global symbol there — including ones dragged in from usrt2_2.lib and libsupc++.
+# Left alone, the export table is therefore whatever the static libraries happened
+# to leak, and adding an unrelated call to the app can renumber every ordinal.
+#
+# That is not a theoretical tidiness problem: an ordinal is the entire calling
+# convention of a polymorphic DLL. The version script pins the export set to
+# exactly the names app.conf declares in EXPORTS, and localises everything else,
+# so the ordinals are a property of app.conf rather than of link order.
+LINK_STARTUP="$STATLINK/eexe.lib"
+LINK_ENTRY="${ENTRY:-_E32Startup}"
+LINK_LDS="$SDK/toolchain/symbian-exe.lds"
+LINK_EXTRA=()
+if [ "$TARGETTYPE" = DLL ]; then
+  LINK_STARTUP="$STATLINK/edll.lib"
+  LINK_ENTRY="${ENTRY:-_E32Dll}"
+  LINK_LDS="$SDK/toolchain/symbian-dll.lds"
+  : "${EXPORTS:?a DLL must set EXPORTS in app.conf: the symbols, in ordinal order}"
+  # Written fresh every build from EXPORTS, so the file cannot drift from the
+  # manifest. Ordinals come out of elf2e32's name sort, so the ordinal a caller
+  # uses is only stable while the export set is — which is why a DLL that grows a
+  # second export should move to a frozen .def rather than re-sorting under its
+  # own callers. With one export the question does not arise.
+  {
+    echo "/* Generated by symbuild from EXPORTS in app.conf — do not edit. */"
+    echo "SYMBIAN_DLL {"
+    echo "  global:"
+    for s in $EXPORTS; do echo "    $s;"; done
+    echo "  local:"
+    echo "    *;"
+    echo "};"
+  } > "$BUILD/$NAME.ver"
+  LINK_EXTRA+=(--version-script "$BUILD/$NAME.ver")
+  # Rooted against --gc-sections for the same reason the entry point is: with the
+  # version script in place nothing in the image references them.
+  for s in $EXPORTS; do LINK_EXTRA+=(-u "$s"); done
+  echo "--> exports: $EXPORTS"
+fi
+
 "$CROSS/$TC-ld" -shared --target1-abs --no-undefined -nostdlib \
-  --entry "${ENTRY:-_E32Startup}" -u "${ENTRY:-_E32Startup}" \
+  --entry "$LINK_ENTRY" -u "$LINK_ENTRY" \
   --gc-sections \
   -u _xxxx_call_user_invariant -u _xxxx_call_user_handle_exception \
   --default-symver \
-  -T "$SDK/toolchain/symbian-exe.lds" \
-  "$STATLINK/eexe.lib" \
+  ${LINK_EXTRA[@]+"${LINK_EXTRA[@]}"} \
+  -T "$LINK_LDS" \
+  "$LINK_STARTUP" \
   ${OBJS[@]+"${OBJS[@]}"} ${RUST_LIB:+"$RUST_LIB"} \
   --start-group "$STATLINK/usrt2_2.lib" --end-group \
   -L"$LIBDIR" "${LINK_LIBS[@]}" \
@@ -445,31 +600,226 @@ python3 "$SDK/tools/e32prep.py" "$BUILD/$NAME.elf"
 
 # ---------------------------------------------------------------- 4. elf2e32
 echo "--> elf2e32"
-"$HOST/elf2e32" \
-  --uncompressed \
-  --sid="$UID3" \
-  --uid1=0x1000007a \
-  --uid2="${UID2:-0x100039ce}" \
-  --uid3="$UID3" \
-  --vid=0x00000000 \
-  --capability="$CAPABILITIES" \
-  --fpu=softvfp \
-  --targettype=EXE \
-  --linkas="$NAME{000a0000}.exe" \
-  --libpath="$LIBDIR/" \
-  --elfinput="$BUILD/$NAME.elf" \
-  --output="$BUILD/$NAME.exe" \
-  --heap="$HEAP" \
-  --stack="$STACK"
-echo "    $NAME.exe $(stat -c%s "$BUILD/$NAME.exe") bytes"
+# DLL: UID1 is the image type and the loader reads it before anything else —
+# 0x1000007a is KExecutableImageUid, 0x10000079 KDynamicLibraryUid. UID2 for an
+# EXE defaults to the S60 GUI application UID; for a DLL it is the polymorphic
+# interface the DLL implements, which only its loader cares about, so a plain
+# load-and-call test can leave it at the SDK's own generic value.
+#
+# --heap and --stack are process attributes and mean nothing for a DLL: it runs on
+# the heap and stack of whoever loaded it. Passing them anyway would put values in
+# the header that no loader reads and every reader would have to explain.
+#
+# --defoutput writes the .def recording which name got which ordinal. Nothing in
+# the build consumes it, and that is exactly why it is worth writing: it is the
+# only human-readable record of the export numbering, and diffing it across builds
+# is how a silently renumbered ordinal gets caught.
+E32_ARGS=(
+  --uncompressed
+  --sid="$UID3"
+  --uid3="$UID3"
+  --vid=0x00000000
+  --capability="$CAPABILITIES"
+  --fpu=softvfp
+  --libpath="$LIBDIR/"
+  --elfinput="$BUILD/$NAME.elf"
+)
+if [ "$TARGETTYPE" = DLL ]; then
+  OUTBIN="$BUILD/$NAME.dll"
+  E32_ARGS+=(
+    --uid1=0x10000079
+    --uid2="${UID2:-0x1000008d}"
+    --targettype=DLL
+    --linkas="$NAME{000a0000}.dll"
+    --output="$OUTBIN"
+    --defoutput="$BUILD/$NAME.def"
+    --dso="$BUILD/$NAME.dso"
+  )
+else
+  OUTBIN="$BUILD/$NAME.exe"
+  E32_ARGS+=(
+    --uid1=0x1000007a
+    --uid2="${UID2:-0x100039ce}"
+    --targettype=EXE
+    --linkas="$NAME{000a0000}.exe"
+    --output="$OUTBIN"
+    --heap="$HEAP"
+    --stack="$STACK"
+  )
+fi
+"$HOST/elf2e32" "${E32_ARGS[@]}"
+echo "    $(basename "$OUTBIN") $(stat -c%s "$OUTBIN") bytes"
 
 # Validate before packaging. A malformed E32 is refused by the device with no
 # error, no panic and no log entry — it simply does nothing when you tap the icon
 # — so every check that can run here saves an install round trip. e32dump also
 # re-derives the UID checksum and the header CRC independently of elf2e32, which
 # is how you catch the tool itself being wrong.
-python3 "$SDK/tools/e32dump.py" "$BUILD/$NAME.exe" --quiet
+#
+# DLL: --expect-dll additionally requires the DLL flag and a non-empty export
+# table. A DLL that exports nothing links, packages, installs and then fails at
+# RLibrary::Lookup on the handset — the far end of the loop this whole gate exists
+# to shorten.
+python3 "$SDK/tools/e32dump.py" "$OUTBIN" --quiet \
+  ${TARGETTYPE:+$([ "$TARGETTYPE" = DLL ] && echo --expect-dll)}
 echo "    header validated"
+
+# ------------------------------------------- 4a. MTM registration, generated from the .def
+# An MTM's registration names, for each of the four component slots, the DLL and the ORDINAL
+# of its factory. Get an ordinal wrong and the framework enters the wrong function with the
+# wrong signature — inside its own process.
+#
+# The ordinals cannot be known from the source: elf2e32 numbers exports by sorting their
+# names (vendor/gnupoc-git/tools/elf2e32/elf2e32.cpp:156), so declaration order says nothing.
+# It does write build/$NAME.def recording what it chose, and that is what this reads.
+#
+# So the registration is generated: app.conf names the C symbol for each slot, and the
+# ordinal comes from the linker's own record. The two cannot disagree, and a rename that
+# reshuffles the sort corrects the resource instead of silently invalidating it.
+#
+# All four slots are filled whether or not all four components exist, because
+# CObserverRegistry::HandleSessionEventL indexes the declared array by fixed slot with no
+# bounds check — a shorter array is a panic in the Message Server's client, not an error.
+# See apps/mtmdemo/src/mtmclient.cpp.
+if [ -n "${MTM_RESOURCE_TEMPLATE:-}" ]; then
+  [ "$TARGETTYPE" = DLL ] || { echo "MTM_RESOURCE_TEMPLATE needs TARGETTYPE=DLL" >&2; exit 1; }
+  : "${MTM_TYPE_UID:?MTM_RESOURCE_TEMPLATE needs MTM_TYPE_UID}"
+  : "${MTM_TECHNOLOGY_UID:?MTM_RESOURCE_TEMPLATE needs MTM_TECHNOLOGY_UID}"
+  : "${MTM_NAME:=$NAME}"
+
+  # Look an export's ordinal up in the .def elf2e32 just wrote. The format is one export per
+  # line: "\t<name> @ <ordinal> NONAME ; CODE".
+  ordinal_of() {
+    local sym="$1" ord
+    ord="$(sed -n "s/^\t${sym} @ \([0-9]*\) .*/\1/p" "$BUILD/$NAME.def" | head -1)"
+    if [ -z "$ord" ]; then
+      echo "MTM registration: export '$sym' is not in $BUILD/$NAME.def." >&2
+      echo "Every symbol named by an MTM_*_EXPORT must be in app.conf's EXPORTS." >&2
+      exit 1
+    fi
+    printf '%s' "$ord"
+  }
+
+  MTM_SRC="$APP/$MTM_RESOURCE_TEMPLATE"
+  [ -f "$MTM_SRC" ] || { echo "MTM_RESOURCE_TEMPLATE: $MTM_SRC not found" >&2; exit 1; }
+  MTM_BASE="$(basename "$MTM_SRC" .rss.in)"
+  MTM_RESOURCE="build/$MTM_BASE.rss"
+
+  echo "--> mtm registration: ordinals from $NAME.def"
+  sed -e "s|@MTM_TYPE_UID@|$MTM_TYPE_UID|g" \
+      -e "s|@MTM_TECHNOLOGY_UID@|$MTM_TECHNOLOGY_UID|g" \
+      -e "s|@MTM_NAME@|$MTM_NAME|g" \
+      -e "s|@DLL@|$NAME.dll|g" \
+      -e "s|@ORD_SERVER@|$(ordinal_of "${MTM_SERVER_EXPORT:?}")|g" \
+      -e "s|@ORD_CLIENT@|$(ordinal_of "${MTM_CLIENT_EXPORT:?}")|g" \
+      -e "s|@ORD_UI@|$(ordinal_of "${MTM_UI_EXPORT:?}")|g" \
+      -e "s|@ORD_UIDATA@|$(ordinal_of "${MTM_UIDATA_EXPORT:?}")|g" \
+      "$MTM_SRC" > "$APP/$MTM_RESOURCE"
+  for slot in SERVER CLIENT UI UIDATA; do
+    eval "sym=\$MTM_${slot}_EXPORT"
+    printf '    %-7s ordinal %s  %s\n' "$slot" "$(ordinal_of "$sym")" "$sym"
+  done
+fi
+
+# ----------------------------------------------------- 4b. MTM registration resource
+# The resource that tells the Message Server a new message type exists.
+#
+# Its own stage, on the AUTOSTART precedent, for four reasons the general resource loop
+# cannot satisfy:
+#
+#   - it runs even when HEADLESS=1. A registration resource has nothing to do with a menu
+#     entry, and the general stage is skipped wholesale for a headless binary — which is
+#     exactly the shape an MTM's installer and probe want to be.
+#   - it runs on the DLL path, which is where it matters most and where it does not reach if
+#     placed with the other resources: a DLL build stops right after elf2e32, so an MTM whose
+#     own component builds its own registration would silently produce no resource at all.
+#     That cost a build cycle to notice, because nothing errors — the file simply is not
+#     there, and the packaging step that wanted it says so much later.
+#   - it goes to \resource\messaging\mtm\, not \resource\apps\. The general packaging
+#     loop routes every other .rsc to the latter, where the Message Server never looks.
+#   - it is named independently of $NAME, because the registration usually belongs to a
+#     different component than the binary that installs it.
+#
+# Compiling it is not enough on its own: an MTM outside ROM has to be handed to the Message
+# Server at runtime through CMsvSession::InstallMtmGroup. See symbian::msg::Session::install_mtm.
+if [ -n "${MTM_RESOURCE:-}" ]; then
+  mtmsrc="$APP/$MTM_RESOURCE"
+  [ -f "$mtmsrc" ] || { echo "MTM_RESOURCE: $mtmsrc not found" >&2; exit 1; }
+  mtmbase="$(basename "$mtmsrc" .rss)"
+  echo "--> mtm registration: $mtmbase.rsc"
+  "$CROSS/$TC-g++" -E -P -x c++ -nostdinc \
+    -I"$EPOCROOT/epoc32/include" -I"$EPOCROOT/epoc32/include/variant" \
+    -I"$APP/data" -D_UNICODE -DLANGUAGE_SC "$mtmsrc" -o "$BUILD/$mtmbase.rpp"
+  ( cd "$(dirname "$mtmsrc")" && "$HOST/rcomp" -u -o"$BUILD/$mtmbase.mtmrsc" \
+      -h"$mtmbase.rsg" -s"$BUILD/$mtmbase.rpp" )
+  # Deliberately .mtmrsc and not .rsc: the packaging loop globs "$BUILD"/*.rsc and would
+  # otherwise sweep this into \resource\apps\, where nothing would ever read it. The
+  # extension is changed back at the install path below.
+  echo "    $mtmbase.mtmrsc  $(stat -c%s "$BUILD/$mtmbase.mtmrsc") bytes"
+fi
+
+# ------------------------------------ 4c. a UI-data component's resource and icons
+# A UI Data MTM opens two files at runtime that nothing else in the build would produce.
+#
+# CBaseMtmUiData::ConstructL opens whatever GetResourceFileName() returns *before* it calls
+# PopulateArraysL, and PopulateArraysL loads the icon array out of an .mbm. Both are opened
+# inside whichever application is drawing a message list — the Messaging application among
+# them — so a missing file is a Leave during construction in somebody else's process rather
+# than a build error here.
+#
+# Both land in \resource\messaging\, which is where the framework looks and where every one
+# of the platform's own UI-data components keeps them (smum.rsc, mmsui.rsc, notui.rsc).
+#
+# On the DLL path, like 4b, because a UI-data component is a DLL and the general resource and
+# icon stages are past the point where a DLL build stops.
+if [ -n "${MTM_UI_RESOURCE:-}" ]; then
+  uisrc="$APP/$MTM_UI_RESOURCE"
+  [ -f "$uisrc" ] || { echo "MTM_UI_RESOURCE: $uisrc not found" >&2; exit 1; }
+  uibase="$(basename "$uisrc" .rss)"
+  echo "--> mtm ui resource: $uibase.rsc"
+  "$CROSS/$TC-g++" -E -P -x c++ -nostdinc \
+    -I"$EPOCROOT/epoc32/include" -I"$EPOCROOT/epoc32/include/variant" \
+    -I"$APP/data" -D_UNICODE -DLANGUAGE_SC "$uisrc" -o "$BUILD/$uibase.rpp"
+  ( cd "$(dirname "$uisrc")" && "$HOST/rcomp" -u -o"$BUILD/$uibase.uirsc" \
+      -h"$uibase.rsg" -s"$BUILD/$uibase.rpp" )
+  # .uirsc rather than .rsc for the same reason 4b uses .mtmrsc: the packaging loop globs
+  # "$BUILD"/*.rsc and would sweep this into \resource\apps\, where the framework never
+  # looks. The extension is put back at the install path.
+  echo "    $uibase.uirsc  $(stat -c%s "$BUILD/$uibase.uirsc") bytes"
+fi
+
+if [ -n "${MTM_ICONS:-}" ]; then
+  # Generated first if a generator is present, on the same reasoning as the app icon stage:
+  # a committed .bmp is a binary nobody can review and the generator is the actual source.
+  if [ -f "$APP/data/mkicon.py" ]; then
+    python3 "$APP/data/mkicon.py" "$APP/data"
+  fi
+  echo "--> mtm icons: $NAME.mbm"
+  ICON_ARGS=""
+  for bmp in $MTM_ICONS; do
+    [ -f "$APP/data/$bmp" ] || { echo "MTM_ICONS: $APP/data/$bmp not found" >&2; exit 1; }
+    # /c24 glued to the filename, not a separate argument, and every path relative — bmconv
+    # parses DOS-style options and reads any leading / as one, so an absolute Unix path
+    # becomes garbage. Both quirks cost a build to find, once, for the app icon stage.
+    ICON_ARGS="$ICON_ARGS /c24$bmp"
+  done
+  # Order is the ABI: CreateBitmapsL walks the .mbm from its first bitmap to its last, so the
+  # order in MTM_ICONS is the order of the component's icon enum.
+  ( cd "$APP/data" && "$HOST/bmconv" /q "../build/$NAME.mbm" $ICON_ARGS )
+  echo "    $NAME.mbm  $(stat -c%s "$BUILD/$NAME.mbm") bytes"
+fi
+
+if [ "$TARGETTYPE" = DLL ]; then
+  # A DLL is not installable on its own: it is bundled by the app that loads it,
+  # through that app's EXTRA_DLLS. Stop here rather than emitting a .sis nobody
+  # should install.
+  if [ -f "$BUILD/$NAME.def" ]; then
+    echo "--> ordinals"
+    sed -n 's/^\t\([^ ]*\) @ \([0-9]*\).*/    \2  \1/p' "$BUILD/$NAME.def"
+  fi
+  echo "==> $BUILD/$NAME.dll"
+  exit 0
+fi
 
 # --------------------------------------------------------------- 5. resources
 # No registration resource means no menu entry — the package installs, reports success,
@@ -525,10 +875,19 @@ if [ "${AUTOSTART:-0}" = 1 ] && [ -f "$APP/data/${NAME}_startup.rss" ]; then
 fi
 
 # ------------------------------------------------------------------- 5b. icon
-# A 44x44 colour bitmap plus a 1bpp mask, packed into an .mbm.
+# A 44x44 EColor64K bitmap plus an 8bpp greyscale mask, packed into an .mbm.
+#
+# Those depths are not a preference, they are what the platform will load. /c24 gives
+# EColor16M — three bytes per pixel, a display mode the E72 does not have and its
+# fbserv will not create — so the shell's load of the icon fails and the menu draws
+# its default instead: no error, no panic, no log entry, just a missing icon. /c16
+# matches the screen. The 8bpp mask is the other half of the same argument — the
+# platform's own app icons are 16bpp beside an 8bpp grey mask, \resource\apps\about.mbm
+# being the reference — and it buys anti-aliased corners too, where a 1bpp mask is all
+# or nothing per pixel and saws the rounded corners flat.
 #
 # Two bmconv quirks, both learned the hard way:
-#   - the depth option is glued to the filename (/c24foo.bmp), not a separate arg;
+#   - the depth option is glued to the filename (/c16foo.bmp), not a separate arg;
 #   - it parses DOS-style options, so it mistakes ANY argument starting with `/`
 #     for one — an absolute Unix path silently becomes garbage. Every path handed
 #     to bmconv must be relative, hence the cd.
@@ -541,7 +900,7 @@ fi
 if [ -f "$APP/data/${NAME}_icon.bmp" ]; then
   echo "--> icon"
   ( cd "$APP/data" && "$HOST/bmconv" /q "../build/${NAME}_icon.mbm" \
-      "/c24${NAME}_icon.bmp" "/1${NAME}_icon_mask.bmp" )
+      "/c16${NAME}_icon.bmp" "/8${NAME}_icon_mask.bmp" )
   ICON_MBM="$BUILD/${NAME}_icon.mbm"
   echo "    ${NAME}_icon.mbm"
 fi
@@ -573,6 +932,25 @@ for extra in ${EXTRA_EXES:-}; do
   echo "\"$epath\"-\"!:\\sys\\bin\\$ebase\"" >> "$BUILD/$NAME.pkg"
   echo "--> bundling $ebase"
 done
+# Polymorphic DLLs bundled into the same package (TARGETTYPE=DLL builds, which
+# produce no .sis of their own). They install into \sys\bin alongside the
+# executables — that is where RLibrary::Load looks, and on a platform-secured
+# device it is the only place it will load code from.
+#
+# Deliberately separate from EXTRA_EXES rather than folded into it: the two have
+# different failure modes. A missing EXE costs the feature it implements; a
+# missing DLL that something imports costs the whole image, silently. Naming them
+# apart keeps that distinction visible in app.conf.
+for extra in ${EXTRA_DLLS:-}; do
+  case "$extra" in /*) dpath="$extra" ;; *) dpath="$APP/$extra" ;; esac
+  if [ ! -f "$dpath" ]; then
+    echo "EXTRA_DLLS: $dpath not found — build that DLL first" >&2
+    exit 1
+  fi
+  dbase="$(basename "$dpath")"
+  echo "\"$dpath\"-\"!:\\sys\\bin\\$dbase\"" >> "$BUILD/$NAME.pkg"
+  echo "--> bundling $dbase"
+done
 for rsc in "$BUILD"/*_reg.rsc; do
   [ -f "$rsc" ] || continue
   # The device wants _reg.rsc in the AppArc import drop-box; 10003a3f is the
@@ -593,6 +971,59 @@ fi
 # The start-up control file must be named [<packageUID>].rsc and land in the Software
 # Installer UI's import dir (SID 101f875a). The installer reads it there at install time
 # and, for a trusted package, adds the executable to the boot start-up list.
+# The MTM registration resource. \resource\messaging\mtm\ is where the Message Server
+# looks, and the device dump found that directory empty on C: with 54 files in ROM — so a
+# file landing here collides with nothing.
+if [ -n "${MTM_RESOURCE:-}" ]; then
+  mtmbase="$(basename "$APP/$MTM_RESOURCE" .rss)"
+  if [ -f "$BUILD/$mtmbase.mtmrsc" ]; then
+    echo "\"$BUILD/$mtmbase.mtmrsc\"-\"!:\\resource\\messaging\\mtm\\$mtmbase.rsc\"" >> "$BUILD/$NAME.pkg"
+    echo "--> mtm: $mtmbase.rsc → \\resource\\messaging\\mtm\\"
+  fi
+fi
+
+# A UI-data component's resource and icons, bundled into this package.
+#
+# Same reason as EXTRA_MTM_RESOURCES below: the component that builds them is a DLL shipped
+# inside somebody else's .sis, and EXTRA_DLLS copies the DLL and nothing else.
+for extra in ${EXTRA_MSG_RESOURCES:-}; do
+  case "$extra" in /*) rpath="$extra" ;; *) rpath="$APP/$extra" ;; esac
+  if [ ! -f "$rpath" ]; then
+    echo "EXTRA_MSG_RESOURCES: $rpath not found — build that component first" >&2
+    exit 1
+  fi
+  rbase="$(basename "$rpath")"
+  # .uirsc is renamed back to .rsc at the install path; .mbm goes as it is.
+  case "$rbase" in
+    *.uirsc) dest="${rbase%.uirsc}.rsc" ;;
+    *) dest="$rbase" ;;
+  esac
+  echo "\"$rpath\"-\"!:\\resource\\messaging\\$dest\"" >> "$BUILD/$NAME.pkg"
+  echo "--> bundling messaging resource $dest"
+done
+
+# Registration resources belonging to OTHER components, bundled into this package.
+#
+# This exists because the obvious arrangement silently does not work, and cost a device trip
+# to discover. A probe or an MTM builds its own registration resource through MTM_RESOURCE
+# above — and that puts the file in *its own* .sis, which nothing ever installs when the
+# binary is shipped inside somebody else's package through EXTRA_EXES. EXTRA_EXES copies the
+# executable and nothing else.
+#
+# So the package that actually gets installed has to name the resource explicitly, the same
+# way it already names EXTRA_EXES and EXTRA_DLLS. Each entry is a path to a built .mtmrsc;
+# it installs under its own basename with the .rsc extension the Message Server expects.
+for extra in ${EXTRA_MTM_RESOURCES:-}; do
+  case "$extra" in /*) mpath="$extra" ;; *) mpath="$APP/$extra" ;; esac
+  if [ ! -f "$mpath" ]; then
+    echo "EXTRA_MTM_RESOURCES: $mpath not found — build that component first" >&2
+    exit 1
+  fi
+  mbase="$(basename "$mpath" .mtmrsc)"
+  echo "\"$mpath\"-\"!:\\resource\\messaging\\mtm\\$mbase.rsc\"" >> "$BUILD/$NAME.pkg"
+  echo "--> bundling mtm registration $mbase.rsc"
+done
+
 if [ "${AUTOSTART:-0}" = 1 ] && [ -f "$BUILD/${NAME}_startup.rsc" ]; then
   SUID="${UID3#0x}"; SUID="${SUID^^}"
   echo "\"$BUILD/${NAME}_startup.rsc\"-\"!:\\private\\101f875a\\import\\[$SUID].rsc\"" >> "$BUILD/$NAME.pkg"

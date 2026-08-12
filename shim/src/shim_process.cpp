@@ -59,6 +59,76 @@ int32_t shim_process_start(const uint16_t* path, int32_t path_len)
     return signalled == KErrNone ? SHIM_OK : signalled;
     }
 
+int32_t shim_process_start_timeout(const uint16_t* path, int32_t path_len, int32_t timeout_ms)
+    {
+    if (!path || path_len <= 0 || timeout_ms <= 0)
+        return SHIM_ERR_ARGUMENT;
+
+    TPtrC16 name(reinterpret_cast<const TUint16*>(path), path_len);
+
+    RProcess proc;
+    TInt rc = proc.Create(name, KNullDesC);
+    if (rc != KErrNone)
+        {
+        /* The image would not load. For the launcher this is the whole point of calling:
+         * it is what a missing import looks like from the outside, and it arrives here as
+         * a number instead of as a probe that silently produced nothing. */
+        return rc;
+        }
+
+    TRequestStatus rendezvous;
+    proc.Rendezvous(rendezvous);
+    if (rendezvous != KRequestPending)
+        {
+        proc.Kill(KErrNone);
+        proc.Close();
+        return rendezvous.Int() == KErrNone ? SHIM_ERR_GENERAL : rendezvous.Int();
+        }
+
+    /* The deadline. shim_process_start above waits on the rendezvous with no escape, which
+     * is right for a daemon a controller cannot proceed without — but wrong for a probe,
+     * where a child that neither signals nor dies would hang the one process whose job is
+     * to survive its children and report on them. */
+    RTimer timer;
+    rc = timer.CreateLocal();
+    if (rc != KErrNone)
+        {
+        proc.Kill(KErrNone);
+        proc.Close();
+        return rc;
+        }
+    TRequestStatus deadline;
+    /* Microseconds, and a TInt32 caps at ~35 minutes — far beyond any probe's budget, so
+     * the multiplication cannot overflow for a caller passing a sane timeout. */
+    timer.After(deadline, timeout_ms * 1000);
+
+    proc.Resume();
+    User::WaitForRequest(rendezvous, deadline);
+
+    int32_t result;
+    if (rendezvous != KRequestPending)
+        {
+        /* Rendezvous won. Cancel the timer and consume its completion, or the next
+         * WaitForRequest in this thread would take a stale signal for its own. */
+        timer.Cancel();
+        User::WaitForRequest(deadline);
+        result = rendezvous.Int() == KErrNone ? SHIM_OK : rendezvous.Int();
+        }
+    else
+        {
+        /* The deadline won. Kill the child and consume its rendezvous, for the same
+         * reason. A probe killed here leaves whatever it had already flushed, which is the
+         * arrangement the report format is built around. */
+        proc.Kill(KErrNone);
+        User::WaitForRequest(rendezvous);
+        result = SHIM_ERR_TIMED_OUT;
+        }
+
+    timer.Close();
+    proc.Close();
+    return result;
+    }
+
 int32_t shim_process_running(uint32_t uid3)
     {
     /* Match on UID3, the field that identifies the application/executable, against every

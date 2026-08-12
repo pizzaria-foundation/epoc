@@ -1,0 +1,12 @@
+# Copy to api.conf and put your own machine's LAN address in it. api.conf is git-ignored,
+# because it names one machine on one network and would be wrong for everyone else.
+#
+# Without it the launcher still builds and still writes its report to C:\Data\dump\ — you
+# just have to fetch it over USB or Bluetooth, and read progress off the phone's screen
+# rather than through `epoc logcat`.
+#
+# The address is where `epoc db serve` is listening. The device dials out to it; there is no
+# discovery handshake in that direction, so this has to be right at build time.
+#
+#   ip addr | grep 'inet 192'      to find it on Linux
+EPOCADB_HOST=192.168.0.10

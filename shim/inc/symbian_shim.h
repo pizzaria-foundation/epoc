@@ -626,6 +626,380 @@ int32_t shim_audio_duration_ms(void);
 int32_t shim_audio_set_volume(int32_t percent);
 int32_t shim_audio_close(void);
 
+/* --------------------------------------------------------------------- sql --
+ * Symbian SQL, which is SQLite behind a client-server API (sqldb.dll).
+ *
+ * WHY THIS IS WORTH A SHIM AT ALL. The platform already ships the engine, indexes,
+ * transactions and all. Everything this SDK has persisted so far went through
+ * fs::write_atomic — a whole-file rewrite per change, which is the right answer for a
+ * settings blob and the wrong one for a message store that grows.
+ *
+ * SQL TEXT CROSSES AS UTF-8, VALUES AS UTF-16. That asymmetry is not sloppiness: the
+ * API has 8-bit overloads of Exec and Prepare (the config string documents
+ * `encoding=UTF8|UTF16`), so statement text goes over as the bytes Rust already holds,
+ * with no conversion. Bind and column *values* have only 16-bit overloads, so those
+ * convert at the boundary like every other string in this ABI.
+ *
+ * NO LEAVES TO TRAP. Every call below is the non-leaving overload — `Open`, not
+ * `OpenL`; `Prepare`, not `PrepareL` — each of which is implemented on the platform
+ * side as a TRAP around the leaving one and returns a TInt. So this file is the
+ * exception rule 1 allows for, and states: there is nothing here for a TRAP to catch.
+ *
+ * INDEXES ARE ZERO-BASED, unlike sqlite3's own C API where bind parameters start at 1.
+ * Symbian SQL numbers both parameters and columns from 0. examples/sqlprobe verifies
+ * that on the handset rather than taking the documentation's word for it.
+ *
+ * AN OUT-OF-RANGE INDEX KILLS THE PROCESS. Not an error return — the SQL client asserts,
+ * and an assertion on this platform is a panic. A panic is not a Leave, so no TRAP
+ * anywhere below this line can catch it and nothing in this ABI can report it: the
+ * application simply closes. examples/sqlprobe established that by binding index 2 of a
+ * two-parameter statement deliberately, and taking the app down with it.
+ *
+ * The consequence for everything here: the bind and column functions cannot validate
+ * their index, because the platform offers no way to ask a prepared statement how many
+ * parameters or columns it has. The guard therefore lives in Rust, in
+ * symbian::sql::Stmt::bind, built from a `?` count taken off the statement text. Callers
+ * reaching this ABI directly own that check themselves.
+ *
+ * Requires no capability for a database under the app's private path. Elsewhere it
+ * needs whatever the location needs, exactly as with files. */
+
+/* TSqlColumnType, flattened: the platform distinguishes ESqlInt from ESqlInt64 and
+ * Rust has no use for the difference — both arrive as int64. */
+#define SHIM_SQL_NULL   0
+#define SHIM_SQL_INT    1
+#define SHIM_SQL_REAL   2
+#define SHIM_SQL_TEXT   3
+#define SHIM_SQL_BLOB   4
+
+/* shim_sql_step: a row is ready, or the statement is finished. Translated from
+ * KSqlAtRow/KSqlAtEnd so Rust does not carry the platform's constants. */
+#define SHIM_SQL_DONE   0
+#define SHIM_SQL_ROW    1
+
+/* Opens `path`, creating it when `create` is non-zero and the file is not there. */
+int32_t shim_sql_open(const uint16_t* path, int32_t path_len, int32_t create, int32_t* handle);
+/* Finalises every statement still open on this database, then closes it. Doing that here
+ * rather than trusting the caller is deliberate: a statement outliving its database is a
+ * handle into freed server-side state, and the panic it produces names the SQL server. */
+void    shim_sql_close(int32_t db);
+int32_t shim_sql_delete(const uint16_t* path, int32_t path_len);
+/* One or more statements, separated by semicolons, with no parameters and no rows —
+ * schema, BEGIN/COMMIT, INSERT of literals. `changed` receives the number of rows the
+ * statement affected, which for DDL is zero. */
+int32_t shim_sql_exec(int32_t db, const uint8_t* sql, int32_t len, int32_t* changed);
+/* The database file's size in bytes. */
+int32_t shim_sql_size(int32_t db, int32_t* out);
+/* The engine's own message for the last failure, which is the only place the *reason* a
+ * statement was rejected appears — an error code says KSqlErrGeneral and the message says
+ * `no such column: nmae`. Worth the round trip when a query fails. */
+int32_t shim_sql_last_error(int32_t db, uint16_t* buf, int32_t cap, int32_t* len);
+
+int32_t shim_sql_prepare(int32_t db, const uint8_t* sql, int32_t len, int32_t* stmt);
+void    shim_sql_finalize(int32_t stmt);
+/* Rewinds so the statement can be stepped again. Bindings survive a reset, which is what
+ * makes a prepared statement worth reusing across rows. */
+int32_t shim_sql_reset(int32_t stmt);
+/* SHIM_SQL_ROW, SHIM_SQL_DONE, or an error.
+ *
+ * SELECT ONLY. Stepping a statement that produces no row set — an INSERT, an UPDATE, a
+ * CREATE — panics inside the SQL client and closes the process, for the same reason and
+ * with the same lack of warning as an out-of-range index. Non-SELECT statements go through
+ * shim_sql_exec_stmt. examples/sqlprobe established this by stepping a prepared INSERT. */
+int32_t shim_sql_step(int32_t stmt);
+/* Run a prepared non-SELECT statement to completion; `changed` receives the number of rows
+ * it affected. The counterpart of shim_sql_step, and the only safe way to run a bound
+ * INSERT, UPDATE or DELETE. */
+int32_t shim_sql_exec_stmt(int32_t stmt, int32_t* changed);
+
+int32_t shim_sql_bind_null(int32_t stmt, int32_t index);
+int32_t shim_sql_bind_int(int32_t stmt, int32_t index, int64_t value);
+int32_t shim_sql_bind_real(int32_t stmt, int32_t index, double value);
+int32_t shim_sql_bind_text(int32_t stmt, int32_t index, const uint16_t* text, int32_t len);
+int32_t shim_sql_bind_blob(int32_t stmt, int32_t index, const uint8_t* data, int32_t len);
+
+int32_t shim_sql_column_type(int32_t stmt, int32_t col, int32_t* out);
+int32_t shim_sql_column_int(int32_t stmt, int32_t col, int64_t* out);
+int32_t shim_sql_column_real(int32_t stmt, int32_t col, double* out);
+/* Both text and blob report the column's full length in `*len` whether or not it fitted,
+ * and return SHIM_ERR_OVERFLOW when it did not. That is what lets a caller size a buffer
+ * in one extra call instead of guessing. */
+int32_t shim_sql_column_text(int32_t stmt, int32_t col, uint16_t* buf, int32_t cap, int32_t* len);
+int32_t shim_sql_column_blob(int32_t stmt, int32_t col, uint8_t* buf, int32_t cap, int32_t* len);
+/* Column position by name, for a SELECT whose shape is not fixed at the call site. */
+int32_t shim_sql_column_index(int32_t stmt, const uint16_t* name, int32_t len, int32_t* out);
+
+/* ------------------------------------------------------------------- HAL --
+ * SHIM_USE_HAL. One generic accessor rather than a function per attribute.
+ *
+ * HAL::Get is already `(TInt attribute, TInt& value)` — a flat integer interface over
+ * the kernel's own figures — so wrapping each attribute separately would add a hundred
+ * lines of C++ that only rename things, and would put the attribute table on the wrong
+ * side of the wall. The table lives in Rust (`symbian::hal`), where it is data and is
+ * covered by a host test.
+ *
+ * `attr` is a HALData::TAttribute. Unsupported attributes return KErrNotSupported
+ * rather than failing the call, which is itself the answer: a handset that does not
+ * implement an attribute is telling you the hardware is absent. */
+int32_t shim_hal_get(int32_t attr, int32_t* out);
+
+/* ------------------------------------------------------------ drives -------
+ * SHIM_USE_FS_INFO. What is mounted, how big, how full.
+ *
+ * Three calls because Symbian has three questions: which drive letters exist at all,
+ * what kind of medium each is, and how much room is on it. They are separate on the
+ * platform too (RFs::DriveList, RFs::Drive, RFs::Volume), and merging them would hide
+ * the case that matters most — a drive that is present but has no volume mounted, which
+ * is exactly what an empty card slot looks like. */
+
+/* Bit N set means drive letter 'A'+N exists. RFs::DriveList. */
+int32_t shim_drive_list(uint32_t* out_mask);
+
+typedef struct ShimDriveInfo {
+    int32_t type;        /* TDriveInfo::iType — EMediaHardDisk, EMediaFlash, ENotPresent... */
+    int32_t battery;     /* TDriveInfo::iBattery */
+    uint32_t drive_att;  /* KDriveAttLocal, KDriveAttRemovable, KDriveAttInternal... */
+    uint32_t media_att;  /* KMediaAttWriteProtected, KMediaAttLocked... */
+} ShimDriveInfo;
+
+/* `drive` is 0 for A:, 1 for B:, and so on — TDriveNumber's own numbering. */
+int32_t shim_drive_info(int32_t drive, ShimDriveInfo* out);
+
+typedef struct ShimVolumeInfo {
+    int64_t size;        /* bytes */
+    int64_t free;        /* bytes */
+    uint32_t unique_id;  /* TVolumeInfo::iUniqueID — changes when the medium is swapped */
+    int32_t name_len;    /* units written to `name`, 0 if it has none */
+    uint16_t name[32];
+} ShimVolumeInfo;
+
+/* KErrNotReady for a drive that exists with nothing mounted — an empty card slot. That
+ * is a finding, not a failure, and the caller is expected to record it as one. */
+int32_t shim_volume_info(int32_t drive, ShimVolumeInfo* out);
+
+/* --------------------------------------------------------- capabilities ----
+ * SHIM_USE_CAPS. What this process was granted, as the kernel sees it.
+ *
+ * `cap` is a TCapability. Returns 1 if held, 0 if not, negative on a bad argument.
+ *
+ * This answers "what did the loader grant this image", which on a ROM-patched handset
+ * is the interesting half of the question but not the whole of it. The other half —
+ * whether the granted capability actually opens the door — is only answerable by
+ * attempting the privileged operation and recording the error, which the caller does
+ * with the ordinary file and process calls. A divergence between the two is the finding:
+ * the kernel saying yes while the operation says KErrPermissionDenied means the patch
+ * granted the bit and something else is refusing. */
+int32_t shim_has_capability(int32_t cap);
+
+/* RFs::Att — a file's attribute word (KEntryAttReadOnly, KEntryAttHidden, ...). Its
+ * value here is less the attributes than the error: attempting it on a path outside the
+ * data cage is a capability probe that costs nothing and destroys nothing. */
+int32_t shim_fs_att(const uint16_t* path, int32_t len, uint32_t* out);
+
+/* ------------------------------------------------------------- messaging ---
+ * SHIM_USE_MSG. Read-only reconnaissance over the Message Server.
+ *
+ * Imports msgs.dso, and is therefore the textbook case for living in its own binary:
+ * if the handset's msgs.dll does not export what we call, the E32 loader refuses the
+ * image and there is no report, no panic and no log. See docs/device-notes.md, "An
+ * import that does not resolve makes the app vanish".
+ *
+ * Nothing here writes. Opening a session, enumerating the registered MTMs and counting
+ * folder entries is the whole surface — enough to know what the platform's messaging
+ * stack contains before deciding whether to build on it. */
+int32_t shim_msv_open(int32_t* out_handle);
+int32_t shim_msv_mtm_count(int32_t handle, int32_t* out);
+/* Throw away the client-side MTM registry and build a fresh one.
+ *
+ * CClientMtmRegistry is a *transient copy* held per client process, initialised when it is
+ * constructed and refreshed thereafter only through session events. So a count taken after
+ * installing a new MTM reads a snapshot from before the install, and "registered but my copy
+ * has not noticed" is indistinguishable from "not registered" — which is exactly the
+ * ambiguity that made a probe report a failure it could not actually see. */
+int32_t shim_msv_refresh_registry(int32_t handle);
+
+/* Instantiate a Client MTM through the registry — the definitive test that a registration
+ * worked.
+ *
+ * Counting the registry is weaker than it looks and was measured to be misleading: the count
+ * comes from a per-process copy the session refreshes on an event that cannot be delivered
+ * while the caller is still inside its own RunL. This asks the framework to do the whole
+ * thing instead — find the type, load the DLL, call the factory at the registered ordinal —
+ * and every one of those failing has its own error code.
+ *
+ * The object is destroyed immediately; the question is whether it can be made at all. */
+int32_t shim_msv_can_instantiate(int32_t handle, uint32_t mtm_uid);
+
+typedef struct ShimMtmInfo {
+    uint32_t type_uid;       /* the MTM type UID: KUidMsgTypeSMS and friends */
+    uint32_t technology_uid;
+    int32_t name_len;
+    uint16_t name[64];
+} ShimMtmInfo;
+
+int32_t shim_msv_mtm_info(int32_t handle, int32_t index, ShimMtmInfo* out);
+
+/* Standard folder ids, so Rust need not carry msvids.h. */
+#define SHIM_MSV_ROOT     0x1000
+#define SHIM_MSV_INBOX    0x1002
+#define SHIM_MSV_OUTBOX   0x1003
+#define SHIM_MSV_DRAFTS   0x1004
+#define SHIM_MSV_SENT     0x1005
+
+int32_t shim_msv_folder_count(int32_t handle, int32_t folder_id, int32_t* out);
+void shim_msv_close(int32_t handle);
+
+/* ------------------------------------------------- messaging, the write side --
+ * Still SHIM_USE_MSG, and still the same isolation rule: this is the binary that can
+ * vanish, so it should be alone.
+ *
+ * REGISTERING AN MTM
+ *
+ * Dropping a compiled .mtm into C:\resource\messaging\mtm\ is NOT enough for an MTM outside
+ * ROM — the Message Server has to be told. `InstallMtmGroup` is that call, and it fires
+ * EMsvMtmGroupInstalled so a *running* Messaging application picks the new type up live.
+ * De-install first: installing over an existing group fails, so a reinstall needs the pair.
+ * KErrNotFound from the de-install is the ordinary first-run answer, not an error. */
+int32_t shim_msv_install_mtm(const uint16_t* path, int32_t len);
+int32_t shim_msv_deinstall_mtm(const uint16_t* path, int32_t len);
+
+/* Create a service entry — the "account" the native Messaging application lists.
+ *
+ * A child of the root, with iType = KUidMsvServiceEntry and iMtm = your MTM's type UID.
+ * `name` becomes iDetails, which is the string the user sees. The new id comes back in
+ * `out_id` and is what every message of yours must carry as its iServiceId. */
+int32_t shim_msv_create_service(int32_t handle, uint32_t mtm_uid,
+                                const uint16_t* name, int32_t name_len, int32_t* out_id);
+
+/* Flags for ShimNewMessage::flags. `NEW` and `UNREAD` together are what makes the native
+ * app bold the entry and what the notification list counts. */
+#define SHIM_MSV_NEW     0x01
+#define SHIM_MSV_UNREAD  0x02
+#define SHIM_MSV_COMPLETE 0x04
+#define SHIM_MSV_VISIBLE 0x08
+
+/* Everything a message needs to land in a folder. Pointers are borrowed for the duration of
+ * the call only — the shim copies into descriptors and into the store before returning. */
+typedef struct ShimNewMessage {
+    int32_t service_id;      /* from shim_msv_create_service */
+    uint32_t mtm_uid;
+    int32_t parent_id;       /* SHIM_MSV_INBOX and friends */
+    int64_t unix_time;       /* 0 means now */
+    int32_t size;            /* iSize; 0 means "the body's length" */
+    int32_t flags;           /* SHIM_MSV_* above */
+    const uint16_t* details;      /* iDetails — who it is from */
+    int32_t details_len;
+    const uint16_t* description;  /* iDescription — subject, or a preview line */
+    int32_t description_len;
+    const uint16_t* body;         /* stored as rich text in the entry's CMsvStore */
+    int32_t body_len;
+} ShimNewMessage;
+
+/* Create the entry, write the body, commit. `out_id` receives the new entry's TMsvId.
+ *
+ * The order matters and is not obvious: the entry is created first with
+ * KMsvEntryInPreparationFlag implied by not being complete, then the body is written to its
+ * store and committed, and only then are the visible flags set. A reader that saw the entry
+ * between those steps would see a message with no body. */
+int32_t shim_msv_create_message(int32_t handle, const ShimNewMessage* msg, int32_t* out_id);
+
+/* Delete an entry. For a probe that has to be able to clean up after itself. */
+int32_t shim_msv_delete_entry(int32_t handle, int32_t id);
+
+/* Delete every service entry of a given MTM type, and everything under them.
+ *
+ * A probe that creates a service on each run and never removes the last one fills the user's
+ * Messaging account list with copies of itself. This is the cleanup, and it is written as
+ * "remove all of this type" rather than "remove the one I just made" precisely because the
+ * runs that already happened left theirs behind and nothing remembers their ids.
+ *
+ * Returns the number of services removed, or a negative error. */
+int32_t shim_msv_delete_services(int32_t handle, uint32_t mtm_uid);
+
+/* ------------------------------------------------ the new-message notification --
+ * SHIM_USE_NCN. Imports ecom.dso.
+ *
+ * The platform's own indicator, tone and floating note — the exact triple an arriving SMS
+ * produces — reached through MNcnNotification, an ECom interface the platform publishes for
+ * messaging plugins to call (KNcnNotificationInterfaceUid 0x101f8855). It is the only
+ * supported route: CAknSoftNotifier and CAknSmallIndicator are exported from aknnotify.dso
+ * but have no public header in this SDK, and the status-pane plugin interface is not
+ * published at all.
+ *
+ * Two things are unverified on this handset and are what a probe is for. The interface's own
+ * documentation frames it as an *email* plugin API — the parameter is called aMailBox and
+ * the note it raises says "New email" — so whether it accepts a service whose technology
+ * type is neither mail nor SMS is not answerable from the headers. And ncnnotification.dll
+ * is an ECom plugin rather than a library, so it is absent from the SDK's import set and its
+ * presence on the device was never swept.
+ *
+ * Hence: resolution failure returns the error rather than panicking, and a caller is
+ * expected to record it. */
+#define SHIM_NCN_ICON          0x01
+#define SHIM_NCN_TONE          0x02
+#define SHIM_NCN_SOFT_NOTE     0x04
+/* Icon + tone + note. What SMS does. */
+#define SHIM_NCN_NORMAL        0x07
+
+int32_t shim_ncn_notify(int32_t service_id, int32_t indication);
+/* Zero the new-message counter for a service — for when the user has read them. */
+int32_t shim_ncn_mark_unread(int32_t service_id);
+
+/* --------------------------------------------------------- loading our own DLL --
+ * SHIM_USE_DLL_PROBE. The half of the DLL question the host cannot answer.
+ *
+ * tools/e32dump.py --expect-dll already checks, on the host, that the image is a DLL, that
+ * its UID1 is right, that it exports something and that it has no writable static data.
+ * What it cannot check is whether the *handset's* loader accepts it and whether
+ * RLibrary::Lookup returns something callable. That is this call.
+ *
+ * Every step is recorded separately, because they fail for different reasons and a single
+ * pass/fail would collapse four diagnoses into one. `lookup_ok` false with `load_err` zero,
+ * for instance, means the image loaded and exports nothing — which is what a DLL built
+ * without EXPORT_C does (see docs/device-notes.md).
+ *
+ * The signature is apps/dlltest's, not a general one: this exists to validate that DLL. */
+typedef struct ShimDllProbe {
+    int32_t load_err;    /* RLibrary::Load */
+    uint32_t uid1;       /* RLibrary::Type — should be KDynamicLibraryUid, 0x10000079 */
+    uint32_t uid2;
+    uint32_t uid3;
+    int32_t lookup_ok;   /* 1 if Lookup(1) returned non-NULL */
+    int32_t call_err;    /* what the exported function returned */
+    uint32_t magic;      /* the three fields it wrote back */
+    uint32_t echo;
+    uint32_t ticks;
+} ShimDllProbe;
+
+int32_t shim_dll_call_ordinal1(const uint16_t* name, int32_t len, uint32_t arg,
+                               ShimDllProbe* out);
+
+/* Load a DLL and look up an ordinal WITHOUT calling it.
+ *
+ * The half of the question that is safe to ask. Calling an unknown export means jumping to
+ * an address with a signature you are guessing at; looking one up means asking the loader
+ * whether the export table has that slot, which cannot fault.
+ *
+ * It exists because a DLL that the framework loads and calls killed the process before its
+ * own first instruction ran, and that leaves two possibilities — the image does not load, or
+ * the call is wrong — which nothing observable from outside separates. This separates them.
+ *
+ * Returns 1 if the ordinal is present, 0 if the library loaded and the ordinal is not there,
+ * and the Symbian error if it would not load at all. */
+int32_t shim_dll_has_ordinal(const uint16_t* name, int32_t len, int32_t ordinal);
+
+/* --------------------------------------------------- process, with a deadline --
+ * SHIM_USE_PROC. As shim_process_start, but abandons the wait after `timeout_ms`.
+ *
+ * shim_process_start waits on the child's Rendezvous with User::WaitForRequest and no
+ * escape. A child that neither rendezvouses nor dies therefore hangs the caller for
+ * good — and the caller here is the launcher whose entire job is to survive its probes.
+ * "Every asynchronous request needs a way to abandon it, and the one that never
+ * completes is exactly the one that needs it" (docs/device-notes.md).
+ *
+ * Returns SHIM_ERR_TIMED_OUT and kills the child if the deadline passes first. */
+int32_t shim_process_start_timeout(const uint16_t* path, int32_t path_len, int32_t timeout_ms);
+
 #ifdef __cplusplus
 }
 #endif

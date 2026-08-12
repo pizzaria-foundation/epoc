@@ -1,0 +1,20 @@
+/* Application registration. Installed into \private\10003a3f\import\apps\ — that
+ * exact path is what makes the app appear in the S60 menu. See audioprobe's copy of
+ * this file for why that path and not the obvious one. */
+
+#include <appinfo.rh>
+#include "sqlprobe.rsg"
+
+UID2 KUidAppRegistrationResourceFile
+UID3 0xE1234572
+
+RESOURCE APP_REGISTRATION_INFO
+    {
+    app_file = "sqlprobe";
+    localisable_resource_file = "\\resource\\apps\\sqlprobe";
+    localisable_resource_id = R_SQLPROBE_LOCALISABLE_APP_INFO;
+    hidden = KAppNotHidden;
+    embeddability = KAppNotEmbeddable;
+    newfile = KAppDoesNotSupportNewFile;
+    launch = KAppLaunchInForeground;
+    }

@@ -14,6 +14,13 @@ The expected values come from a real armv5 binary carved out of the SDK's own
 example SIS files with tools/sisextract.py, not from documentation.
 
     python3 tools/e32dump.py <file.exe> [--quiet]
+    python3 tools/e32dump.py <file.dll> [--quiet] --expect-dll
+
+--expect-dll flips the image-type assertions: it requires KImageDll and the DLL
+UID1 rather than forbidding them, and additionally requires a non-empty export
+table and no writable static data. A DLL that fails either of those last two
+builds, packages and installs perfectly well, and fails at RLibrary::Load or
+RLibrary::Lookup on the handset with the platform's usual silence.
 """
 
 import struct
@@ -75,7 +82,7 @@ def uid_checksum(uid1, uid2, uid3):
     return (ccitt(odd) << 16) | ccitt(even)
 
 
-def main(path, quiet=False):
+def main(path, quiet=False, expect_dll=False):
     data = open(path, "rb").read()
     out = []
     _p = (lambda t="": out.append(t)) if quiet else (lambda t="": print(t))
@@ -121,8 +128,17 @@ def main(path, quiet=False):
     for required in ("KImageEpt_Eka2", "KImageABI_EABI", "KImageHdrFmt_V", "KImageImpFmt_ELF"):
         if required not in names:
             problems.append(f"flag {required} is not set")
-    if "KImageDll" in names:
+    # The image type has to be asserted in both directions. An EXE carrying
+    # KImageDll and a DLL without it are both accepted by every tool in the chain
+    # and both refused by the loader, which says nothing about why.
+    if expect_dll and "KImageDll" not in names:
+        problems.append("KImageDll not set on what should be a DLL")
+    if not expect_dll and "KImageDll" in names:
         problems.append("KImageDll set on what should be an EXE")
+    want_uid1 = 0x10000079 if expect_dll else 0x1000007A
+    if uid1 != want_uid1:
+        problems.append(f"uid1 is 0x{uid1:08x}, should be 0x{want_uid1:08x} "
+                        f"for a {'DLL' if expect_dll else 'EXE'}")
 
     print_(f"  cpu               0x{cpu:04x}      {CPU.get(cpu, '?? UNKNOWN')}")
     print_()
@@ -148,6 +164,19 @@ def main(path, quiet=False):
     print_(f"  importOffset      0x{impOff:08x}")
     print_(f"  codeRelocOffset   0x{codeRelocOff:08x}")
     print_(f"  dataRelocOffset   0x{dataRelocOff:08x}")
+
+    # A DLL with an empty export table links, packages and installs; the failure
+    # surfaces as RLibrary::Lookup returning NULL on the handset, which is the far
+    # end of exactly the loop this gate exists to shorten. The usual cause is
+    # --gc-sections sweeping a symbol nothing in the image references.
+    if expect_dll and expCount < 1:
+        problems.append("exportDirCount is 0 — the DLL exports nothing, so no "
+                        "ordinal can ever be looked up")
+    # Writable static data in a DLL needs EPOCALLOWDLLDATA, which this toolchain
+    # does not set. Without the flag the loader refuses the image.
+    if expect_dll and (dataSize or bssSize) and "KImageAllowDllData" not in names:
+        problems.append(f"DLL has writable static data (data {dataSize}, bss {bssSize}) "
+                        "but KImageAllowDllData is not set — remove the non-const globals")
 
     if entry >= codeSize:
         problems.append(f"entryPoint 0x{entry:x} lies outside codeSize 0x{codeSize:x}")
@@ -226,5 +255,6 @@ def main(path, quiet=False):
 if __name__ == "__main__":
     args = [a for a in sys.argv[1:] if not a.startswith("-")]
     if not args:
-        sys.exit("usage: e32dump.py <file.exe> [--quiet]")
-    main(args[0], quiet="--quiet" in sys.argv)
+        sys.exit("usage: e32dump.py <file.exe|file.dll> [--quiet] [--expect-dll]")
+    main(args[0], quiet="--quiet" in sys.argv,
+         expect_dll="--expect-dll" in sys.argv)

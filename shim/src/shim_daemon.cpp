@@ -86,6 +86,9 @@ void MainL()
 #ifdef SHIM_USE_PROP
     ShimPropCleanup();
 #endif
+#ifdef SHIM_USE_SQL
+    ShimSqlCleanup();
+#endif
     ShimFilesCleanup();
 #ifdef SHIM_USE_NET
     ShimNetCleanup();

@@ -1,0 +1,22 @@
+//  devdump UI resource.
+NAME DVDP
+
+#include <eikon.rh>
+#include <avkon.rsg>
+#include <avkon.rh>
+#include <appinfo.rh>
+
+RESOURCE RSS_SIGNATURE { }
+RESOURCE TBUF { buf = ""; }
+RESOURCE EIK_APP_INFO { }
+
+RESOURCE LOCALISABLE_APP_INFO r_devdump_localisable_app_info
+    {
+    short_caption = "devdump";
+    caption_and_icon =
+        CAPTION_AND_ICON_INFO
+            {
+            caption = "Device dump";
+            number_of_icons = 0;
+            };
+    }

@@ -166,6 +166,13 @@ pub trait Fs {
     fn list_dir(&mut self, path: &[u16], out: &mut [u16]) -> Result<usize>;
     fn delete(&mut self, path: &[u16]) -> Result<()>;
     fn rename(&mut self, from: &[u16], to: &[u16]) -> Result<()>;
+    /// Create a directory. An existing one is success, so this is safe to call blind.
+    ///
+    /// On the trait rather than as a free function because a caller that groups its
+    /// output into a subdirectory has to be testable against [`MemFs`] — and a free
+    /// function reaching straight for the shim would make every such caller
+    /// device-only.
+    fn mkdir(&mut self, path: &[u16]) -> Result<()>;
     /// The app's private directory, created if absent.
     fn private_path(&mut self, out: &mut [u16]) -> Result<usize>;
 }
@@ -246,6 +253,11 @@ impl Fs for ShimFs {
                 to.len() as i32,
             )
         })
+    }
+
+    fn mkdir(&mut self, path: &[u16]) -> Result<()> {
+        // SAFETY: `path` is valid for `path.len()` units and only read.
+        Error::check(unsafe { sys::shim_mkdir(path.as_ptr(), path.len() as i32) })
     }
 
     fn private_path(&mut self, out: &mut [u16]) -> Result<usize> {
@@ -410,6 +422,9 @@ pub struct MemFs {
     /// Cap on a single write. 0 means unlimited.
     pub write_chunk: usize,
     pub private: Vec<u16>,
+    /// Every path passed to [`Fs::mkdir`], in order. The fake creates no directories —
+    /// see the impl — so this is the only record that a caller asked.
+    pub mkdirs: Vec<Vec<u16>>,
 }
 
 impl MemFs {
@@ -420,6 +435,7 @@ impl MemFs {
             read_chunk: 0,
             write_chunk: 0,
             private: "C:\\private\\E1234569\\".encode_utf16().collect(),
+            mkdirs: Vec::new(),
         }
     }
 
@@ -547,6 +563,17 @@ impl Fs for MemFs {
         }
         let src = self.find(from).ok_or(Error::NotFound)?;
         self.files[src].0 = to.to_vec();
+        Ok(())
+    }
+
+    fn mkdir(&mut self, path: &[u16]) -> Result<()> {
+        // The store is a flat map from full path to contents — there is no directory to
+        // create, and a file may be written under any prefix. Recording the call would
+        // model a rule this fake does not enforce, which is worse than not modelling it:
+        // a test could then pass on a directory the device would have refused.
+        //
+        // `mkdirs` is kept so a test that cares can assert the call was made.
+        self.mkdirs.push(path.to_vec());
         Ok(())
     }
 

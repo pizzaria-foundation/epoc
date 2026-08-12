@@ -1,0 +1,100 @@
+SYMBIAN OS V9.3
+
+ »
+Symbian OS v9.3 »
+Examples »
+Messaging example code »
+Messaging Text MTM example code »
+Building and use
+
+Building and use
+
+The TextMTM can be built, deployed on the emulator or native
+platform, and its functionality experimented with through the messaging
+application.
+
+To do this requires a number of steps:
+
+build all TextMTM projects for the relevant target
+
+run the txin program to register the TextMTM with
+the Message Server
+
+run the messaging application, and experiment with creating and
+using TextMTM services and messages
+
+The following sections contain more details on each of these.
+
+Building
+
+The TextMTM is more complex than some other examples, as it is made
+up of a number of projects, some of which include headers from other projects,
+or link to the utilities DLL txut.
+
+To do a build, perform the normal steps of bldmake
+bldfiles and abld build <target-platform>.
+
+Note that:
+
+UI resources and icons for the MTM are built to
+\resource\messaging\.
+
+A resource file that provides information to register the MTM
+with the messaging server is built to
+\resource\messaging\mtm\.
+
+The bld.inf's file PRJ_EXPORTS
+section lists header files copied into \epoc32\include.
+
+The MTM stores its settings in its own area in the central
+repository. This requires a repository initialisation file
+(10005247.txt) to be supplied. The bld.inf does this
+by exporting the file to the central repository private directory
+z:\private\10202BE9\.
+
+The final step, registering the MTM, is not performed by the build
+process, and is described below.
+
+Registration
+
+On the Emulator, you should have run the messaging application at
+least once before registering the TextMTM, as this creates some necessary
+folders.
+
+Before you can use the TextMTM, you must inform the Message Server
+of the TextMTM registration data. To do this, run the txin
+program, a simple console program.
+
+Use
+
+Start the messaging application in the normal way. You will find
+that it has automatically detected the presence of the new MTM and added
+suitable commands to the user interface. For details of the available
+functionality, see the other documentation on individual TextMTM components,
+but to get started, try the following:
+
+Create a new TextMTM service. You will be asked to choose a
+directory to be mapped to the TextMTM service.
+
+Note that directories such as \private\ and
+\sys\ cannot be used, as platform security requires that access to
+those directories is restricted.
+
+Create a new TextMTM message. As the TextMTM does not include a
+user interface for message editing and viewing, it simulates this activity by
+flashing an Editing information message.
+
+Select a TextMTM message in a local folder. Check that a
+special Export text to file command appears in the
+application's menu and use it.
+
+Cut, copy, and paste messages between local folders and the
+service.
+
+Add and remove files (e.g. through Windows Explorer when using
+the Emulator) manually from the directory mapped to the TextMTM service. In
+messaging, go to the service and see that a special Refresh
+service menu command appears. Use this and check that the service now
+accurately reflects the state of the directory.
+
+Copyright ©2008  Symbian Software Ltd.
