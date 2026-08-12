@@ -116,6 +116,31 @@ if [ "${USE_FEP:-0}" = 1 ]; then
   FEP_LIBS="fepbase"
 fi
 
+# USE_MTM=1 adds shim/mtm — the MTM component base classes — to the sources.
+#
+# It is NOT part of the shim and must never be mixed with it. shim_event.cpp alone has five
+# file-scope mutables, and a Symbian 9.x DLL with any writable static data is refused by the
+# loader; `tools/e32dump.py --expect-dll` is the gate. The failure without this check is
+# e32dump complaining about bssSize in a build whose app.conf looks perfectly innocent, so the
+# combination is refused here with the reason named.
+#
+# It also explains the directory: shim/mtm/src rather than shim/src/mtm, because the shim loop
+# below globs shim/src/*.cpp wholesale.
+MTM_SRCS=()
+MTM_INC=""
+if [ "${USE_MTM:-0}" = 1 ]; then
+  if [ "${USE_SHIM:-0}" = 1 ] || [ "${USE_SHIM_DAEMON:-0}" = 1 ]; then
+    echo "USE_MTM cannot be combined with USE_SHIM or USE_SHIM_DAEMON." >&2
+    echo "The shim has file-scope mutable state; a Symbian DLL may have none, and the" >&2
+    echo "loader refuses the image. An MTM component DLL links shim/mtm only." >&2
+    exit 1
+  fi
+  [ "$TARGETTYPE" = DLL ] || { echo "USE_MTM needs TARGETTYPE=DLL" >&2; exit 1; }
+  for src in "$SDK"/shim/mtm/src/*.cpp; do MTM_SRCS+=("$src"); done
+  MTM_INC="-I$SDK/shim/mtm/inc"
+  echo "--> mtm base: $(( ${#MTM_SRCS[@]} )) sources from shim/mtm/src"
+fi
+
 if [ "${USE_SHIM:-0}" = 1 ]; then
   NET_LIBS=""
   if [ "${USE_NET:-0}" = 1 ]; then
@@ -336,6 +361,9 @@ fi
 # drives Rust through the shim therefore lists no C++ of its own at all.
 SRCS=()
 for src in $CXX_SOURCES; do SRCS+=("$APP/$src"); done
+# The MTM base library, if USE_MTM. Added here rather than to CXX_SOURCES so an app.conf names
+# only its own files.
+for src in "${MTM_SRCS[@]+"${MTM_SRCS[@]}"}"; do SRCS+=("$src"); done
 # fepbase carries the default implementations of MCoeFepAwareTextEditor's own virtuals.
 # They are IMPORT_C, so a class deriving from it puts their addresses in its vtable and the
 # link fails without them -- and cone.dso, which exports TCoeInputCapabilities including the
@@ -501,7 +529,8 @@ if [ ${#SRCS[@]} -gt 0 ]; then
       -fexceptions -fno-rtti \
       -Wall -Wno-narrowing -Wno-ctor-dtor-privacy -Wno-unknown-pragmas \
       -Wno-attributes \
-      -I"$APP/inc" -I"$APP/data" -I"$SDK/shim/inc" ${CXX_FLAGS:-} \
+      ${MTM_TRACE:+$([ "$MTM_TRACE" = 1 ] && echo -DMTM_TRACE)} \
+      -I"$APP/inc" -I"$APP/data" -I"$SDK/shim/inc" ${MTM_INC:-} ${CXX_FLAGS:-} \
       "$src" -o "$obj"
     OBJS+=("$obj")
   done
@@ -734,9 +763,19 @@ if [ -n "${MTM_RESOURCE_TEMPLATE:-}" ]; then
     printf '%s' "$ord"
   }
 
-  MTM_SRC="$APP/$MTM_RESOURCE_TEMPLATE"
+  # Absolute paths pass through, so a service can point at the shared template in
+  # shim/mtm/data/ rather than keeping a copy. Same shape EXTRA_DLLS already uses, and app.conf
+  # is sourced after SDK is set, so "$SDK/shim/mtm/data/mtmreg.rss.in" already expands.
+  case "$MTM_RESOURCE_TEMPLATE" in
+    /*) MTM_SRC="$MTM_RESOURCE_TEMPLATE" ;;
+    *)  MTM_SRC="$APP/$MTM_RESOURCE_TEMPLATE" ;;
+  esac
   [ -f "$MTM_SRC" ] || { echo "MTM_RESOURCE_TEMPLATE: $MTM_SRC not found" >&2; exit 1; }
-  MTM_BASE="$(basename "$MTM_SRC" .rss.in)"
+  # Named after the app, NOT after the template. With a shared template every service's
+  # registration would otherwise be called mtmreg.rsc and they would collide in the one
+  # directory the framework reads, \resource\messaging\mtm\ — the second service installed
+  # would silently replace the first.
+  MTM_BASE="${NAME}reg"
   MTM_RESOURCE="build/$MTM_BASE.rss"
 
   echo "--> mtm registration: ordinals from $NAME.def"

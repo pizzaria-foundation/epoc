@@ -1,10 +1,15 @@
-//  GENERATED from this template by tools/symbuild — do not edit build/mtmdemoreg.rss.
+//  The registration resource, shared by every service. GENERATED from this template by
+//  tools/symbuild into <app>/build/<name>.rss — do not edit the generated file.
+//
+//  Shared because every per-service value in it is already a substituted variable: the two
+//  UIDs, the human-readable name, and the DLL's filename. A service points MTM_RESOURCE_TEMPLATE
+//  at this path and writes none of it.
 //
 //  The @ORD_*@ placeholders are filled from the .def elf2e32 wrote, so each entry_point is
 //  the ordinal the linker actually assigned rather than the one somebody assumed. elf2e32
 //  numbers exports by sorting their names, so declaration order in app.conf says nothing.
 //
-//  All four component slots are declared even though only the client is implemented.
+//  All four component slots are declared, and all four are implemented by shim/mtm.
 //  CObserverRegistry::HandleSessionEventL indexes the declared array by fixed slot — 0
 //  server, 1 client, 2 UI, 3 UI data — with no bounds check, so a registration that declares
 //  fewer components makes the Message Server's own client read past the end of the array.
