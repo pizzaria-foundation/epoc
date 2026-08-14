@@ -38,7 +38,21 @@ TInt gTail = 0;   /* next slot to read  */
 TInt gCount = 0;
 TInt gDropped = 0;
 
+/* The pump's wake-up. NULL in a build that never registers one (the headless daemon polls on a
+ * CPeriodic and needs no nudge); set by the GUI shim to restart its sleeping drain pump. */
+void (*gPumpKick)() = NULL;
+
 } /* namespace */
+
+void ShimSetPumpKick(void (*aKick)())
+    {
+    gPumpKick = aKick;
+    }
+
+TInt ShimEventCount()
+    {
+    return gCount;
+    }
 
 /* Called from RunL and from OfferKeyEventL. Not part of the Rust-facing ABI, so
  * it is declared in shim_priv.h rather than symbian_shim.h. */
@@ -52,6 +66,11 @@ void ShimPushEvent(const ShimEvent& aEvent)
     gQueue[gHead] = aEvent;
     gHead = (gHead + 1) % KQueueSize;
     gCount++;
+    /* Wake the drain pump. Cheap and idempotent: the kick no-ops if the pump is already awake, so
+     * paying it on every push (rather than only on the empty→non-empty edge) costs nothing and
+     * keeps this function free of any assumption about the pump's state. */
+    if (gPumpKick)
+        gPumpKick();
     }
 
 void ShimPushSimple(TInt aKind, TInt aHandle, TInt aStatus, TInt aA)

@@ -23,6 +23,8 @@ public:
     static CShimTimer* NewL(TInt aHandle);
     void After(TInt aMs);
     void Every(TInt aMs);
+    /* True once a one-shot has fired (or a repeat ended in error): its slot is reclaimable. */
+    TBool IsDone() const { return iDone; }
 
 private:
     CShimTimer(TInt aHandle);
@@ -31,6 +33,10 @@ private:
     /* CTimer's DoCancel already calls RTimer::Cancel, so there is nothing to add. */
 
     TInt iHandle;
+    /* Set in RunL when the timer will not re-arm; read by AllocSlot to reclaim the slot. A fired
+     * one-shot used to linger in gTimers forever, so enough gestures/ticks exhausted the 8-slot pool
+     * and every later timer_after failed silently — which froze the launcher's long-press. */
+    TBool iDone;
     /* Non-zero for a repeating timer: RunL re-arms itself with this interval.
      * Deliberately not CPeriodic — CPeriodic's callback is a TCallBack, not a
      * CActive completion, and keeping every asynchronous source on the same
@@ -41,7 +47,7 @@ private:
 CShimTimer* gTimers[KMaxTimers];
 
 CShimTimer::CShimTimer(TInt aHandle)
-    : CTimer(EPriorityStandard), iHandle(aHandle), iRepeatMs(0)
+    : CTimer(EPriorityStandard), iHandle(aHandle), iRepeatMs(0), iDone(EFalse)
     {
     }
 
@@ -90,6 +96,13 @@ void CShimTimer::RunL()
          * catching up after a slow frame would burst several redraws back to back. */
         CTimer::After(iRepeatMs * 1000);
         }
+    else
+        {
+        /* Finished: not a repeat, or a repeat that errored. Flag the slot reclaimable rather than
+         * self-delete here (deleting the active object from inside its own RunL is the fragile part
+         * this avoids). AllocSlot reaps it, and timer_cancel on the handle stays a safe no-op. */
+        iDone = ETrue;
+        }
     }
 
 TInt AllocSlot()
@@ -97,6 +110,15 @@ TInt AllocSlot()
     for (TInt i = 0; i < KMaxTimers; i++)
         if (!gTimers[i])
             return i;
+    /* No empty slot: reclaim a finished one-shot still lingering in the pool. This is what keeps a
+     * fixed 8-slot pool from being exhausted by fired one-shots that no one cancelled. */
+    for (TInt i = 0; i < KMaxTimers; i++)
+        if (gTimers[i]->IsDone())
+            {
+            delete gTimers[i];
+            gTimers[i] = NULL;
+            return i;
+            }
     return KErrNoMemory;
     }
 
