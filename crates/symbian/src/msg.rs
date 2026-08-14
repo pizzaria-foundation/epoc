@@ -107,6 +107,8 @@ pub trait Msv {
     fn can_instantiate(&mut self, handle: i32, mtm_uid: u32) -> Result<()>;
     fn mtm_info(&mut self, handle: i32, index: i32) -> Result<MtmInfo>;
     fn folder_count(&mut self, handle: i32, folder_id: EntryId) -> Result<i32>;
+    /// How many children of the folder are unread — one server-side count.
+    fn unread_count(&mut self, handle: i32, folder_id: EntryId) -> Result<i32>;
 
     /// Handle-less in the shim: installing a registration is a server-wide act, not
     /// something a session owns.
@@ -178,6 +180,13 @@ impl Msv for ShimMsv {
         let mut out = 0i32;
         // SAFETY: live local; handle validated by the shim.
         Error::check(unsafe { sys::shim_msv_folder_count(handle, folder_id, &mut out) })?;
+        Ok(out)
+    }
+
+    fn unread_count(&mut self, handle: i32, folder_id: EntryId) -> Result<i32> {
+        let mut out = 0i32;
+        // SAFETY: live local; handle validated by the shim.
+        Error::check(unsafe { sys::shim_msv_folder_unread(handle, folder_id, &mut out) })?;
         Ok(out)
     }
 
@@ -477,6 +486,12 @@ impl<M: Msv> Session<M> {
     /// How many entries a standard folder holds. See [`FOLDERS`].
     pub fn folder_count(&mut self, folder_id: EntryId) -> Result<i32> {
         self.msv.folder_count(self.handle, folder_id)
+    }
+
+    /// How many entries in a standard folder are unread — the "N new messages" number a home
+    /// screen shows for the inbox ([`sys::SHIM_MSV_INBOX`]). One server-side count.
+    pub fn unread_count(&mut self, folder_id: EntryId) -> Result<i32> {
+        self.msv.unread_count(self.handle, folder_id)
     }
 
     /// Tell the Message Server about a `.mtm` registration file outside ROM.
@@ -961,6 +976,15 @@ impl Msv for MemMsv {
         Ok(self.entries.iter().filter(|(e, _)| e.parent == folder_id).count() as i32)
     }
 
+    fn unread_count(&mut self, _handle: i32, folder_id: EntryId) -> Result<i32> {
+        self.take_failure()?;
+        Ok(self
+            .entries
+            .iter()
+            .filter(|(e, _)| e.parent == folder_id && e.flags & sys::SHIM_MSV_UNREAD != 0)
+            .count() as i32)
+    }
+
     fn install_mtm(&mut self, path: &[u16]) -> Result<()> {
         self.calls.push(MsvCall::InstallMtm);
         self.take_failure()?;
@@ -1254,6 +1278,19 @@ mod tests {
     fn children_of_an_empty_folder_is_empty_not_an_error() {
         let mut s = store();
         assert!(s.children(sys::SHIM_MSV_SENT).unwrap().is_empty());
+    }
+
+    #[test]
+    fn unread_count_counts_only_unread_in_the_folder() {
+        let mut fake = MemMsv::new();
+        // Two unread and one read in the inbox; one unread elsewhere must not be counted.
+        fake.push_message(sys::SHIM_MSV_INBOX, 0xE1, 1, "Ana", "hi", sys::SHIM_MSV_UNREAD);
+        fake.push_message(sys::SHIM_MSV_INBOX, 0xE1, 1, "Bea", "yo", sys::SHIM_MSV_UNREAD);
+        fake.push_message(sys::SHIM_MSV_INBOX, 0xE1, 1, "Cal", "ok", 0);
+        fake.push_message(sys::SHIM_MSV_DRAFTS, 0xE1, 1, "Dan", "wip", sys::SHIM_MSV_UNREAD);
+        let mut s = Session::with(fake).unwrap();
+        assert_eq!(s.unread_count(sys::SHIM_MSV_INBOX).unwrap(), 2);
+        assert_eq!(s.unread_count(sys::SHIM_MSV_SENT).unwrap(), 0, "empty folder is zero, not an error");
     }
 
     /// A body longer than the 256-unit first buffer.

@@ -425,6 +425,30 @@ void FolderCountL(TMsvId aId, TInt* aOut)
     CleanupStack::PopAndDestroy(entry);
     }
 
+/* How many children of a folder are unread — the number the home screen shows. Counted from the
+ * child index the CMsvEntry already loaded, so it is one server operation for the whole folder, not
+ * one per entry (the naive "list then read each" is O(folder) round-trips, ~156 on this handset). */
+void FolderUnreadCountL(TMsvId aId, TInt* aOut)
+    {
+    TMsvSelectionOrdering ordering;
+    CMsvEntry* entry = CMsvEntry::NewL(*gSession, aId, ordering);
+    CleanupStack::PushL(entry);
+    TInt unread = 0;
+    const TInt count = entry->Count();
+    for (TInt i = 0; i < count; i++)
+        {
+        const TMsvEntry& e = (*entry)[i];
+        /* Count "needs attention" = New OR Unread. A just-arrived message sets Unread; an item
+         * delivered by the system (e.g. a Bluetooth/OBEX object) sets the New flag instead, and was
+         * being missed when only Unread was counted — measured on the E72, where received files
+         * raise the folder count but never Unread. */
+        if (e.New() || e.Unread())
+            unread++;
+        }
+    *aOut = unread;
+    CleanupStack::PopAndDestroy(entry);
+    }
+
 /* --------------------------------------------------------------- the read side -- */
 
 /* Copy a platform text field into a fixed array, reporting the full length.
@@ -704,6 +728,21 @@ int32_t shim_msv_folder_count(int32_t handle, int32_t folder_id, int32_t* out)
     if (err != KErrNone)
         return err;
     *out = (int32_t) count;
+    return SHIM_OK;
+    }
+
+int32_t shim_msv_folder_unread(int32_t handle, int32_t folder_id, int32_t* out)
+    {
+    if (!out)
+        return SHIM_ERR_ARGUMENT;
+    if (!Valid(handle))
+        return SHIM_ERR_BAD_HANDLE;
+
+    TInt unread = 0;
+    TRAPD(err, FolderUnreadCountL((TMsvId) folder_id, &unread));
+    if (err != KErrNone)
+        return err;
+    *out = (int32_t) unread;
     return SHIM_OK;
     }
 
