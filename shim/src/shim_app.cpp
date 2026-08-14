@@ -227,6 +227,81 @@ TBool FnActive()
 CShimControl* gControl = NULL;
 TBool gExitRequested = EFalse;
 
+/* Resident mode, for a launcher. When on, the End key does not close the app — it sends it to the
+ * background, the way the home screen behaves — and the Applications (Menu) key is captured so
+ * pressing it anywhere brings this app forward. Off by default; an ordinary app is unaffected.
+ * The Menu key is hardware, delivered as up/down scan codes rather than a translated character,
+ * so it is captured with CaptureKeyUpAndDowns by scan code — the way S60 launchers do it, and
+ * confirmed by dissecting GDesk (imports ws32, holds SwEvent, no cenrep). Two codes because the
+ * "menu/applications" key is EStdKeyMenu (0x94) on some Nokia hardware and EStdKeyApplication0
+ * (0xB4) on others; capturing both covers the E72 without knowing which it emits. The handles are
+ * held so they can be cancelled. */
+TBool gResident = EFalse;
+/* The scan codes a resident launcher captures GLOBALLY, so pressing them in any app brings the
+ * launcher forward. This is JUST the menu/applications key — the one thing GDesk captures. It must
+ * not include the softkeys (EStdKeyDevice0/1 on Nokia hardware) or the End key: capturing those
+ * globally steals them from every other application, which froze Messaging and everything else —
+ * no Options, no Back, no way out. A global capture leaks to the whole phone; keep it to the one
+ * key that has to. Everything else (like End keeping us put) is handled foreground-only in
+ * OfferKeyEventL, where it touches only us. */
+/* ============================================================================================
+ * RESIDENT LAUNCHER KEY CONTRACT — the behaviour we want, confirmed working on the E72. Do not
+ * change the captured-key set without re-testing on the handset; every entry was arrived at the
+ * hard way, and the wrong set either freezes other apps or breaks their D-pad.
+ *
+ *   Captured GLOBALLY (reach us in any app and bring the launcher to the front):
+ *     EStdKeyApplication0 (0xB4)  the "casinha" / applications key — exactly and only what GDesk
+ *                                 captures (confirmed by disassembling GDesk.exe).
+ *     EStdKeyNo           (0xC5)  the red End key — by the user's choice, red goes home too.
+ *   NOT captured, on purpose:
+ *     EStdKeyMenu         (0x94)  capturing it stole the D-pad in some other apps, and it is not
+ *                                 needed (the casinha is 0xB4). This was the bug.
+ *     softkeys (EStdKeyDevice0/1) and everything else — a global capture is phone-wide, so
+ *                                 anything past the two keys above freezes or breaks other apps.
+ *   Everything else is foreground-only, handled below in OfferKeyEventL where it touches only us.
+ *
+ * The rule it all rests on: capture the MINIMUM globally, never a key another app needs.
+ * ============================================================================================ */
+/* casinha (App0) + red, PLUS the rest of the dedicated application-launch range (App1..App15,
+ * 0xB5..0xC3): calendar/contacts/messaging live here, and capturing them is how the launcher gets
+ * to REMAP them. This is safe in a way capturing Menu/softkeys was not — those are navigation keys
+ * other apps use continuously, whereas an app-launch key only ever meant "open that app" system-
+ * wide, so redirecting it to us takes nothing away from the app in front. Still the minimum that
+ * does the job: no navigation keys, no softkeys. If any code in this range turns out to be
+ * navigation-critical on some handset, narrow it. */
+const TInt KResidentKeys[] = {
+    EStdKeyApplication0, // 0xB4 casinha
+    0xB5, 0xB6, 0xB7, 0xB8, 0xB9, 0xBA, 0xBB, 0xBC, // App1..App8
+    0xBD, 0xBE, 0xBF, 0xC0, 0xC1, 0xC2, 0xC3,       // App9..App15
+    EStdKeyNo,           // 0xC5 red End
+};
+const TInt KResidentKeyCount = sizeof(KResidentKeys) / sizeof(KResidentKeys[0]);
+TInt32 gKeyCaptures[KResidentKeyCount];
+
+/* A capture is not exclusive: the system's own app-key handler also captures these dedicated keys,
+ * so on the E72 pressing Contacts BOTH launched Contacts (the system) AND ran our binding. WSERV
+ * resolves competing captures by priority — the highest-priority capturer wins and the lower one
+ * never sees the key. Capturing at a high priority is therefore what actually *remaps* the key
+ * (suppresses the default launch) rather than merely adding an action on top of it. Value chosen
+ * well above any ordinary app capture; the priority overload of CaptureKeyUpAndDowns takes it.
+ * Raised well past 1000: on the E72 the system application (sysap) captures the dedicated-key chars
+ * to launch Contacts/Calendar, and 1000 did not outrank it — so we go far higher to win the char. */
+const TInt KResidentKeyPriority = 20000;
+
+/* Capturing the scancode (up/downs) alone did NOT stop the E72 launching Contacts/Calendar: the
+ * translated character event (EEventKey) rides a SEPARATE WSERV capture table, so the system's
+ * handler still saw it. So we also capture the character codes for the dedicated app keys —
+ * EKeyApplication0..F, the keymap's char counterparts of the App0..App15 scancodes — at the same
+ * high priority, and consume them in OfferKeyEventL. That is what actually suppresses the default
+ * launch. If a given handset emits some other char for these keys, the launch survives and the
+ * launcher log (the b==2 RAWKEY we emit) shows the real code to widen this to. Widened to the full
+ * App0..App1F char range (0xf852..0xf871) since Contacts may sit in the upper half. */
+const TInt KAppCharCount = 32; /* EKeyApplication0..EKeyApplication1F */
+TInt32 gCharCaptures[KAppCharCount];
+
+/* Whether this app is the foreground app right now, tracked from HandleForegroundEventL. */
+TBool gForeground = ETrue;
+
 /* ------------------------------------------------------------------ control -- */
 
 class CShimControl : public CCoeControl
@@ -380,6 +455,67 @@ TKeyResponse CShimControl::OfferKeyEventL(const TKeyEvent& aKeyEvent, TEventCode
         return EKeyWasConsumed;
         }
 
+    /* Resident launcher key handling — the whole reason the app is a launcher and not just an
+     * app. Hardware keys (Menu, red End, the device keys) arrive as down/up by scan code, never as
+     * a translated character, so they must be handled here, above the EEventKey filter that
+     * follows. Two jobs:
+     *   - report every scan code to Rust as SHIM_EV_RAWKEY, so the launcher can show on screen
+     *     exactly what the Menu and red keys emit on this handset — the end of guessing at codes;
+     *   - act on the launcher keys: the menu/apps keys bring us to the front (pressing Menu opens
+     *     the launcher), and the End/device keys are consumed so the app stays put instead of
+     *     being closed or sent to the idle behind it. */
+    if (gResident && (aType == EEventKeyDown || aType == EEventKeyUp))
+        {
+        const TInt sc = (TInt) aKeyEvent.iScanCode;
+        /* The captured keys all mean the same thing to a launcher: come to the front. The menu /
+         * applications key is one (GDesk captures exactly this — its handler compares the scan code
+         * against EStdKeyApplication0, confirmed by disassembly). The red End key is the other, by
+         * the user's choice: red should go home too, so it is captured and brings the launcher
+         * forward from any app rather than closing or revealing the native idle. Only these keys
+         * are captured — never the softkeys (EStdKeyDevice0/1), which would freeze every other app. */
+        const TBool isHome = (sc == (TInt) EStdKeyApplication0 || sc == (TInt) EStdKeyNo);
+        /* Report every captured key on BOTH edges — b=0 down, b=1 up — so the Rust side can time a
+         * press-and-hold and act on release. The scancode is in `a`. */
+        ShimEvent ev;
+        ev.kind = SHIM_EV_RAWKEY;
+        ev.handle = 0;
+        ev.status = SHIM_OK;
+        ev.a = sc;
+        ev.b = (aType == EEventKeyUp) ? 1 : 0;
+        ev.c = 0;
+        ev.d = 0;
+        ev.native = 0;
+        ShimPushEvent(ev);
+        /* casinha/red still come to the front on the way down. Every captured key is consumed: the
+         * dedicated app keys are ours to remap now, and the Rust side decides what each does. */
+        if (aType == EEventKeyDown && isHome)
+            ControlEnv()->RootWin().SetOrdinalPosition(0);
+        return EKeyWasConsumed;
+        }
+
+    /* The dedicated app keys ALSO arrive as a translated character (EEventKey), on a capture table
+     * separate from the scancode up/downs above — and it was this char event, not the scancode, that
+     * the E72 was launching Contacts/Calendar from. We capture these chars in shim_set_resident, so
+     * consuming them here is what finally suppresses the default launch. Report each as a RAWKEY with
+     * b=2 (the "char edge", distinct from 0 down / 1 up) purely so the launcher log shows the code;
+     * the binding itself already fired off the scancode, so we do not re-dispatch here. */
+    if (gResident && aType == EEventKey
+        && aKeyEvent.iCode >= EKeyApplication0
+        && aKeyEvent.iCode <= EKeyApplication0 + (KAppCharCount - 1))
+        {
+        ShimEvent ev;
+        ev.kind = SHIM_EV_RAWKEY;
+        ev.handle = 0;
+        ev.status = SHIM_OK;
+        ev.a = (TInt) aKeyEvent.iCode;
+        ev.b = 2;
+        ev.c = 0;
+        ev.d = (TInt) aKeyEvent.iScanCode;
+        ev.native = 0;
+        ShimPushEvent(ev);
+        return EKeyWasConsumed;
+        }
+
     /* Otherwise only EEventKey carries a translated character. Down and up would
      * duplicate every keystroke. */
     if (aType != EEventKey)
@@ -407,9 +543,20 @@ TKeyResponse CShimControl::OfferKeyEventL(const TKeyEvent& aKeyEvent, TEventCode
             e.native = aKeyEvent.iModifiers;
             ShimPushEvent(e);
 
-            /* The red End key is captured by the system to close the app. Consuming
-             * it would fight the platform, so it is reported and passed on. */
-            return (aKeyEvent.iCode == EKeyNo) ? EKeyWasNotConsumed : EKeyWasConsumed;
+            /* The red End key, as a translated character. For a resident launcher red means "go
+             * home": bring the launcher to the front and consume it, the same thing the menu key
+             * does — deterministically, every time. A non-resident app passes it on so the
+             * framework closes it as normal. */
+            if (aKeyEvent.iCode == EKeyNo)
+                {
+                if (gResident)
+                    {
+                    ControlEnv()->RootWin().SetOrdinalPosition(0);
+                    return EKeyWasConsumed;
+                    }
+                return EKeyWasNotConsumed;
+                }
+            return EKeyWasConsumed;
             }
         }
 
@@ -478,11 +625,26 @@ public:
 private:
     void HandleResourceChangeL(TInt aType);
     static TInt PumpCallback(TAny* aSelf);
+    static void PumpKick();
     TInt Pump();
 
     CShimControl* iControl;
     CIdle* iPump;
     };
+
+/* The single app-ui instance, so the free-function-style pump kick registered with the event ring
+ * can reach the pump. One GUI process has one app-ui and one pump; set in ConstructL, cleared in
+ * the destructor. */
+CShimAppUi* gShimAppUi = NULL;
+
+/* Registered with the event ring: wake the drain pump when an event lands on a queue that had let
+ * it go to sleep. IsActive() makes it idempotent — a push while the pump is mid-drain finds it
+ * already awake and does nothing, which matters because CIdle::Start on an active object panics. */
+void CShimAppUi::PumpKick()
+    {
+    if (gShimAppUi && gShimAppUi->iPump && !gShimAppUi->iPump->IsActive())
+        gShimAppUi->iPump->Start(TCallBack(&CShimAppUi::PumpCallback, gShimAppUi));
+    }
 
 void CShimAppUi::ConstructL()
     {
@@ -501,27 +663,33 @@ void CShimAppUi::ConstructL()
     /* BELOW idle, not at it — and that one is worth the paragraph.
      *
      * The pump runs whenever the scheduler has nothing more urgent, which is the right
-     * time to redraw. Returning ETrue from the callback reschedules it, so this is a
-     * cooperative loop that always yields. But re-arming every pass also means the pump is
-     * *permanently ready*: there is never a moment when the scheduler does not have it
-     * available to run.
+     * time to redraw. It drains the event ring, and then — this is the 2026 change — sleeps
+     * if the ring came up empty (Pump returns EFalse) instead of re-arming unconditionally.
+     * A push onto the empty queue wakes it again through PumpKick, registered just below.
      *
-     * Symbian dispatches the highest-priority ready object and, among equals, the one
-     * added first. So a permanently-ready object at EPriorityIdle does not merely go last
-     * — it starves every object at that same priority that is added after it. Forever.
-     * Not slowly: never.
+     * Why it changed: re-arming every pass made the pump *permanently ready*. In the
+     * foreground that only wasted a battery on a phone that is barely touched; in the
+     * background it was worse than wasteful. There is no window-server work above a
+     * backgrounded app to yield to, so the CIdle span rust_step() flat out, and active-object
+     * priority — which orders work only *within* our thread — bought nothing against another
+     * *process*. The nanokernel round-robins threads by thread priority, and a thread that
+     * never blocks takes its whole timeslice every pass. A trivial foreground app (Calculator)
+     * never noticed; Messaging, which does real work per keypress, went sluggish enough that
+     * its D-pad read as frozen, and only ever while this launcher sat behind it. Sleeping when
+     * idle makes a backgrounded app cost nothing, which is what lets a resident home screen
+     * live behind a heavy app at all.
      *
-     * That is not hypothetical. `CImageDecoder` drives its decode from active objects
-     * inside the plugin, and on the E72's vendor JPEG codec those sit at idle priority.
-     * `examples/imgprobe` measured both halves of it: a decode issued from `rust_app_start`
-     * — before this line runs, so the plugin's objects are queued ahead of the pump —
-     * completed in 241 ms, and the byte-identical decode issued later from inside
-     * `rust_step` never completed at all. Same image, same configuration, same plugin.
-     *
-     * One below EPriorityIdle rather than some large negative number: this should be the
-     * lowest-priority object in the process, and "strictly below the documented floor" says
-     * exactly that without inventing a magnitude. */
+     * The priority still matters for the passes it does run. Symbian dispatches the
+     * highest-priority ready object and, among equals, the one added first, so a ready object
+     * at EPriorityIdle starves every object added after it at that priority. `CImageDecoder`
+     * drives its decode from active objects that sit at idle priority on the E72's vendor JPEG
+     * codec; `examples/imgprobe` measured a decode issued from `rust_app_start` (queued ahead
+     * of the pump) finish in 241 ms while the byte-identical decode issued from inside
+     * `rust_step` never completed. One below EPriorityIdle says "lowest in the process" without
+     * inventing a magnitude. */
     iPump = CIdle::NewL(CActive::EPriorityIdle - 1);
+    gShimAppUi = this;
+    ShimSetPumpKick(&CShimAppUi::PumpKick);
     iPump->Start(TCallBack(&CShimAppUi::PumpCallback, this));
     }
 
@@ -530,6 +698,9 @@ void CShimAppUi::HandleForegroundEventL(TBool aForeground)
     /* Push a focus event so Rust knows whether we are in the foreground.
      * `a` is 1 for foreground, 0 for background. */
     ShimPushSimple(SHIM_EV_FOCUS, 0, SHIM_OK, aForeground ? 1 : 0);
+    /* Track it for the resident key handling: the End key is only consumed while we are the
+     * foreground app, so it never leaks into another application. */
+    gForeground = aForeground;
 
     /* The framework needs to manage sound system state, key resources,
      * and other per-application foreground/background transitions.
@@ -543,6 +714,10 @@ void CShimAppUi::HandleForegroundEventL(TBool aForeground)
 
 CShimAppUi::~CShimAppUi()
     {
+    /* Unhook the kick before deleting the pump: an event pushed during teardown (a late RunL, a
+     * cleanup that logs) must not try to Start a pump that is being freed. */
+    ShimSetPumpKick(NULL);
+    gShimAppUi = NULL;
     if (iPump)
         {
         iPump->Cancel();
@@ -602,7 +777,14 @@ TInt CShimAppUi::Pump()
         Exit();
         return EFalse;   /* stop rescheduling; we are going away */
         }
-    return ETrue;
+
+    /* Sleep unless there is more to drain. rust_step polls the ring empty in the common case, so
+     * this normally returns EFalse and the pump stops until the next ShimPushEvent kicks it awake
+     * — zero CPU while nothing is happening, which is almost always, on a phone barely touched.
+     * If rust_step left events behind (it processes a bounded batch, or a step pushed a follow-up),
+     * ShimEventCount() is non-zero and we re-arm to finish them on the next pass. Either way, work
+     * that arrives while we sleep re-arms us through PumpKick, so nothing is stranded in the ring. */
+    return ShimEventCount() > 0 ? ETrue : EFalse;
     }
 
 void CShimAppUi::HandleCommandL(TInt aCommand)
@@ -611,7 +793,17 @@ void CShimAppUi::HandleCommandL(TInt aCommand)
         {
         case EEikCmdExit:
         case EAknSoftkeyExit:
-            Exit();
+            /* The red End key ends here: the framework turns an unconsumed EKeyNo into an exit
+             * command. A resident launcher must not die from that — a home screen steps aside to
+             * the idle behind it and stays alive, so the Menu/Apps key can bring it back. That is
+             * exactly what GDesk does (its handler captures the apps key and never touches red, and
+             * it survives being backgrounded). So when resident, go to the background instead of
+             * exiting; only a non-resident launcher actually closes. */
+            /* A resident launcher never exits from the red key: the key handler already brought it
+             * to the front, so if an exit command still arrives it is ignored. Only a non-resident
+             * launcher actually closes. */
+            if (!gResident)
+                Exit();
             break;
         default:
             break;
@@ -645,6 +837,51 @@ void ShimRequestExit()
 extern "C" void shim_request_exit(void)
     {
     ShimRequestExit();
+    }
+
+/* Turn resident (launcher) behaviour on or off. On: capture the Menu key so pressing it brings
+ * this app forward, and make End consume-and-stay rather than close (both handled in
+ * OfferKeyEventL). The Menu key is captured by SCAN code with CaptureKeyUpAndDowns — it is a
+ * hardware key that does not arrive as a translated character, so capturing by key code (the
+ * earlier EKeyApplication0 attempt) never matched. Both EStdKeyMenu and EStdKeyApplication0 are
+ * captured because Nokia hardware differs on which the "menu" key emits. Capturing needs SwEvent;
+ * the launcher declares it, matching GDesk. Safe before the window group exists — returns
+ * SHIM_ERR_NOT_READY — though the launcher calls it from rust_app_start, by which point CCoeEnv
+ * is up. */
+extern "C" int32_t shim_set_resident(int32_t on)
+    {
+    CCoeEnv* env = CCoeEnv::Static();
+    if (!env)
+        return SHIM_ERR_NOT_READY;
+    RWindowGroup& wg = env->RootWin();
+    if (on && !gResident)
+        {
+        /* CaptureKeyUpAndDowns returns a handle (>= 0) or a negative error. Capture each key we
+         * care about; a refused one just will not route to us, the others still do. */
+        for (TInt i = 0; i < KResidentKeyCount; i++)
+            gKeyCaptures[i] = wg.CaptureKeyUpAndDowns(KResidentKeys[i], 0, 0, KResidentKeyPriority);
+        /* ...and the character events for the app keys, the other half of the remap (see above). */
+        for (TInt i = 0; i < KAppCharCount; i++)
+            gCharCaptures[i] = wg.CaptureKey(EKeyApplication0 + i, 0, 0, KResidentKeyPriority);
+        gResident = ETrue;
+        }
+    else if (!on && gResident)
+        {
+        for (TInt i = 0; i < KResidentKeyCount; i++)
+            {
+            if (gKeyCaptures[i] >= 0)
+                wg.CancelCaptureKeyUpAndDowns(gKeyCaptures[i]);
+            gKeyCaptures[i] = -1;
+            }
+        for (TInt i = 0; i < KAppCharCount; i++)
+            {
+            if (gCharCaptures[i] >= 0)
+                wg.CancelCaptureKey(gCharCaptures[i]);
+            gCharCaptures[i] = -1;
+            }
+        gResident = EFalse;
+        }
+    return SHIM_OK;
     }
 
 /* ------------------------------------------------- document / application -- */

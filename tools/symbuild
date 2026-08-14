@@ -149,8 +149,11 @@ if [ "${USE_SHIM:-0}" = 1 ]; then
     # underneath it.
     NET_LIBS="esock insock commdb netmeta apgrfx"
   fi
-  # shim_mem needs only hal, which is already in the base set.
-  : "${SYMBIAN_LIBS:=euser apparc cone eikcore avkon ws32 fbscli bitgdi gdi fntstr efsrv estor hal $NET_LIBS $FEP_LIBS}"
+  # apgrfx (the Application Architecture server client) is in the base set: it is present on every
+  # Symbian device, so importing it never risks an unsatisfied dependency, and shim_app.cpp's
+  # resident-launcher path uses TApaTask from it unconditionally. USE_APPARC's RApaLsSession and
+  # CApaCommandLine resolve from the same library, so that gate no longer adds one of its own.
+  : "${SYMBIAN_LIBS:=euser apparc apgrfx cone eikcore avkon ws32 fbscli bitgdi gdi fntstr efsrv estor hal $NET_LIBS $FEP_LIBS}"
   if [ "${USE_IMAGE:-0}" = 1 ]; then
     SYMBIAN_LIBS="$SYMBIAN_LIBS imageconversion"
   fi
@@ -415,8 +418,24 @@ if [ "${USE_SHIM:-0}" = 1 ] || [ "${USE_SHIM_DAEMON:-0}" = 1 ]; then
       shim_process.cpp)
         [ "${USE_PROC:-0}" = 1 ] || continue
         ;;
+      # Enumerate and launch installed apps through RApaLsSession, for a launcher. Gated
+      # because it adds apgrfx to the link line, and an app that never lists apps should not
+      # import the application registry.
+      shim_apparc.cpp)
+        [ "${USE_APPARC:-0}" = 1 ] || continue
+        ;;
       shim_prop.cpp)
         [ "${USE_PROP:-0}" = 1 ] || continue
+        ;;
+      # Signal strength via CTelephony. Gated because it imports etel3rdparty — a load risk kept
+      # out of every app that does not opt in (only the network daemon does).
+      shim_tele.cpp)
+        [ "${USE_TELEPHONY:-0}" = 1 ] || continue
+        ;;
+      # A CenRep read (Bluetooth power state). Gated: centralrepository stays out of apps that do
+      # not opt in.
+      shim_cenrep.cpp)
+        [ "${USE_CENREP:-0}" = 1 ] || continue
         ;;
       # Same reason, and the one that caught us: the file was compiled
       # unconditionally while imageconversion stayed behind USE_IMAGE, so every
@@ -518,6 +537,10 @@ if [ ${#SRCS[@]} -gt 0 ]; then
       ${USE_AUDIO:+$([ "$USE_AUDIO" = 1 ] && echo -DSHIM_USE_AUDIO)} \
       ${USE_SQL:+$([ "$USE_SQL" = 1 ] && echo -DSHIM_USE_SQL)} \
       ${USE_PROC:+$([ "$USE_PROC" = 1 ] && echo -DSHIM_USE_PROC)} \
+      ${USE_APPARC:+$([ "$USE_APPARC" = 1 ] && echo -DSHIM_USE_APPARC)} \
+      ${USE_APPICON:+$([ "$USE_APPICON" = 1 ] && echo -DSHIM_USE_APPICON)} \
+      ${USE_TELEPHONY:+$([ "$USE_TELEPHONY" = 1 ] && echo -DSHIM_USE_TELEPHONY)} \
+      ${USE_CENREP:+$([ "$USE_CENREP" = 1 ] && echo -DSHIM_USE_CENREP)} \
       ${USE_PROP:+$([ "$USE_PROP" = 1 ] && echo -DSHIM_USE_PROP)} \
       ${USE_MEM:+$([ "$USE_MEM" = 1 ] && echo -DSHIM_USE_MEM)} \
       ${USE_HAL:+$([ "$USE_HAL" = 1 ] && echo -DSHIM_USE_HAL)} \
@@ -924,13 +947,29 @@ fi
 # The S60 Startup List Management API is explicit that the installer only honours this in
 # a SIGNED (trusted) SISAPP package — so on the unsigned dev flow it is packaged but the
 # installer usually ignores it. Warn, build it anyway, and let the handset be the judge.
-if [ "${AUTOSTART:-0}" = 1 ] && [ -f "$APP/data/${NAME}_startup.rss" ]; then
+# The source resource is either hand-written in the app's data/, or generated here from the
+# shared template — the app then supplies only its name, the same shape as the MTM stage above.
+# A hand-written file always wins, so an app that needs a non-default start-up item keeps control.
+STARTUP_SRC=""
+STARTUP_TEMPLATE="$SDK/shim/launcher/data/startup.rss.in"
+if [ "${AUTOSTART:-0}" = 1 ]; then
+  if [ -f "$APP/data/${NAME}_startup.rss" ]; then
+    STARTUP_SRC="$APP/data/${NAME}_startup.rss"
+  elif [ -f "$STARTUP_TEMPLATE" ]; then
+    STARTUP_SRC="$BUILD/${NAME}_startup.rss"
+    # @NAME@ is the only substitution, and it carries no backslashes — the path shape is fixed
+    # in the template, which is what keeps this a plain sed and not a backslash-escaping puzzle.
+    sed "s|@NAME@|$NAME|g" "$STARTUP_TEMPLATE" > "$STARTUP_SRC"
+    echo "--> autostart resource (generated from template)"
+  fi
+fi
+if [ -n "$STARTUP_SRC" ]; then
   echo "--> autostart resource"
   [ "${SIGN:-0}" = 1 ] || echo "    warning: AUTOSTART wants a signed package (SIGN=1); an unsigned installer usually ignores the start-up item" >&2
   "$CROSS/$TC-g++" -E -P -x c++ -nostdinc \
     -I"$EPOCROOT/epoc32/include" -I"$EPOCROOT/epoc32/include/variant" \
-    -I"$APP/data" -D_UNICODE -DLANGUAGE_SC "$APP/data/${NAME}_startup.rss" -o "$BUILD/${NAME}_startup.rpp"
-  ( cd "$APP/data" && "$HOST/rcomp" -u -o"$BUILD/${NAME}_startup.rsc" \
+    -I"$APP/data" -D_UNICODE -DLANGUAGE_SC "$STARTUP_SRC" -o "$BUILD/${NAME}_startup.rpp"
+  ( cd "$(dirname "$STARTUP_SRC")" && "$HOST/rcomp" -u -o"$BUILD/${NAME}_startup.rsc" \
       -h"${NAME}_startup.rsg" -s"$BUILD/${NAME}_startup.rpp" )
   echo "    ${NAME}_startup.rsc"
 fi
@@ -1014,6 +1053,26 @@ for extra in ${EXTRA_DLLS:-}; do
   dbase="$(basename "$dpath")"
   echo "\"$dpath\"-\"!:\\sys\\bin\\$dbase\"" >> "$BUILD/$NAME.pkg"
   echo "--> bundling $dbase"
+done
+# Registration and caption resources belonging to a bundled helper app — the companion to
+# EXTRA_EXES. EXTRA_EXES copies the executable and nothing else, so a helper app bundled that way
+# installs but never appears in the menu (the same silent failure the MTM note below describes).
+# Naming its two resources here routes each the way symbuild routes its own: a _reg.rsc to the
+# AppArc drop-box so it gets a menu entry, any other .rsc to \resource\apps\ for its caption.
+# This is how apps/launcher ships the Kill Home escape hatch inside its own package.
+for extra in ${EXTRA_APP_RESOURCES:-}; do
+  case "$extra" in /*) rpath="$extra" ;; *) rpath="$APP/$extra" ;; esac
+  if [ ! -f "$rpath" ]; then
+    echo "EXTRA_APP_RESOURCES: $rpath not found — build that app first" >&2
+    exit 1
+  fi
+  rbase="$(basename "$rpath")"
+  case "$rbase" in
+    *_reg.rsc) dest="!:\\private\\10003a3f\\import\\apps\\$rbase" ;;
+    *)         dest="!:\\resource\\apps\\$rbase" ;;
+  esac
+  echo "\"$rpath\"-\"$dest\"" >> "$BUILD/$NAME.pkg"
+  echo "--> bundling app resource $rbase"
 done
 for rsc in "$BUILD"/*_reg.rsc; do
   [ -f "$rsc" ] || continue

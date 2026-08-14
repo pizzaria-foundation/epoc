@@ -26,6 +26,15 @@ class CFbsBitGc;
 void ShimPushEvent(const ShimEvent& aEvent);
 void ShimPushSimple(TInt aKind, TInt aHandle, TInt aStatus, TInt aA);
 
+/* The event-driven pump. The GUI build registers a "kick" — a nudge that wakes its drain pump —
+ * so that pushing an event onto an empty-and-sleeping queue restarts the drain immediately, and a
+ * queue that stays empty lets the pump sleep instead of spinning. ShimPushEvent calls the kick on
+ * every successful push (the kick itself is cheap and idempotent when the pump is already awake).
+ * A build with no registered kick (the headless daemon, which polls on a CPeriodic) is unaffected.
+ * ShimEventCount lets the pump ask "is there more to drain?" before deciding to sleep. */
+void ShimSetPumpKick(void (*aKick)());
+TInt ShimEventCount();
+
 /* --------------------------------------------------------------- framebuffer --
  * One instance, owned by the control, registered here so the flat C ABI can
  * reach it without every function taking a context pointer Rust would have to

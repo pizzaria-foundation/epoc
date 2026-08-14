@@ -1,0 +1,23 @@
+//  The start-up control file, shared by every app that sets AUTOSTART. GENERATED from this
+//  template by tools/symbuild into <app>/build/<name>_startup.rss — do not edit the generated
+//  file. An app supplies none of this: its @NAME@ is the only per-app value, and symbuild fills
+//  it from NAME. The \sys\bin path is fixed because that is where every EXE this toolchain builds
+//  installs, exactly as the generated .pkg routes it.
+//
+//  Installed to \private\101f875a\import\[<UID3>].rsc, the Software Installer's start-up import
+//  directory (UID 0x101F875A). The S60 Startup List Management API honours it only in a SIGNED,
+//  trusted package; on the unsigned dev flow it is packaged but usually ignored, which is why
+//  AUTOSTART warns unless SIGN=1.
+//
+//  Reverse-engineered against a real homescreen replacement's own start-up resource (see
+//  docs/launcher.md): the same STARTUP_ITEM_INFO, one component, recovery policy None. That app
+//  autostarted a tiny boot exe which then brought up the home screen — the "run alongside the
+//  native idle" strategy, not "replace it".
+
+#include <startupitem.rh>
+
+RESOURCE STARTUP_ITEM_INFO
+    {
+    executable_name = "!:\\sys\\bin\\@NAME@.exe";
+    recovery = EStartupItemExPolicyNone;
+    }

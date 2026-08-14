@@ -72,6 +72,9 @@ enum ShimEventKind {
     SHIM_EV_RESIZE = 5,
     /* Went to background or came back; `a` is 1 for foreground. */
     SHIM_EV_FOCUS = 6,
+    /* A raw hardware key scan code, reported only in resident mode; `a` is the scan code. For a
+     * launcher to see and diagnose the Menu and End keys the character path never delivers. */
+    SHIM_EV_RAWKEY = 7,
     SHIM_EV_TIMER = 10,
     /* Socket: `a` is the byte count, `status` the Symbian error. */
     SHIM_EV_CONNECTED = 20,
@@ -162,6 +165,11 @@ void rust_step(void);
 
 /* Ask the app to close. */
 void shim_request_exit(void);
+
+/* Turn resident (launcher) behaviour on/off: capture the Menu key to bring this app forward, and
+ * make the End key send to background instead of closing. SHIM_OK, or SHIM_ERR_NOT_READY if
+ * called before the window group exists. Needs SwEvent, granted at load on a ROM-patched handset. */
+int32_t shim_set_resident(int32_t on);
 
 /* ------------------------------------------------------------ framebuffer --
  * The back buffer is a CFbsBitmap, whose pixels live in a chunk shared with the
@@ -582,6 +590,53 @@ void shim_debug(const uint16_t* text, int32_t len);
 int32_t shim_process_start(const uint16_t* path, int32_t path_len);
 /* Whether a process built from UID3 is running now: 1 yes, 0 no, negative on error. */
 int32_t shim_process_running(uint32_t uid3);
+/* Kill every live process with this UID3 — the escape hatch for a resident launcher. SHIM_OK if
+ * one was killed, SHIM_ERR_NOT_FOUND if none matched. Killing another process needs PowerMgmt,
+ * granted at load by a ROM-patched handset. */
+int32_t shim_process_kill(uint32_t uid3);
+
+/* ----------------------------------------------------------------- apparc --
+ * Enumerate and launch installed applications, for a launcher. Compiled in only when the app
+ * sets USE_APPARC. Unlike process above, which launches a known executable by path, these go
+ * through RApaLsSession — the same application registry the native menu reads — so the list is
+ * what the phone itself would show and a launch honours the app's own registration. No
+ * capability is required to list or start an application.
+ *
+ * The enumeration is a two-step so the caller can hold it: shim_apps_refresh() scans once and
+ * caches, shim_apps_count() and shim_app_at() read the cache by index. */
+/* Re-scan installed apps into the cache; returns the count (>= 0) or a negative error. */
+int32_t shim_apps_refresh(void);
+/* How many apps the last refresh found; 0 before the first refresh. */
+int32_t shim_apps_count(void);
+/* Copy entry `index` out: uid3 and hidden (1/0) always written; caption copied up to `cap` u16
+ * with its length in *caption_len. SHIM_ERR_NOT_FOUND for a bad index. */
+int32_t shim_app_at(int32_t index, uint32_t* uid3, uint8_t* hidden,
+                    uint16_t* caption, int32_t cap, int32_t* caption_len);
+/* Start the installed app with this UID3, the way the shell would. SHIM_OK on acceptance. */
+int32_t shim_app_launch(uint32_t uid3);
+/* Kill the installed app with this UID3 through the window server (TApaTask::KillTask) — the way
+ * to stop an app that will not close itself, like a resident launcher. SHIM_OK if killed,
+ * SHIM_ERR_NOT_FOUND if it has no running task. */
+int32_t shim_app_kill(uint32_t uid3);
+/* List the UID3s of running apps (window-server task list, front-to-back), deduped, up to `cap`.
+ * Returns the count written, or a negative error / SHIM_ERR_NOT_READY. */
+int32_t shim_apps_running(uint32_t* out, int32_t cap);
+/* Signal strength via CTelephony: *bars 0..7 (-1 unknown), *dbm the raw value. SHIM_OK, or a
+ * negative error / SHIM_ERR_NOT_SUPPORTED when not compiled in (USE_TELEPHONY). */
+int32_t shim_tele_signal(int32_t* bars, int32_t* dbm);
+/* Fetch app UID3's icon at `size` pixels (the same icon the native menu draws) into caller-owned
+ * buffers: `rgb_out` gets RGB565 pixels, `mask_out` gets 8-bit coverage (0 transparent, 255
+ * opaque), both row-major `w`*`h`. `cap` is each buffer's pixel capacity. `w`/`h` are written when
+ * the bitmap size is known. SHIM_OK on success, SHIM_ERR_OVERFLOW if the buffers are too small,
+ * or the platform error (e.g. KErrNotFound for an app with no icon). */
+int32_t shim_app_icon(uint32_t uid3, int32_t size,
+                      uint16_t* rgb_out, uint8_t* mask_out, int32_t cap,
+                      int32_t* w, int32_t* h);
+/* Diagnostic variant: the TInt GetAppIcon overload, colour filled green. Isolates whether that
+ * overload panics on MIF-icon apps the way the TSize one does. Same ABI. */
+int32_t shim_app_icon_b(uint32_t uid3, int32_t size,
+                        uint16_t* rgb_out, uint8_t* mask_out, int32_t cap,
+                        int32_t* w, int32_t* h);
 
 /* ------------------------------------------------------------------ memory --
  * How much room is left, for an app that wants to know its own. Compiled in only when the
@@ -599,6 +654,9 @@ int32_t shim_heap_used_kb(void);
  * when the app sets USE_PROP. The category is the app's own SecureId, so defining and
  * writing need no capability; a subscriber posts SHIM_EV_PROP on every change. */
 int32_t shim_prop_define(uint32_t category, uint32_t key);
+/* As shim_prop_define, but with an open read policy so a process in a different SID can read it —
+ * for a bundled daemon publishing a value the launcher (a different UID) reads. */
+int32_t shim_prop_define_public(uint32_t category, uint32_t key);
 int32_t shim_prop_set(uint32_t category, uint32_t key, int32_t value);
 int32_t shim_prop_get(uint32_t category, uint32_t key, int32_t* out);
 int32_t shim_prop_subscribe(uint32_t category, uint32_t key);
@@ -870,6 +928,9 @@ int32_t shim_msv_mtm_info(int32_t handle, int32_t index, ShimMtmInfo* out);
 #define SHIM_MSV_SENT     0x1005
 
 int32_t shim_msv_folder_count(int32_t handle, int32_t folder_id, int32_t* out);
+/* How many children of the folder are unread — counted server-side from the loaded child index, so
+ * it is one operation for the whole folder. For a home-screen "N new messages" indicator. */
+int32_t shim_msv_folder_unread(int32_t handle, int32_t folder_id, int32_t* out);
 void shim_msv_close(int32_t handle);
 
 /* ------------------------------------------------- messaging, the write side --

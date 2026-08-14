@@ -20,6 +20,14 @@ pub fn define(category: u32, key: u32) -> Result<()> {
     Error::check(unsafe { sys::shim_prop_define(category, key) })
 }
 
+/// Define an integer property with an **open read policy**, so a process in a *different* SID can
+/// read it. Still cap-free when `category` is the caller's own SecureId. For a bundled daemon that
+/// publishes a value (e.g. the inbox unread count) the launcher — a different UID — reads.
+pub fn define_public(category: u32, key: u32) -> Result<()> {
+    // SAFETY: scalar arguments only.
+    Error::check(unsafe { sys::shim_prop_define_public(category, key) })
+}
+
 /// Set the integer value of a property.
 pub fn set(category: u32, key: u32, value: i32) -> Result<()> {
     // SAFETY: scalar arguments only.

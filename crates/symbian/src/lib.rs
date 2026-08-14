@@ -25,6 +25,9 @@ pub extern crate alloc;
 #[doc(hidden)]
 pub use alloc as __alloc;
 
+pub mod apps;
+pub mod backoff;
+pub mod cenrep;
 pub mod cache;
 pub mod caps;
 pub mod error;
@@ -38,6 +41,7 @@ pub mod net;
 pub mod process;
 pub mod prop;
 pub mod random;
+pub mod tele;
 pub mod vol;
 pub mod sql;
 

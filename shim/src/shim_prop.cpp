@@ -144,6 +144,21 @@ int32_t shim_prop_define(uint32_t category, uint32_t key)
     return rc == KErrNone ? SHIM_OK : rc;
     }
 
+int32_t shim_prop_define_public(uint32_t category, uint32_t key)
+    {
+    TUid cat = TUid::Uid((TInt32) category);
+    /* Like shim_prop_define, but with an open read policy so a process in a DIFFERENT SID can read
+     * it — which is exactly the home screen reading a count a bundled daemon publishes. Defining in
+     * one's own SID category is cap-free regardless of the policies chosen; the read policy being
+     * "always pass" is what lets the other-SID reader Get/Subscribe. Write stays open too; only the
+     * daemon ever writes. */
+    _LIT_SECURITY_POLICY_PASS(pass);
+    TInt rc = RProperty::Define(cat, key, RProperty::EInt, pass, pass);
+    if (rc == KErrAlreadyExists)
+        return SHIM_OK;
+    return rc == KErrNone ? SHIM_OK : rc;
+    }
+
 int32_t shim_prop_set(uint32_t category, uint32_t key, int32_t value)
     {
     TUid cat = TUid::Uid((TInt32) category);

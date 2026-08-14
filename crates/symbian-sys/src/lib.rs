@@ -55,6 +55,9 @@ pub const SHIM_EV_KEY_UP: i32 = 3;
 pub const SHIM_EV_REDRAW: i32 = 4;
 pub const SHIM_EV_RESIZE: i32 = 5;
 pub const SHIM_EV_FOCUS: i32 = 6;
+/// A raw hardware key scan code, delivered only in resident mode; `a` carries the scan code.
+/// For a launcher to see the Menu and End keys the translated-character path never produces.
+pub const SHIM_EV_RAWKEY: i32 = 7;
 pub const SHIM_EV_TIMER: i32 = 10;
 pub const SHIM_EV_CONNECTED: i32 = 20;
 pub const SHIM_EV_RECV: i32 = 21;
@@ -643,6 +646,70 @@ extern "C" {
     /// panicked mid-write stops being alive exactly like one that completed. Anything that
     /// needs to tell those apart has to read what the child left behind.
     pub fn shim_process_running(uid3: u32) -> i32;
+    /// Kill every live process with this UID3 — the escape hatch for a resident launcher.
+    /// [`SHIM_OK`] if one was killed, [`SHIM_ERR_NOT_FOUND`] if none matched.
+    pub fn shim_process_kill(uid3: u32) -> i32;
+
+    // resident (launcher) behaviour
+    /// Turn resident behaviour on/off: capture the Menu key to bring this app forward, and make
+    /// End send to background instead of closing. [`SHIM_ERR_NOT_READY`] before the window group
+    /// exists. Needs SwEvent, granted at load on a ROM-patched handset.
+    pub fn shim_set_resident(on: i32) -> i32;
+
+    // installed-app enumeration and launch (USE_APPARC)
+    /// Re-scan installed applications into the shim's cache. Returns the count (>= 0) or a
+    /// negative error. Goes through `RApaLsSession` — the registry the native menu reads.
+    pub fn shim_apps_refresh() -> i32;
+    /// How many apps the last [`shim_apps_refresh`] found; 0 before the first refresh.
+    pub fn shim_apps_count() -> i32;
+    /// Copy cache entry `index` out. `uid3` and `hidden` (1/0) are written when non-null; the
+    /// caption is copied up to `cap` u16 with its length in `*caption_len`.
+    /// [`SHIM_ERR_NOT_FOUND`] for a bad index.
+    pub fn shim_app_at(
+        index: i32,
+        uid3: *mut u32,
+        hidden: *mut u8,
+        caption: *mut u16,
+        cap: i32,
+        caption_len: *mut i32,
+    ) -> i32;
+    /// Start the installed app with this UID3, the way the shell would. [`SHIM_OK`] on
+    /// acceptance; the launched app runs with its own capabilities, not the caller's.
+    pub fn shim_app_launch(uid3: u32) -> i32;
+    /// Kill the installed app with this UID3 through the window server — the way to stop an app
+    /// that will not close itself, like a resident launcher. [`SHIM_OK`] if killed,
+    /// [`SHIM_ERR_NOT_FOUND`] if it has no running task.
+    pub fn shim_app_kill(uid3: u32) -> i32;
+    /// List running apps' UID3s (window-server task list, front-to-back), up to `cap`. Returns the
+    /// count written, or a negative error / [`SHIM_ERR_NOT_READY`].
+    pub fn shim_apps_running(out: *mut u32, cap: i32) -> i32;
+    /// Fetch app `uid3`'s icon at `size` pixels into caller buffers: `rgb_out` gets RGB565
+    /// pixels, `mask_out` 8-bit coverage (0 transparent, 255 opaque), both row-major `w`*`h`.
+    /// `cap` is each buffer's pixel capacity. `w`/`h` are written when the size is known.
+    /// [`SHIM_OK`], [`SHIM_ERR_OVERFLOW`] if too small, or the platform error (e.g. no icon).
+    pub fn shim_app_icon(
+        uid3: u32,
+        size: i32,
+        rgb_out: *mut u16,
+        mask_out: *mut u8,
+        cap: i32,
+        w: *mut i32,
+        h: *mut i32,
+    ) -> i32;
+    /// Signal strength via CTelephony (telephony daemon only). `bars` 0..7 (-1 unknown), `dbm` raw.
+    pub fn shim_tele_signal(bars: *mut i32, dbm: *mut i32) -> i32;
+    /// Read an integer Central Repository key. `SHIM_OK` and `*out` set, or the platform error.
+    pub fn shim_cenrep_get(repo: u32, key: u32, out: *mut i32) -> i32;
+    /// Diagnostic variant of [`shim_app_icon`] using the `TInt` GetAppIcon overload, colour green.
+    pub fn shim_app_icon_b(
+        uid3: u32,
+        size: i32,
+        rgb_out: *mut u16,
+        mask_out: *mut u8,
+        cap: i32,
+        w: *mut i32,
+        h: *mut i32,
+    ) -> i32;
 
     // device inventory (USE_HAL)
     /// `HAL::Get`. `attr` is a `HALData::TAttribute`; see `symbian::hal` for the table.
@@ -679,6 +746,9 @@ extern "C" {
     pub fn shim_msv_can_instantiate(handle: i32, mtm_uid: u32) -> i32;
     pub fn shim_msv_mtm_info(handle: i32, index: i32, out: *mut ShimMtmInfo) -> i32;
     pub fn shim_msv_folder_count(handle: i32, folder_id: i32, out: *mut i32) -> i32;
+    /// How many children of the folder are unread — one server-side count, for a home-screen
+    /// "N new messages" indicator.
+    pub fn shim_msv_folder_unread(handle: i32, folder_id: i32, out: *mut i32) -> i32;
     pub fn shim_msv_close(handle: i32);
     /// Tell the Message Server about a `.mtm` outside ROM. Dropping the file in
     /// `C:\resource\messaging\mtm\` is not enough on its own.
@@ -742,6 +812,8 @@ extern "C" {
     /// Ask the app with this UID3 to close cooperatively (`TApaTask::EndTask`). No
     /// capability. `SHIM_ERR_NOT_FOUND` if no running task has the UID.
     pub fn shim_prop_define(category: u32, key: u32) -> i32;
+    /// As [`shim_prop_define`], but with an open read policy so a different-SID process can read it.
+    pub fn shim_prop_define_public(category: u32, key: u32) -> i32;
     /// Set the integer value of a property.
     pub fn shim_prop_set(category: u32, key: u32, value: i32) -> i32;
     /// Read the integer value of a property into `*out`.
@@ -1014,6 +1086,89 @@ mod host_stubs {
     pub unsafe fn shim_process_running(_uid3: u32) -> i32 {
         SHIM_ERR_NOT_READY
     }
+    pub unsafe fn shim_process_kill(_uid3: u32) -> i32 {
+        SHIM_ERR_NOT_READY
+    }
+    pub unsafe fn shim_set_resident(_on: i32) -> i32 {
+        SHIM_ERR_NOT_READY
+    }
+    pub unsafe fn shim_apps_refresh() -> i32 {
+        SHIM_ERR_NOT_READY
+    }
+    pub unsafe fn shim_apps_count() -> i32 {
+        0
+    }
+    pub unsafe fn shim_app_at(
+        _index: i32,
+        _uid3: *mut u32,
+        _hidden: *mut u8,
+        _caption: *mut u16,
+        _cap: i32,
+        caption_len: *mut i32,
+    ) -> i32 {
+        if !caption_len.is_null() {
+            core::ptr::write(caption_len, 0);
+        }
+        SHIM_ERR_NOT_READY
+    }
+    pub unsafe fn shim_app_launch(_uid3: u32) -> i32 {
+        SHIM_ERR_NOT_READY
+    }
+    pub unsafe fn shim_app_kill(_uid3: u32) -> i32 {
+        SHIM_ERR_NOT_READY
+    }
+    pub unsafe fn shim_apps_running(_out: *mut u32, _cap: i32) -> i32 {
+        SHIM_ERR_NOT_READY
+    }
+    pub unsafe fn shim_app_icon(
+        _uid3: u32,
+        _size: i32,
+        _rgb_out: *mut u16,
+        _mask_out: *mut u8,
+        _cap: i32,
+        w: *mut i32,
+        h: *mut i32,
+    ) -> i32 {
+        if !w.is_null() {
+            core::ptr::write(w, 0);
+        }
+        if !h.is_null() {
+            core::ptr::write(h, 0);
+        }
+        SHIM_ERR_NOT_READY
+    }
+    pub unsafe fn shim_tele_signal(bars: *mut i32, dbm: *mut i32) -> i32 {
+        if !bars.is_null() {
+            core::ptr::write(bars, -1);
+        }
+        if !dbm.is_null() {
+            core::ptr::write(dbm, 0);
+        }
+        SHIM_ERR_NOT_READY
+    }
+    pub unsafe fn shim_cenrep_get(_repo: u32, _key: u32, out: *mut i32) -> i32 {
+        if !out.is_null() {
+            core::ptr::write(out, 0);
+        }
+        SHIM_ERR_NOT_READY
+    }
+    pub unsafe fn shim_app_icon_b(
+        _uid3: u32,
+        _size: i32,
+        _rgb_out: *mut u16,
+        _mask_out: *mut u8,
+        _cap: i32,
+        w: *mut i32,
+        h: *mut i32,
+    ) -> i32 {
+        if !w.is_null() {
+            core::ptr::write(w, 0);
+        }
+        if !h.is_null() {
+            core::ptr::write(h, 0);
+        }
+        SHIM_ERR_NOT_READY
+    }
     pub unsafe fn shim_hal_get(_attr: i32, _out: *mut i32) -> i32 {
         SHIM_ERR_NOT_READY
     }
@@ -1048,6 +1203,9 @@ mod host_stubs {
         SHIM_ERR_NOT_READY
     }
     pub unsafe fn shim_msv_folder_count(_h: i32, _f: i32, _out: *mut i32) -> i32 {
+        SHIM_ERR_NOT_READY
+    }
+    pub unsafe fn shim_msv_folder_unread(_h: i32, _f: i32, _out: *mut i32) -> i32 {
         SHIM_ERR_NOT_READY
     }
     pub unsafe fn shim_msv_close(_h: i32) {}
@@ -1114,6 +1272,9 @@ mod host_stubs {
         SHIM_ERR_NOT_READY
     }
     pub unsafe fn shim_heap_used_kb() -> i32 {
+        SHIM_ERR_NOT_READY
+    }
+    pub unsafe fn shim_prop_define_public(_c: u32, _k: u32) -> i32 {
         SHIM_ERR_NOT_READY
     }
     pub unsafe fn shim_prop_define(_c: u32, _k: u32) -> i32 {

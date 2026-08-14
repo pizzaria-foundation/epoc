@@ -32,6 +32,17 @@ pub fn is_running(uid3: u32) -> bool {
     unsafe { sys::shim_process_running(uid3) == 1 }
 }
 
+/// Kill every running process with this UID3.
+///
+/// The escape hatch for a resident launcher: one that has captured the Menu key and refuses to
+/// close on End cannot be stopped from its own UI, so a separate app calls this to end it. Killing
+/// a process this one did not create needs `PowerMgmt`, which a ROM-patched handset grants at load
+/// regardless of the caller's declared capabilities. [`Error::NotFound`] if nothing matched.
+pub fn kill(uid3: u32) -> Result<()> {
+    // SAFETY: no pointers; the shim walks the process list and kills matches.
+    Error::check(unsafe { sys::shim_process_kill(uid3) })
+}
+
 /// [`start`], but abandons the wait after `timeout_ms` and kills the child.
 ///
 /// [`start`] waits on the child's rendezvous with no escape, which is right for a

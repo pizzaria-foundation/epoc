@@ -152,6 +152,33 @@ int32_t shim_process_running(uint32_t uid3)
     return 0;
     }
 
+/* Kill every live process whose UID3 matches — the escape hatch for a resident launcher that has
+ * captured keys and will not close on its own. Same walk as shim_process_running; on a match, Kill
+ * rather than report. Killing a process this one did not create needs PowerMgmt, which a
+ * ROM-patched handset grants at load regardless of the image's declared capabilities. SHIM_OK if
+ * at least one was killed, SHIM_ERR_NOT_FOUND if none matched. */
+int32_t shim_process_kill(uint32_t uid3)
+    {
+    TFindProcess finder;
+    TFullName fullName;
+    TInt killed = 0;
+    while (finder.Next(fullName) == KErrNone)
+        {
+        RProcess proc;
+        if (proc.Open(finder) != KErrNone)
+            continue;
+        TBool alive = (proc.ExitType() == EExitPending);
+        TUidType type = proc.Type();
+        if (alive && type[2].iUid == (TInt32) uid3)
+            {
+            proc.Kill(0);
+            killed++;
+            }
+        proc.Close();
+        }
+    return killed > 0 ? SHIM_OK : SHIM_ERR_NOT_FOUND;
+    }
+
 } /* extern "C" */
 
 #endif /* SHIM_USE_PROC */
