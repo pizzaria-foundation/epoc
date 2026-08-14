@@ -1,0 +1,14 @@
+//  killhome registration resource. Without this the package installs, reports success, and the
+//  application is simply not in the menu.
+#include <appinfo.rh>
+#include <killhome.rsg>
+
+UID2 KUidAppRegistrationResourceFile
+UID3 0xE0AA0001
+
+RESOURCE APP_REGISTRATION_INFO
+    {
+    app_file = "killhome";
+    localisable_resource_file = "\\resource\\apps\\killhome";
+    localisable_resource_id = R_KILLHOME_LOCALISABLE_APP_INFO;
+    }

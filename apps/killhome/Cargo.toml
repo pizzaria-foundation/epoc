@@ -1,0 +1,20 @@
+[package]
+name = "killhome"
+description = "Escape hatch: stop the resident launcher"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+symbian = { workspace = true }
+symbian-ui = { workspace = true }
+symbian-app = { workspace = true }
+
+[dev-dependencies]
+symbian-ui = { workspace = true, features = ["testing"] }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_vendor, values("symbian"))'] }
