@@ -65,8 +65,14 @@ and 283 of the 292 libraries asked about load, Open C among them.
     Project scaffolding             done    epoc new
     Polymorphic DLLs                done    TARGETTYPE=DLL: edll.lib, own linker script,
                                             exports pinned by app.conf, gated by e32dump
-    Device reconnaissance           done    apps/devdump: one .sis, a launcher and nine
+    Device reconnaissance           done    apps/devdump: one .sis, a launcher and ten
                                             isolated probes; the report is docs/device-dump.txt
+    Boot order and restart policy   built   apps/bootctl + apps/bootd: the platform has neither
+                                            (STARTUP_ITEM_INFO has no ordering field and one
+                                            recovery policy, "do nothing"), so a supervisor of
+                                            our own is the only way. Built and packaged; the
+                                            on-device sequence in docs/bootmanager.md has not
+                                            been run yet
     Custom MTM registration         done    apps/mtmdemo: a Client MTM the Message Server
                                             accepts. Registry 15 -> 16 on an E72, read from a
                                             fresh session. See docs/device-notes.md
@@ -95,19 +101,67 @@ and 283 of the 292 libraries asked about load, Open C among them.
     TLS                             todo    nothing yet, and two routes exist on the device:
                                             securesocket.dll, and Open C's OpenSSL 0.9.8a
 
-553 tests, all on the host.
+684 tests, all on the host.
+
+
+## What is in here
+
+Applications and diagnostics that ship with the SDK. The full programs live in their
+own repositories (see **Projects** below); these are the ones whose job is to exercise
+or serve the SDK itself.
+
+    apps/
+      devdump      One install, one report. A launcher and ten isolated probes — caps,
+                   dll, fs, libsweep, msg, msvev, mtm, ncn, net, system — because each
+                   risky import belongs in its own binary, or a silent load failure
+                   takes the whole instrument down with it. Output: docs/device-dump.txt
+      mtmdemo      A Client MTM the Message Server actually loads, plus the UI Data and
+                   UI MTM components: our icon in Nokia's Inbox, our viewer opening our
+                   message, reply from Nokia's own menu. Builds a .dll, not a .sis
+      bootctl      Boot manager. Pick apps, set the order, set a restart policy, read
+                   what the last boot did. Ships bootd in its package. docs/bootmanager.md
+      bootd        The headless supervisor behind it, and the only executable registered
+                   in the platform's start-up list
+      iconprobe    The app-icon fetch (GetAppIcon -> CApaMaskedBitmap -> GetScanLine),
+                   isolated in a non-resident app because bisecting it inside a resident
+                   home screen kept taking the home screen with it. Still unresolved
+      killhome     Escape hatch: stop a resident home screen that captures the Menu key
+                   and will not close on End
+      dlltest      A minimal polymorphic DLL, built to prove the toolchain can
+
+    examples/
+      selftest     Everything the SDK can do, run once, written to a file you carry off
+      hello-gui    The same app in C++, for comparing against the Rust path
+      netprobe     Four network tests, each isolating one unknown
+      imgprobe     Which CImageDecoder configuration actually decodes here
+      audioprobe   Which WAV formats play, and how fast they open
+      sqlprobe     Whether this handset has SQLite, and what it costs
+      keyprobe     What the keyboard really sends
+      keydump      The handset's own keymap, dumped — the keyboard tables are generated
+                   from this rather than guessed
+      libprobe     Which libraries load
+      probe        The smallest thing that can run, for when nothing else will
+
+Every one of these exists because a question could not be answered from a document.
 
 
 ## Projects
 
-Applications built on this SDK. Each lives in its own repository and depends on
+Full applications built on this SDK. Each lives in its own repository and depends on
 this one by revision.
 
-    tg      github.com/pizzaria-foundation/tg      Telegram client. MTProto 2.0 written from
+    tg      github.com/pizzaria-foundation/tg    Telegram client. MTProto 2.0 written from
                                        scratch, the login exchange, chat list,
                                        conversations, photo and voice messages.
                                        The reference application, and the reason
                                        this SDK exists.
+
+    home    github.com/pizzaria-foundation/home  A home screen: the app grid, a status bar,
+                                       configurable shortcuts, hardware-button
+                                       remapping, and the two daemons behind it
+                                       (notifd, netd). Runs resident on an E72,
+                                       alongside the platform's own idle rather
+                                       than replacing it
 
 Built something? Open a pull request adding it here. What the list is for is
 proving the SDK works for more than one program.
@@ -156,8 +210,11 @@ both halves, including the `[patch]` block for working on an app and the SDK at 
       opus             the vendored libopus, and the only unsafe in the audio path
 
     shim/              the C++ side: everything that can Leave, and the event pump
-    tools/             epoc (new, build, db, preview), mkfont, e32dump, e32prep, btpush
-    examples/          hello-gui (C++), keyprobe, libprobe, sqlprobe (device diagnostics)
+    tools/             epoc (new, build, db, preview, push, serve), and the pieces behind it:
+                       symbuild, symnew, epocadb, mkfont, mkkeymap, e32dump, e32prep,
+                       sisdump, sisextract, btpush
+    apps/              what ships with the SDK: devdump, mtmdemo, bootctl/bootd, and probes
+    examples/          device diagnostics and the C++ comparison — see "What is in here"
     docs/              start with getting-started.md
 
 Each crate has its own README with the decisions behind it.
@@ -170,6 +227,8 @@ Each crate has its own README with the decisions behind it.
     docs/device-notes.md      everything the hardware taught us that no document says
     docs/build-flow.md        the pipeline, stage by stage
     docs/epocadb.md           the dev bridge: live logs, file push/pull, the wire protocol
+    docs/bootmanager.md       boot order and restart policy, and why the platform has neither
+    docs/launcher.md          the platform side of a home screen: startup resource, resident mode
 
 
 ## How it works, in one paragraph
@@ -222,7 +281,7 @@ It was still made with care, and the way to check that is not to take our word f
 - The comments say **why**, not what. Where a decision looks strange, the comment names
   the failure that produced it - a truncating append, a socket that panics esock, a
   contact sheet that lied about its own pixels.
-- **463 tests, all on the host**, because the interesting bugs are in loops and edge cases
+- **684 tests, all on the host**, because the interesting bugs are in loops and edge cases
   and a phone is a terrible place to find them.
 - Nothing here is claimed to work that has not run on a real E72.
 
