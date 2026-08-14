@@ -7,7 +7,7 @@ running on its own ARM11, drawn by a rasterizer written here, talking over its r
 
 | | | |
 |:---:|:---:|:---:|
-| <img src="docs/screenshots/tg-chats.png" width="260"> | <img src="docs/screenshots/home-menu.png" width="260"> | <img src="docs/screenshots/bootctl.png" width="260"> |
+| <img src="docs/screenshots/tg-chats.png" width="260"> | <img src="docs/screenshots/home.png" width="260"> | <img src="docs/screenshots/bootctl.png" width="260"> |
 | A Telegram client | A home screen | A boot manager |
 
     Target   Nokia E72 — Symbian OS 9.3, S60 3rd Ed FP2, ARM1136JF-S at 600 MHz,
@@ -76,7 +76,7 @@ the reason this SDK exists.
 
 ### [home](https://github.com/pizzaria-foundation/home)
 
-<img src="docs/screenshots/home.png" width="280">
+<img src="docs/screenshots/home-light.png" width="280">
 
 **A home screen.** An app grid, a status bar, configurable shortcuts, hardware-button
 remapping, and two daemons behind it. Runs resident, alongside the platform's own idle
