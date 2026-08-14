@@ -1,33 +1,103 @@
-# epoc - a Rust SDK for Symbian S60 3rd Edition
+# epoc — a Rust SDK for Symbian S60 3rd Edition
 
-Write applications in Rust for a 2009 Nokia. They run on the phone.
+**Write applications in Rust for a 2009 Nokia. They run on the phone.**
 
-EPOC is what this operating system was called before it was called Symbian.
+Not an emulator and not a toy: the binaries below are installed on a Nokia E72 and
+running on its own ARM11, drawn by a rasterizer written here, talking over its radio.
 
-    Target   Nokia E72 - Symbian OS 9.3, S60 3rd Ed FP2, ARM1136JF-S at 600 MHz,
+| | | |
+|:---:|:---:|:---:|
+| <img src="docs/screenshots/tg-chats.png" width="260"> | <img src="docs/screenshots/home-menu.png" width="260"> | <img src="docs/screenshots/bootctl.png" width="260"> |
+| A Telegram client | A home screen | A boot manager |
+
+    Target   Nokia E72 — Symbian OS 9.3, S60 3rd Ed FP2, ARM1136JF-S at 600 MHz,
              320x240 landscape QVGA, hardware QWERTY, no touchscreen, ~45 MB free RAM
     Host     aarch64 Linux. No Wine, no x86 emulation, no Windows, anywhere in the chain
 
+EPOC is what this operating system was called before it was called Symbian.
 
-## Quick start
 
-    tools/epoc new myapp                   scaffold a project that builds and runs
-    cargo run -p myapp --example sim       see it on your desktop, right now
-    tools/epoc build apps/myapp            -> apps/myapp/build/myapp.sis
+## How it works
 
-The third command produces an installable package. The first two need no phone.
+Avkon — Symbian's UI framework — calls `CActiveScheduler::Start()` and does not return
+until the app exits. There is no loop for Rust to own and no way to take one. So control
+is inverted:
 
-One front door for everything:
+    your app  ──►  a struct with handle_key() and draw(), like a winit handler
+                        ▲                    │
+                        │ events             │ pixels
+                        │                    ▼
+    symbian-*     ──►  safe Rust: files, sockets, widgets, a rasterizer, crypto
+                        ▲                    │
+                        │                    ▼
+    shim/         ──►  C++: owns the app object, turns every keypress and I/O
+                        ▲                completion into plain data on a ring buffer
+                        │                    │
+                        ▼                    ▼
+    the phone     ──►  Avkon, ESock, the file server, the message store
 
-    epoc new <name> [uid3]        scaffold
-    epoc build <app-dir> [clean]  sources -> .sis
-    epoc db <args...>             the dev bridge: serve, logcat, push, pull, install
-    epoc preview                  render the SDK's contact sheets to preview-out/
-    epoc push <file>              send a file to the phone over Bluetooth
-    epoc serve                    serve out/ over the LAN so the phone can fetch a .sis
+Everything that can *Leave* — Symbian's error mechanism, which on 9.x is a C++ throw —
+stays on the C++ side of that boundary, because a throw crossing a Rust frame compiled
+`panic=abort` skips every destructor. Everything above it is ordinary safe Rust, and
+almost all of it runs on the host too, which is why there are 685 tests and no phone in
+the loop.
 
-`epoc db` fronts `tools/epocadb`; `new` and `build` front `tools/symnew` and
-`tools/symbuild`. All three still work when called directly.
+There is no platform UI in any of that. Every pixel — the surfaces, the icons, the
+scrollbars, the fonts — is rasterized by `symbian-gfx` and `symbian-ui`, because Avkon's
+own widgets cannot be driven from Rust without dragging its class hierarchy across the
+boundary. `epoc preview` renders the whole design system to PNG without a phone:
+
+| | |
+|:---:|:---:|
+| <img src="docs/screenshots/ui-surfaces.png" width="300"> | <img src="docs/screenshots/ui-icons.png" width="300"> |
+
+[`docs/architecture.md`](docs/architecture.md) has the long version.
+
+
+## Projects
+
+Full applications built on this SDK. Each lives in its own repository and pins this one
+by revision.
+
+<table>
+<tr>
+<td width="33%" valign="top">
+
+### [tg](https://github.com/pizzaria-foundation/tg)
+
+<img src="docs/screenshots/tg.png" width="280">
+
+**A Telegram client.** MTProto 2.0 written from scratch — the login exchange, the
+chat list, conversations, photo and voice messages. The reference application, and
+the reason this SDK exists.
+
+</td>
+<td width="33%" valign="top">
+
+### [home](https://github.com/pizzaria-foundation/home)
+
+<img src="docs/screenshots/home.png" width="280">
+
+**A home screen.** An app grid, a status bar, configurable shortcuts, hardware-button
+remapping, and two daemons behind it. Runs resident, alongside the platform's own idle
+rather than replacing it.
+
+</td>
+<td width="33%" valign="top">
+
+### [boot manager](docs/bootmanager.md)
+
+<img src="docs/screenshots/bootctl-status.png" width="280">
+
+**Boot order and restart policy** — neither of which S60 has. Ships in this repo as
+`apps/bootctl` and `apps/bootd`, because a supervisor is infrastructure, not a product.
+
+</td>
+</tr>
+</table>
+
+Built something? Open a pull request adding it here. What the list is for is proving
+the SDK works for more than one program.
 
 
 ## Status
@@ -101,14 +171,61 @@ and 283 of the 292 libraries asked about load, Open C among them.
     TLS                             todo    nothing yet, and two routes exist on the device:
                                             securesocket.dll, and Open C's OpenSSL 0.9.8a
 
-684 tests, all on the host.
+685 tests, all on the host.
+
+
+## How to use it
+
+Three commands. The first two need no phone at all:
+
+    tools/epoc new myapp                   scaffold a project that builds and runs
+    cargo run -p myapp --example sim       see it on your desktop, right now
+    tools/epoc build apps/myapp            -> apps/myapp/build/myapp.sis
+
+One front door for everything:
+
+    epoc new <name> [uid3]        scaffold
+    epoc build <app-dir> [clean]  sources -> .sis
+    epoc db <args...>             the dev bridge: serve, logcat, push, pull, install
+    epoc preview                  render the SDK's contact sheets to preview-out/
+    epoc push <file>              send a file to the phone over Bluetooth
+    epoc serve                    serve out/ over the LAN so the phone can fetch a .sis
+
+`epoc db` fronts `tools/epocadb`; `new` and `build` front `tools/symnew` and
+`tools/symbuild`. All three still work when called directly.
+
+### From your own project
+
+The SDK is consumed as a git dependency, pinned by revision:
+
+    [dependencies]
+    symbian = { git = "ssh://git@github.com/pizzaria-foundation/epoc", rev = "..." }
+    symbian-ui = { git = "ssh://git@github.com/pizzaria-foundation/epoc", rev = "..." }
+
+    [dev-dependencies]
+    symbian-sim = { git = "ssh://git@github.com/pizzaria-foundation/epoc", rev = "..." }
+
+SSH rather than HTTPS while this repository is private: an https git dependency to
+a private repo fails with "revision not found", which is a permission problem
+wearing the wrong hat. Cargo's built-in git client may also fail ssh-agent
+authentication where the `git` CLI succeeds, so a consuming project wants:
+
+    # .cargo/config.toml
+    [net]
+    git-fetch-with-cli = true
+
+The **device build needs a checkout**, not just the crates: the toolchain, the C++
+shim and the packaging live here and no crate can carry them. Clone this repository
+and run `tools/epoc build <your-app-dir>` from it. See [tg](https://github.com/pizzaria-foundation/tg) for a
+working example of both halves, including the `[patch]` block for working on an app and
+the SDK at once.
 
 
 ## What is in here
 
 Applications and diagnostics that ship with the SDK. The full programs live in their
-own repositories (see **Projects** below); these are the ones whose job is to exercise
-or serve the SDK itself.
+own repositories (see [Projects](#projects) above); these are the ones whose job is to
+exercise or serve the SDK itself.
 
     apps/
       devdump      One install, one report. A launcher and ten isolated probes — caps,
@@ -145,54 +262,6 @@ or serve the SDK itself.
 Every one of these exists because a question could not be answered from a document.
 
 
-## Projects
-
-Full applications built on this SDK. Each lives in its own repository and depends on
-this one by revision.
-
-    tg      github.com/pizzaria-foundation/tg    Telegram client. MTProto 2.0 written from
-                                       scratch, the login exchange, chat list,
-                                       conversations, photo and voice messages.
-                                       The reference application, and the reason
-                                       this SDK exists.
-
-    home    github.com/pizzaria-foundation/home  A home screen: the app grid, a status bar,
-                                       configurable shortcuts, hardware-button
-                                       remapping, and the two daemons behind it
-                                       (notifd, netd). Runs resident on an E72,
-                                       alongside the platform's own idle rather
-                                       than replacing it
-
-Built something? Open a pull request adding it here. What the list is for is
-proving the SDK works for more than one program.
-
-
-## Using it from your own project
-
-The SDK is consumed as a git dependency, pinned by revision:
-
-    [dependencies]
-    symbian = { git = "ssh://git@github.com/pizzaria-foundation/epoc", rev = "..." }
-    symbian-ui = { git = "ssh://git@github.com/pizzaria-foundation/epoc", rev = "..." }
-
-    [dev-dependencies]
-    symbian-sim = { git = "ssh://git@github.com/pizzaria-foundation/epoc", rev = "..." }
-
-SSH rather than HTTPS while this repository is private: an https git dependency to
-a private repo fails with "revision not found", which is a permission problem
-wearing the wrong hat. Cargo's built-in git client may also fail ssh-agent
-authentication where the `git` CLI succeeds, so a consuming project wants:
-
-    # .cargo/config.toml
-    [net]
-    git-fetch-with-cli = true
-
-The **device build needs a checkout**, not just the crates: the toolchain, the C++
-shim and the packaging live here and no crate can carry them. Clone this repository
-and run `tools/epoc build <your-app-dir>` from it. See `tg` for a working example of
-both halves, including the `[patch]` block for working on an app and the SDK at once.
-
-
 ## The map
 
     crates/
@@ -222,28 +291,19 @@ Each crate has its own README with the decisions behind it.
 
 ## Where to read next
 
-    docs/getting-started.md   prerequisites, the toolchain, your first app
-    docs/architecture.md      why there is a C++ shim, and what crosses the boundary
-    docs/device-notes.md      everything the hardware taught us that no document says
-    docs/build-flow.md        the pipeline, stage by stage
-    docs/epocadb.md           the dev bridge: live logs, file push/pull, the wire protocol
-    docs/bootmanager.md       boot order and restart policy, and why the platform has neither
-    docs/launcher.md          the platform side of a home screen: startup resource, resident mode
+| | |
+|---|---|
+| [getting-started.md](docs/getting-started.md) | prerequisites, the toolchain, your first app |
+| [architecture.md](docs/architecture.md) | why there is a C++ shim, and what crosses the boundary |
+| [device-notes.md](docs/device-notes.md) | everything the hardware taught us that no document says |
+| [build-flow.md](docs/build-flow.md) | the pipeline, stage by stage |
+| [epocadb.md](docs/epocadb.md) | the dev bridge: live logs, file push/pull, the wire protocol |
+| [bootmanager.md](docs/bootmanager.md) | boot order and restart policy, and why the platform has neither |
+| [launcher.md](docs/launcher.md) | the platform side of a home screen: startup resource, resident mode |
+| [device-dump.txt](docs/device-dump.txt) | the raw report one install of `apps/devdump` brought back |
 
-
-## How it works, in one paragraph
-
-Avkon - Symbian's UI framework - calls `CActiveScheduler::Start()` and does not
-return until the app exits. There is no loop for Rust to own and no way to take
-one. So control is inverted: a small C++ shim owns the application object, turns
-every key press and I/O completion into a plain-data event on a ring buffer, and a
-`CIdle` at idle priority calls `rust_step()`, which drains the queue, updates, and
-draws. That is the same shape as a `winit` handler, and it is why an app is a struct
-with `handle_key` and `draw` rather than a `main`.
-
-Everything that can *Leave* - Symbian's error mechanism, which on 9.x is a C++
-throw - stays on the C++ side of that boundary, because a throw crossing a Rust
-frame compiled `panic=abort` skips every destructor.
+`docs/device-notes.md` is the one to read if you are deciding whether to trust any of
+this. It is a log of assumptions that turned out wrong.
 
 
 ## The name is not ours
@@ -281,7 +341,7 @@ It was still made with care, and the way to check that is not to take our word f
 - The comments say **why**, not what. Where a decision looks strange, the comment names
   the failure that produced it - a truncating append, a socket that panics esock, a
   contact sheet that lied about its own pixels.
-- **684 tests, all on the host**, because the interesting bugs are in loops and edge cases
+- **685 tests, all on the host**, because the interesting bugs are in loops and edge cases
   and a phone is a terrible place to find them.
 - Nothing here is claimed to work that has not run on a real E72.
 

@@ -646,6 +646,8 @@ version = "0.1.0"
 dependencies = [
  "symbian",
  "symbian-bootcfg",
+ "symbian-gfx",
+ "symbian-preview",
  "symbian-ui",
 ]
 

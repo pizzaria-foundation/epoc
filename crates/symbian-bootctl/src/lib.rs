@@ -34,20 +34,24 @@ use symbian_ui::{
 
 const TABS: [&str; 4] = ["List", "Entry", "Setup", "Boot"];
 
-/// Rows on the Entry tab. Retries is drawn only for `Times`, but keeping the focus index stable
-/// means the cursor does not jump when the policy changes under it.
-const ENTRY_ROWS: usize = 4;
+/// The Entry tab's rows, by identity rather than by position: "Restart limit" only means anything
+/// under `Times`, so it is absent otherwise — both from the layout and from the cursor's path.
+/// Focus is held as one of these rather than an index, so hiding a row cannot silently move the
+/// cursor onto a different setting.
+const ROW_ENABLED: usize = 0;
+const ROW_POLICY: usize = 1;
+const ROW_RETRIES: usize = 2;
+const ROW_DELAY: usize = 3;
 /// Rows on the Setup tab.
 const SETUP_ROWS: usize = 3;
 
-/// Per-entry delays step in half-seconds, 0..=20 — nought to ten seconds.
-const HALF_SECOND_MS: u32 = 500;
-/// The global first-launch delay steps in five-second jumps, 0..=12 — nought to a minute.
-const FIRST_DELAY_STEP_MS: u32 = 5_000;
-const FIRST_DELAY_STEPS: i32 = 12;
-/// Ranges are kept deliberately short because on a tabbed screen the tab strip owns Left/Right, so
-/// a stepper is driven by Select cycling up with wrap. A 0..=180 range would be 180 presses.
-const MAX_DELAY_HALVES: i32 = 20;
+/// Both delays are edited in **whole seconds**, and the stepper's own number is those seconds.
+/// An earlier version stored half-seconds and five-second jumps to keep the ranges short, and the
+/// rendered screen showed the cost immediately: a row reading "Delay before launch: 2.0 s" beside
+/// a stepper reading `‹ 4 ›`. Two numbers for one value is worse than a longer range.
+const SECOND_MS: u32 = 1_000;
+const MAX_ENTRY_DELAY_S: i32 = 30;
+const MAX_FIRST_DELAY_S: i32 = 60;
 const MAX_RETRIES: i32 = 10;
 const MAX_CEILING: i32 = 20;
 
@@ -83,9 +87,9 @@ impl BootScreen {
         let mut me = Self {
             setup_enabled: Toggle::new(cfg.enabled),
             setup_first_delay: Stepper::new(
-                (cfg.first_delay_ms / FIRST_DELAY_STEP_MS) as i32,
+                (cfg.first_delay_ms / SECOND_MS) as i32,
                 0,
-                FIRST_DELAY_STEPS,
+                MAX_FIRST_DELAY_S,
             ),
             setup_ceiling: Stepper::new(cfg.max_restarts as i32, 0, MAX_CEILING),
             cfg,
@@ -100,7 +104,7 @@ impl BootScreen {
             entry_enabled: Toggle::new(true),
             entry_policy: Select::new(0),
             entry_retries: Stepper::new(3, 1, MAX_RETRIES),
-            entry_delay: Stepper::new(4, 0, MAX_DELAY_HALVES),
+            entry_delay: Stepper::new(2, 0, MAX_ENTRY_DELAY_S),
             setup_focus: 0,
             changed: false,
             reset_requested: false,
@@ -150,7 +154,7 @@ impl BootScreen {
         if let Policy::Times(n) = e.policy {
             self.entry_retries.set(n as i32);
         }
-        self.entry_delay.set((e.delay_ms / HALF_SECOND_MS) as i32);
+        self.entry_delay.set((e.delay_ms / SECOND_MS) as i32);
     }
 
     /// Copy the Entry tab's widgets back into the focused entry.
@@ -162,7 +166,7 @@ impl BootScreen {
             2 => Policy::Always,
             _ => Policy::Never,
         };
-        let delay_ms = (self.entry_delay.value().max(0) as u32).saturating_mul(HALF_SECOND_MS);
+        let delay_ms = (self.entry_delay.value().max(0) as u32).saturating_mul(SECOND_MS);
         let enabled = self.entry_enabled.on();
         let e = &mut self.cfg.entries[i];
         // Switching an entry back on is the user overruling the auto-disarm, so the "why it is off"
@@ -178,8 +182,7 @@ impl BootScreen {
 
     fn store_setup(&mut self) {
         self.cfg.enabled = self.setup_enabled.on();
-        self.cfg.first_delay_ms =
-            (self.setup_first_delay.value().max(0) as u32) * FIRST_DELAY_STEP_MS;
+        self.cfg.first_delay_ms = (self.setup_first_delay.value().max(0) as u32) * SECOND_MS;
         self.cfg.max_restarts = self.setup_ceiling.value().clamp(0, u16::MAX as i32) as u16;
         self.changed = true;
     }
@@ -318,6 +321,26 @@ impl BootScreen {
         }
     }
 
+    /// The Entry rows that currently exist, in order. "Restart limit" is only one of them under
+    /// `Times`.
+    fn entry_rows(&self) -> Vec<usize> {
+        let mut v = alloc::vec![ROW_ENABLED, ROW_POLICY];
+        if self.entry_policy.selected() == 1 {
+            v.push(ROW_RETRIES);
+        }
+        v.push(ROW_DELAY);
+        v
+    }
+
+    /// Step the cursor through the rows that exist, so a hidden row is skipped rather than
+    /// landed on.
+    fn move_entry_focus(&mut self, down: bool) {
+        let rows = self.entry_rows();
+        let at = rows.iter().position(|&r| r == self.entry_focus).unwrap_or(0);
+        let next = if down { (at + 1).min(rows.len() - 1) } else { at.saturating_sub(1) };
+        self.entry_focus = rows[next];
+    }
+
     fn route_entry(&mut self, ev: KeyEvent) -> Handled {
         if self.selected_entry().is_none() {
             return Handled::Ignored;
@@ -327,23 +350,27 @@ impl BootScreen {
             let (h, _) = self.entry_policy.handle_key(ev, &Policy::LABELS);
             if h == Handled::Consumed {
                 self.store_entry();
+                // Choosing a policy can add or remove the "Restart limit" row under the cursor.
+                if !self.entry_rows().contains(&self.entry_focus) {
+                    self.entry_focus = ROW_POLICY;
+                }
             }
             return h;
         }
         match ev.key {
             Key::Up => {
-                self.entry_focus = self.entry_focus.saturating_sub(1);
+                self.move_entry_focus(false);
                 Handled::Consumed
             }
             Key::Down => {
-                self.entry_focus = (self.entry_focus + 1).min(ENTRY_ROWS - 1);
+                self.move_entry_focus(true);
                 Handled::Consumed
             }
             _ => {
                 let h = match self.entry_focus {
-                    0 => self.entry_enabled.handle_key(ev),
-                    1 => self.entry_policy.handle_key(ev, &Policy::LABELS).0,
-                    2 => self.entry_retries.handle_key(ev),
+                    ROW_ENABLED => self.entry_enabled.handle_key(ev),
+                    ROW_POLICY => self.entry_policy.handle_key(ev, &Policy::LABELS).0,
+                    ROW_RETRIES => self.entry_retries.handle_key(ev),
                     _ => self.entry_delay.handle_key(ev),
                 };
                 if h == Handled::Consumed {
@@ -407,19 +434,26 @@ impl BootScreen {
             return;
         }
         let rh = theme.metrics.row_h;
-        let (r0, rest) = content.split_top(rh);
-        let (r1, rest) = rest.split_top(rh);
-        let (r2, rest) = rest.split_top(rh);
-        let (r3, _) = rest.split_top(rh);
-
-        self.entry_enabled.draw(c, r0, theme, "Start at boot", self.entry_focus == 0);
-        self.entry_policy.draw(c, r1, theme, &Policy::LABELS, self.entry_focus == 1);
-        if self.entry_policy.selected() == 1 {
-            self.entry_retries.draw(c, r2, theme, "Restart limit", self.entry_focus == 2);
+        let mut rest = content;
+        for row in self.entry_rows() {
+            let (r, below) = rest.split_top(rh);
+            rest = below;
+            let focused = self.entry_focus == row;
+            match row {
+                ROW_ENABLED => self.entry_enabled.draw(c, r, theme, "Start at boot", focused),
+                ROW_POLICY => {
+                    // Select draws only its value, right-aligned, with the selection band behind
+                    // it — so the caption goes on afterwards, over that band, on the left.
+                    self.entry_policy.draw(c, r, theme, &Policy::LABELS, focused);
+                    let p = &theme.palette;
+                    let col = if focused { p.selection_text } else { p.text };
+                    let cell = r.inset_xy(theme.metrics.pad, 0);
+                    c.draw_text_in(cell, "When it stops", theme.fonts.body, col, Align::Start);
+                }
+                ROW_RETRIES => self.entry_retries.draw(c, r, theme, "Restart limit", focused),
+                _ => self.entry_delay.draw(c, r, theme, "Delay before launch (s)", focused),
+            }
         }
-        let secs = self.entry_delay.value();
-        let label = format!("Delay before launch: {}.{} s", secs / 2, (secs % 2) * 5);
-        self.entry_delay.draw(c, r3, theme, &label, self.entry_focus == 3);
 
         // The dropdown floats over the rows beneath it, so it is drawn last.
         if self.entry_policy.is_open() {
@@ -433,7 +467,7 @@ impl BootScreen {
         let (r1, rest) = rest.split_top(rh);
         let (r2, _) = rest.split_top(rh);
         self.setup_enabled.draw(c, r0, theme, "Boot manager enabled", self.setup_focus == 0);
-        let first = format!("First launch delay: {} s", self.setup_first_delay.value() * 5);
+        let first = "First launch delay (s)";
         self.setup_first_delay.draw(c, r1, theme, &first, self.setup_focus == 1);
         let ceil = format!("Restart ceiling per boot: {}", self.setup_ceiling.value());
         self.setup_ceiling.draw(c, r2, theme, &ceil, self.setup_focus == 2);
@@ -705,7 +739,7 @@ mod tests {
         press(&mut s, Key::Down);
         // Left/Right belong to the tab strip, so a stepper is driven by Select cycling.
         press(&mut s, Key::Select);
-        assert_eq!(s.cfg.first_delay_ms, 10_000, "8 s rounded to the 5 s step, then one up");
+        assert_eq!(s.cfg.first_delay_ms, 9_000, "8 s, one second up");
     }
 
     #[test]
@@ -718,6 +752,22 @@ mod tests {
         press(&mut s, Key::Softkey(Softkey::Left));
         assert!(s.take_reset());
         assert!(!s.take_reset(), "consumed, so the caller acts once");
+    }
+
+    #[test]
+    fn the_restart_limit_row_appears_only_under_times_and_the_cursor_skips_it() {
+        let mut cfg = cfg2();
+        cfg.entries[0].policy = Policy::Always;
+        let mut s = BootScreen::new(cfg, None, roster());
+        press(&mut s, Key::Right); // Entry tab
+        assert_eq!(s.entry_rows(), alloc::vec![ROW_ENABLED, ROW_POLICY, ROW_DELAY]);
+        press(&mut s, Key::Down); // policy
+        press(&mut s, Key::Down); // straight past the absent limit row, onto delay
+        assert_eq!(s.entry_focus, ROW_DELAY, "a hidden row is never focused");
+
+        // Choosing Times brings the row into existence.
+        s.entry_policy.set(1);
+        assert!(s.entry_rows().contains(&ROW_RETRIES));
     }
 
     #[test]

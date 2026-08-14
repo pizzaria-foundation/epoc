@@ -16,6 +16,9 @@ symbian-bootcfg = { workspace = true }
 
 [dev-dependencies]
 symbian-ui = { workspace = true, features = ["testing"] }
+# The preview example renders the screens to PNG; same machinery every other screen crate uses.
+symbian-preview = { workspace = true }
+symbian-gfx = { workspace = true }
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_vendor, values("symbian"))'] }
