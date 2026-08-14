@@ -15,12 +15,16 @@ members = [
     "crates/symbian-crypto",
     "crates/symbian-report",
     "crates/symbian-mtm",
+    "crates/symbian-bootcfg",
+    "crates/symbian-bootctl",
     "examples/netprobe",
     "examples/selftest",
     "examples/imgprobe",
     "examples/audioprobe",
     "examples/sqlprobe",
     "apps/devdump",
+    "apps/bootd",
+    "apps/bootctl",
     "tools/preview",
 ]
 # Every app's device crate is deliberately absent: a no_std staticlib carrying a
@@ -45,7 +49,7 @@ exclude = [
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
-repository = "https://github.com/Lab2021/epoc"
+repository = "https://github.com/pizzaria-foundation/epoc"
 rust-version = "1.85"
 
 [workspace.dependencies]
@@ -61,6 +65,8 @@ symbian-preview = { path = "crates/symbian-preview" }
 symbian-crypto = { path = "crates/symbian-crypto" }
 symbian-report = { path = "crates/symbian-report" }
 symbian-mtm = { path = "crates/symbian-mtm" }
+symbian-bootcfg = { path = "crates/symbian-bootcfg" }
+symbian-bootctl = { path = "crates/symbian-bootctl" }
 devdump = { path = "apps/devdump" }
 opus = { path = "crates/opus" }
 epocadb = { path = "crates/epocadb" }

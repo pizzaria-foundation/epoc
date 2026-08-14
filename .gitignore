@@ -76,3 +76,6 @@ __pycache__/
 # one stops applying the moment it leaves.
 api.conf
 **/api.conf
+
+# Agent worktrees: transient checkouts, not source.
+/.claude/worktrees/

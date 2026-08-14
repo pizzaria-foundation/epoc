@@ -103,7 +103,7 @@ and 283 of the 292 libraries asked about load, Open C among them.
 Applications built on this SDK. Each lives in its own repository and depends on
 this one by revision.
 
-    tg      github.com/Lab2021/tg      Telegram client. MTProto 2.0 written from
+    tg      github.com/pizzaria-foundation/tg      Telegram client. MTProto 2.0 written from
                                        scratch, the login exchange, chat list,
                                        conversations, photo and voice messages.
                                        The reference application, and the reason
@@ -118,11 +118,11 @@ proving the SDK works for more than one program.
 The SDK is consumed as a git dependency, pinned by revision:
 
     [dependencies]
-    symbian = { git = "ssh://git@github.com/Lab2021/epoc", rev = "..." }
-    symbian-ui = { git = "ssh://git@github.com/Lab2021/epoc", rev = "..." }
+    symbian = { git = "ssh://git@github.com/pizzaria-foundation/epoc", rev = "..." }
+    symbian-ui = { git = "ssh://git@github.com/pizzaria-foundation/epoc", rev = "..." }
 
     [dev-dependencies]
-    symbian-sim = { git = "ssh://git@github.com/Lab2021/epoc", rev = "..." }
+    symbian-sim = { git = "ssh://git@github.com/pizzaria-foundation/epoc", rev = "..." }
 
 SSH rather than HTTPS while this repository is private: an https git dependency to
 a private repo fails with "revision not found", which is a permission problem
