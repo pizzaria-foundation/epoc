@@ -119,7 +119,14 @@ def emoji_charset():
     return sorted(cps)
 
 
-CHARSETS = {"default": default_charset, "emoji": emoji_charset}
+def clock_charset():
+    # Just what a big home-screen clock and date draw: digits, the colon between hours and
+    # minutes, the slash between day and month, and a space. A tiny atlas so a 48px face costs a
+    # few KB in the app rather than the tens a full Latin set at that size would.
+    return sorted(ord(c) for c in "0123456789:/ ")
+
+
+CHARSETS = {"default": default_charset, "emoji": emoji_charset, "clock": clock_charset}
 
 
 def coverage(path):

@@ -392,6 +392,59 @@ impl<'a> Canvas<'a> {
         }
     }
 
+    /// Draw a full-colour RGB565 image with a companion 8-bit coverage mask,
+    /// nearest-neighbour scaled to fill `dst`. This is the app-icon path: unlike
+    /// [`blit`] it keeps the source's own colours (not one tint), and unlike
+    /// [`blit_mask`] the coverage is per-pixel transparency carried alongside the
+    /// pixels — exactly the shape of a Symbian `CApaMaskedBitmap` (colour plane +
+    /// mask plane). `src` and `mask` are row-major with the same `src_stride`
+    /// (in pixels) and the same dimensions `src_size`; a mask byte of 0 is fully
+    /// transparent, 255 fully opaque, and anything between is blended.
+    ///
+    /// Scaling is nearest-neighbour and integer-only, on purpose: the target is a
+    /// soft-float handset, an icon is drawn once per frame at small sizes, and the
+    /// alternative (sampling/filtering) buys nothing a 320x240 screen would show.
+    pub fn blit_icon(&mut self, dst: Rect, src: &[u16], mask: &[u8], src_size: Size, src_stride: usize) {
+        if src_size.is_empty() || dst.is_empty() {
+            return;
+        }
+        // The target in surface space *before* clipping — the scale is defined
+        // against the full requested rect, so a partly-clipped icon keeps its
+        // proportions instead of stretching the visible sliver.
+        let target = dst.translate(self.origin);
+        let clipped = self.clip.intersect(target);
+        if clipped.is_empty() {
+            return;
+        }
+        let (dw, dh) = (target.width(), target.height());
+        let (sw, sh) = (src_size.w, src_size.h);
+
+        let mut changed = false;
+        for y in clipped.y0..clipped.y1 {
+            // Map this surface row back through the unclipped target to a source row.
+            let sy = (((y - target.y0) * sh / dh).clamp(0, sh - 1)) as usize;
+            let row_base = sy * src_stride;
+            let prow = self.row(y, clipped.x0, clipped.x1);
+            for (i, px) in prow.iter_mut().enumerate() {
+                let dx = clipped.x0 + i as i32;
+                let sx = (((dx - target.x0) * sw / dw).clamp(0, sw - 1)) as usize;
+                let idx = row_base + sx;
+                let cov = mask[idx];
+                if cov == 0 {
+                    continue;
+                }
+                let nv = blend565(*px, src[idx], cov);
+                if nv != *px {
+                    *px = nv;
+                    changed = true;
+                }
+            }
+        }
+        if changed {
+            self.mark_damage(clipped);
+        }
+    }
+
     // --------------------------------------------------------------- text
 
     /// Draw `text` with its baseline at `baseline`. Returns the advance width,
@@ -549,6 +602,52 @@ mod tests {
         assert_ne!(buf[1], 0);
         assert_eq!(buf[2], 0);
         assert_ne!(buf[3], 0);
+    }
+
+    #[test]
+    fn icon_blit_scales_keeps_colour_and_honours_mask() {
+        // A 2x2 source: red, green / blue, transparent. Scaled 2x into a 4x4 dst.
+        let r = Color::rgb(0xFF, 0, 0).to_rgb565().0;
+        let g = Color::rgb(0, 0xFF, 0).to_rgb565().0;
+        let b = Color::rgb(0, 0, 0xFF).to_rgb565().0;
+        let src = [r, g, b, 0u16];
+        let mask = [255u8, 255, 255, 0]; // bottom-right transparent
+        let (mut buf, size) = surface(4, 4);
+        let mut c = Canvas::from_slice(&mut buf, size);
+        c.blit_icon(Rect::from_xywh(0, 0, 4, 4), &src, &mask, Size::new(2, 2), 2);
+        drop(c);
+        // Each source pixel expands to a 2x2 block; colours are preserved (not tinted).
+        assert_eq!(buf[0 * 4 + 0], r, "top-left quadrant is the red source pixel");
+        assert_eq!(buf[0 * 4 + 3], g, "top-right quadrant is the green source pixel");
+        assert_eq!(buf[3 * 4 + 0], b, "bottom-left quadrant is the blue source pixel");
+        // Bottom-right quadrant had zero coverage, so the surface stays untouched.
+        assert_eq!(buf[3 * 4 + 3], 0, "masked-out quadrant is left transparent");
+    }
+
+    #[test]
+    fn icon_blit_clips_without_stretching() {
+        // A 2x2 opaque source drawn as a 4x4 icon anchored at (-2,-2). Only the
+        // bottom-right quarter (surface 0..2, 0..2) is visible, and because the
+        // scale is anchored to the *full* 4x4 target, that whole quarter samples
+        // the source's own bottom-right pixel — a stretched-to-the-sliver bug
+        // would instead show all four source colours.
+        let w = Color::WHITE.to_rgb565().0;
+        let src = [
+            Color::rgb(0xFF, 0, 0).to_rgb565().0,
+            Color::rgb(0, 0xFF, 0).to_rgb565().0,
+            Color::rgb(0, 0, 0xFF).to_rgb565().0,
+            w,
+        ];
+        let mask = [255u8; 4];
+        let (mut buf, size) = surface(4, 4);
+        let mut c = Canvas::from_slice(&mut buf, size);
+        c.blit_icon(Rect::from_xywh(-2, -2, 4, 4), &src, &mask, Size::new(2, 2), 2);
+        drop(c);
+        assert_eq!(buf[0], w, "visible (0,0) samples the source bottom-right pixel");
+        assert_eq!(buf[1], w, "visible (1,0) too — the whole quarter is that one pixel");
+        assert_eq!(buf[4], w, "visible (0,1) too");
+        assert_eq!(buf[2], 0, "surface x=2 is outside the icon");
+        assert_eq!(buf[8], 0, "surface row 2 is outside the icon");
     }
 
     #[test]

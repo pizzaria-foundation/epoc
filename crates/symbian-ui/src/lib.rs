@@ -43,24 +43,36 @@
 extern crate alloc;
 
 pub mod app;
+pub mod app_picker;
 pub mod chrome;
 pub mod edit;
 pub mod icon;
 pub mod input;
 pub mod list;
 pub mod paint;
+pub mod select;
+pub mod stepper;
+pub mod tabs;
+pub mod tile;
 pub mod theme;
+pub mod toggle;
 pub mod viewer;
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
 pub mod tokens;
 
 pub use app::{App, RawEvent};
+pub use app_picker::{AppPicker, Item as PickerItem, PickerAction};
 pub use chrome::Frame;
 pub use edit::TextField;
 pub use input::{Handled, Key, KeyEvent, Modifiers, Softkey};
 pub use list::{ListState, Rows, Uniform};
+pub use select::{Select, SelectAction};
+pub use stepper::Stepper;
+pub use tabs::Tabs;
+pub use tile::{letter_tile, TILE_COLOURS};
 pub use theme::{Fonts, Metrics, Palette, Theme};
+pub use toggle::Toggle;
 pub use tokens::{Space, Surface};
 pub use viewer::{Viewer, ViewerAction};
 
