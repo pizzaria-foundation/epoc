@@ -1,0 +1,23 @@
+//  bootctl UI resource. Caption for the menu; no custom icon (number_of_icons = 0), so the shell
+//  draws its default.
+NAME BOOT
+
+#include <eikon.rh>
+#include <avkon.rsg>
+#include <avkon.rh>
+#include <appinfo.rh>
+
+RESOURCE RSS_SIGNATURE { }
+RESOURCE TBUF { buf = ""; }
+RESOURCE EIK_APP_INFO { }
+
+RESOURCE LOCALISABLE_APP_INFO r_bootctl_localisable_app_info
+    {
+    short_caption = "Boot mgr";
+    caption_and_icon =
+        CAPTION_AND_ICON_INFO
+            {
+            caption = "Boot manager";
+            number_of_icons = 0;
+            };
+    }

@@ -1,0 +1,21 @@
+//  The start-up item — and the one place in this package where the executable named is NOT this
+//  package's own. It points at bootd.exe, the headless supervisor bundled here through EXTRA_EXES,
+//  because autostarting bootctl would put a settings editor on the user's screen at every boot.
+//  The import file is still keyed by bootctl's UID3 (symbuild routes it to
+//  \private\101f875a\import\[E0AA0010].rsc); the installer reads the executable path from *inside*
+//  this resource, so the two need not agree. That is exactly why the shared template
+//  (shim/launcher/data/startup.rss.in, which substitutes @NAME@) cannot be used here — and
+//  tools/symbuild:956 prefers a hand-written data/<name>_startup.rss when one exists.
+//
+//  recovery: the platform defines exactly one policy, EStartupItemExPolicyNone — "do nothing"
+//  (sdk/epoc32/include/startupitem.hrh). STARTUP_ITEM_INFO also has no ordering field of any kind.
+//  Both of those absences are the reason bootd exists: order and restart behaviour cannot be
+//  expressed here, so they are bootd's own, kept in C:\Data\bootd\boot.cfg.
+
+#include <startupitem.rh>
+
+RESOURCE STARTUP_ITEM_INFO
+    {
+    executable_name = "!:\\sys\\bin\\bootd.exe";
+    recovery = EStartupItemExPolicyNone;
+    }

@@ -1,0 +1,22 @@
+[package]
+name = "bootctl-device"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Its own workspace root: a no_std staticlib carrying a #[panic_handler] collides with std's when
+# cargo builds the test harness.
+[workspace]
+
+[lib]
+crate-type = ["staticlib"]
+
+[dependencies]
+bootctl = { path = ".." }
+symbian-app = { path = "../../../crates/symbian-app" }
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"

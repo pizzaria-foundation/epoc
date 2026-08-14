@@ -1,0 +1,18 @@
+[package]
+name = "symbian-bootcfg"
+description = "Boot order and restart policy: the config codec and the supervisor state machine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+# Deliberately no symbian-ui and no symbian-app: this crate is shared by a headless daemon
+# (apps/bootd) and a GUI editor (apps/bootctl), and dragging the widget crate into the daemon's
+# graph is exactly the kind of "probably gc-sectioned away" that has cost this repo a silent
+# image-load failure before. The one dependency is `symbian`, for `backoff::Backoff` (a pure,
+# clock-free struct) — reusing the SDK's cadence beats a second copy of the same doubling.
+[dependencies]
+symbian = { workspace = true }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_vendor, values("symbian"))'] }
