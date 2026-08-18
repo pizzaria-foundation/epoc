@@ -53,9 +53,10 @@ out of a conversation from showing a blank screen.
 
 **Measured, per stage, as the plan asks.** Device build, `telegram.exe`: 404,708 bytes before any of
 this; **425,568 (+5.2%)** with the adapter, the bridge and the dialog list; **431,488 (+1.4%)** with
-the login screens; **435,136 (+0.8%)** with the conversation — **+7.5% in total**. Only the first
-stage is past the "≤ 5%" criterion, and it is the one worth reading before anyone trims anything: it
-paid for the whole layer at once.
+the login screens; **435,136 (+0.8%)** with the conversation; **436,048 (+0.2%)** with the viewer —
+**+7.7% for the whole application**. Only the first stage is past the "≤ 5%" criterion, and it is the
+one worth reading before anyone trims anything: it paid for the whole layer at once, and the three
+screens after it cost 2.5% between them.
 The baseline has `chats.rs` linked and all of `symbian-decl-ui` swept out by `--gc-sections`, because
 nothing referenced it; this build has the layout engine, the widget catalogue, the bridge and the
 adapter linked *for real* and `chats.rs` swept out instead. It is the cost of the first screen and
@@ -124,8 +125,18 @@ Three findings, in order of how much they cost:
 Also removed on the way past: `App::paint` cloned the entire chat — message window, inline JPEGs and
 all — on every frame of a conversation, to satisfy a borrow that splits perfectly well by field.
 
-**Not started.** `tg`'s viewer runs through the adapter, unchanged. `home` does not depend on the
-crate at all.
+**Done — `tg`'s viewer, and with it the whole application.** Eight scenes, identical. The viewer is a
+toolkit widget already — it pans, clamps and blits — so what the hand-written screen added was
+furniture, and furniture is what a declaration is for: a title, a way out, and `Viewer::draw_image`
+into the band the layout produced. The same two-pixel inset as `Viewer::content`, so panning still
+clamps against the rectangle the image is drawn in.
+
+**`tg` has nothing behind the adapter any more.** All four screens are declared, `App::on_key` and
+`App::paint` are deleted, and the type no longer implements `symbian_ui::App` — it is the model, and
+`mvu::Shell` is what the hosts run. What is left of the old application is what never belonged to a
+screen: the store, the login machine, the driver, and `handle_raw`.
+
+**Not started.** `home` does not depend on the crate at all.
 
 ## The harness, first
 
@@ -191,7 +202,8 @@ p.finish();                   // prints the report; panics if anything differed
 ## What remains, per screen
 
 Each one is: express it declaratively → add its scenes → make the comparison green → then delete the
-old screen, not before.
+old screen, not before. All four of `tg`'s screens are done and none of them was deleted; the reasons
+are under Chats and they hold for the rest — a reference that is not there cannot fail a build.
 
 ### `tg` — Chats — **done**
 
@@ -269,9 +281,17 @@ write — `abrindo [🖼 47 KB]…`, built by `media_label`, which asks the atla
 never visible, because every path that follows it reports again within the same keypress. `update` has
 no theme by design, and this is the first place that mattered.
 
-### `tg` — Viewer
+### `tg` — Viewer — **done**
 
-`symbian_ui::Viewer` is a toolkit widget; wrap it as a leaf. Scenes: loaded, loading, error.
+Eight scenes: an image smaller than the band (centred, and panning must do nothing — asserted the
+other way round, because that is the clamp working), one larger in both axes, panned, panned past its
+own far edge, one tall and narrow so a centred axis and a panning axis appear together, one with no
+pixels at all, and the light palette.
+
+`Viewer::draw` is now `draw_image` plus furniture, and both callers share the inset. The middle softkey
+is deliberately unlabelled: `Viewer::handle_key` treats it as Back, and with nothing on that slot
+`Screen` does not claim the key, so it reaches the image widget and is answered exactly as before. A
+label would have been a second name for one key.
 
 ### `home` — Recents, Menu, Settings, Home
 
@@ -289,7 +309,7 @@ the unclosable `(home)` row, CPU measured and unmeasured).
 ## Verification, every time
 
 1. `cargo test --workspace` in all three repos. Baseline at handoff: SDK 1103, tg 267, home 97. After
-   the adapter, the dialog list, the login screens and the conversation: **SDK 1154, tg 297, home 97** — and the parity example is
+   all four of `tg`'s screens: **SDK 1155, tg 299, home 97** — and the parity example is
    registered `test = true`, so a plain `cargo test` runs the comparison and a divergence fails the
    build rather than waiting to be asked.
 2. `cargo test -p <app> --example <screen>_parity` green, with the scene count asserted.

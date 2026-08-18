@@ -98,6 +98,11 @@ impl Viewer {
     }
 
     /// `title` and `back` are the caller's words: this crate ships no text.
+    ///
+    /// The whole screen, chrome included. A caller that has its own chrome — a declarative screen,
+    /// which draws the title bar and the softkey bar from its own declaration — wants
+    /// [`draw_image`](Self::draw_image) and the band it was given instead. The two share the pixels
+    /// that matter: this one is that one, plus furniture.
     pub fn draw(&self, c: &mut Canvas<'_>, theme: &Theme<'_>, title: &str, back: &str) {
         let screen = Rect::from_size(c.size());
         let frame = Frame::split(screen, theme, true, true);
@@ -105,7 +110,18 @@ impl Viewer {
         chrome::title_bar(c, frame.title, theme, title, None);
         chrome::softkey_bar(c, frame.softkeys, theme, [None, None, Some(back)]);
 
-        let area = frame.content.inset_xy(2, 2);
+        self.draw_image(c, frame.content);
+    }
+
+    /// The image alone, inside a content band.
+    ///
+    /// Takes the band and applies the same two-pixel inset [`content`](Self::content) does, so a
+    /// caller that hands over the content band gets the same rectangle panning clamps against. That
+    /// agreement is the whole reason `content` exists — the bug it was extracted for was a scroll
+    /// clamped against the screen while the drawing clipped to the box, which made the bottom of a
+    /// tall photo reachable and never visible.
+    pub fn draw_image(&self, c: &mut Canvas<'_>, band: Rect) {
+        let area = band.inset_xy(2, 2);
         if area.is_empty() || self.width <= 0 || self.height <= 0 {
             return;
         }
@@ -157,6 +173,57 @@ mod tests {
 
     fn press(v: &mut Viewer, key: Key) -> ViewerAction {
         v.handle_key(KeyEvent::new(key), area()).1
+    }
+
+    #[test]
+    fn the_image_lands_in_the_same_place_whichever_way_it_is_drawn() {
+        // `draw` is `draw_image` plus furniture, and a declarative screen calls the second with the
+        // band its layout produced. If the two disagreed about the inset, a photo would sit two
+        // pixels off in one of the two screens and nothing but a comparison would say which.
+        let mut atlas = alloc::vec::Vec::new();
+        atlas.extend_from_slice(b"SBF1");
+        atlas.extend_from_slice(&12u16.to_le_bytes());
+        atlas.extend_from_slice(&9i16.to_le_bytes());
+        atlas.extend_from_slice(&3i16.to_le_bytes());
+        atlas.extend_from_slice(&0u16.to_le_bytes());
+        atlas.push(1);
+        atlas.push(5);
+        atlas.extend_from_slice(&0u16.to_le_bytes());
+        let font = crate::BitmapFont::new(&atlas).unwrap();
+        let fonts = crate::Fonts { body: &font, strong: &font, small: &font, title: &font };
+        let theme = Theme::dark(fonts);
+
+        // An image of one colour, larger than the band, so every pixel of the band it reaches is
+        // that colour and the edges say exactly where it stopped.
+        let size = Size::new(400, 400);
+        let v = Viewer::new(alloc::vec![0xF81Fu16; (size.w * size.h) as usize], size);
+
+        let (w, h) = (320, 240);
+        let screen = Rect::from_xywh(0, 0, w, h);
+        let band = Frame::split(screen, &theme, true, true).content;
+
+        let mut whole = alloc::vec![0u16; (w * h) as usize];
+        let mut part = alloc::vec![0u16; (w * h) as usize];
+        {
+            let mut c = Canvas::from_slice(&mut whole, Size::new(w, h));
+            v.draw(&mut c, &theme, "t", "b");
+        }
+        {
+            let mut c = Canvas::from_slice(&mut part, Size::new(w, h));
+            // The page first, as a declarative `Screen` paints it before handing over the band: the
+            // image is inset two pixels inside that band and the border is background either way.
+            chrome::clear(&mut c, &theme);
+            v.draw_image(&mut c, band);
+        }
+        // Compare the content band only: the second call draws no chrome, which is the point of it.
+        for y in band.y0..band.y1 {
+            let row = (y * w) as usize;
+            assert_eq!(
+                &whole[row..row + w as usize],
+                &part[row..row + w as usize],
+                "row {y} of the image differs between the two ways of drawing it"
+            );
+        }
     }
 
     #[test]
