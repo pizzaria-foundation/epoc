@@ -179,7 +179,14 @@ impl<M: Clone> Screen<M> {
             .measure(Constraints::loose(content.width(), content.height()), theme)
             .h
             .clamp(0, content.height());
-        content.split_bottom(want)
+        // `split_bottom` answers *bottom first* — the strip, then what is left above it. Read the
+        // other way round this hands the footer everything and the content a strip as tall as the
+        // footer wanted, which is precisely what it did: the first real screen to use this band drew a
+        // composer over the whole panel with one chat bubble under it. There was no test for the
+        // footer at all, which is how a band added for one screen shape survived being inverted until
+        // that screen existed.
+        let (band, body) = content.split_bottom(want);
+        (body, band)
     }
 
     /// What this key press means to this screen, if anything.
@@ -373,6 +380,78 @@ mod tests {
                 assert_eq!(band.x0, screen.x0);
                 assert_eq!(band.x1, screen.x1);
             }
+        });
+    }
+
+    /// A footer of a fixed height, so a test can say where it should have landed.
+    struct Strip(i32);
+
+    impl Widget for Strip {
+        fn measure(&self, c: Constraints, _t: &Theme<'_>) -> Size {
+            c.constrain(Size::new(c.max_w, self.0))
+        }
+        fn draw(&self, c: &mut Canvas<'_>, rect: Rect, _t: &Theme<'_>) {
+            c.fill_rect(rect, symbian_gfx::Color::hex(0x00FF00));
+        }
+    }
+
+    #[test]
+    fn the_footer_sits_at_the_bottom_of_the_content_band() {
+        // The band exists for a composer under a transcript, and this is the assertion that says
+        // which of the two is which. It was inverted and shipped that way, because the band had no
+        // test: the footer took the whole panel and the content became a strip as tall as the footer
+        // asked for. Read the numbers, not the names — `split_bottom` answers bottom first.
+        testing::with_theme(Palette::DARK, |t| {
+            let screen = testing::SCREEN;
+            let s = full().footer(Strip(20));
+            let f = s.bands(screen, t);
+            let (body, band) = s.content_and_footer(f.content, t);
+
+            assert_eq!(band.height(), 20, "the footer is as tall as it measured");
+            assert_eq!(band.y1, f.content.y1, "and it is against the bottom of the content band");
+            assert_eq!(body.y0, f.content.y0, "the content starts where the band does");
+            assert_eq!(body.y1, band.y0, "and stops where the footer begins");
+            assert_eq!(body.height() + band.height(), f.content.height(), "no pixels lost between them");
+        });
+    }
+
+    #[test]
+    fn a_screen_with_no_footer_gives_the_whole_band_to_its_content() {
+        testing::with_theme(Palette::DARK, |t| {
+            let s = full();
+            let f = s.bands(testing::SCREEN, t);
+            let (body, band) = s.content_and_footer(f.content, t);
+            assert_eq!(body, f.content);
+            assert!(band.is_empty(), "an absent footer is not a zero-height band at the boundary");
+        });
+    }
+
+    #[test]
+    fn a_footer_taller_than_the_band_is_clamped_rather_than_pushing_the_content_negative() {
+        testing::with_theme(Palette::DARK, |t| {
+            let s = full().footer(Strip(10_000));
+            let f = s.bands(testing::SCREEN, t);
+            let (body, band) = s.content_and_footer(f.content, t);
+            assert_eq!(band, f.content, "it may have all of it and no more");
+            assert_eq!(body.height(), 0);
+            assert!(body.y1 >= body.y0, "an inverted rect draws nothing and reports nothing");
+        });
+    }
+
+    #[test]
+    fn the_footer_is_drawn_in_the_band_it_was_given() {
+        // The geometry above, seen from the canvas: the green strip must be at the bottom of the
+        // content band, not at the top of it and not over the softkey bar.
+        testing::with_theme(Palette::DARK, |t| {
+            let s = full().footer(Strip(20));
+            let f = s.bands(testing::SCREEN, t);
+            let (w, h) = (testing::SCREEN.width(), testing::SCREEN.height());
+            let mut buf = alloc::vec![0u16; (w * h) as usize];
+            let mut c = Canvas::from_slice(&mut buf, Size::new(w, h));
+            s.draw(&mut c, testing::SCREEN, t);
+            let green = symbian_gfx::Color::hex(0x00FF00).to_rgb565().0;
+            let rows = rows_with(&buf, w, h, green).expect("the footer drew nothing");
+            assert_eq!(rows, (f.content.y1 - 20, f.content.y1));
         });
     }
 
