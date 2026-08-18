@@ -57,6 +57,11 @@ the login screens; **435,136 (+0.8%)** with the conversation; **436,048 (+0.2%)*
 **+7.7% for the whole application**. Only the first stage is past the "≤ 5%" criterion, and it is the
 one worth reading before anyone trims anything: it paid for the whole layer at once, and the three
 screens after it cost 2.5% between them.
+
+`launcher.exe`: 259,312 bytes before; **268,936 (+3.7%)** for the bridge and the adapter; then
+**267,300 (−0.6%)**, **270,108**, **273,328** and **277,364** as the four screens moved — the drawer
+made the binary *smaller* than the arm it replaced. **+6.9% in total**, on the same shape of curve: the
+layer costs once, screens after it are nearly free.
 The baseline has `chats.rs` linked and all of `symbian-decl-ui` swept out by `--gc-sections`, because
 nothing referenced it; this build has the layout engine, the widget catalogue, the bridge and the
 adapter linked *for real* and `chats.rs` swept out instead. It is the cost of the first screen and
@@ -136,7 +141,37 @@ clamps against the rectangle the image is drawn in.
 `mvu::Shell` is what the hosts run. What is left of the old application is what never belonged to a
 screen: the store, the login machine, the driver, and `handle_raw`.
 
-**Not started.** `home` does not depend on the crate at all.
+**Done — the launcher's four screens, and with them the whole migration.** `home` runs through the
+bridge (`launcher::mvu::Shell`) and every screen is declared: the recent-apps drawer, the applications
+grid, settings, and the home panel. Nothing is behind the adapter in either application.
+
+The launcher's screens took a different shape from `tg`'s, and it is the shape the plan describes for
+Home and Settings generalised to all four: **the chrome is declared and the body stays hand-drawn**. A
+tab strip, a grid of icon tiles, a bitmap clock, a 3×3 dot glyph, a filter-as-you-type list — all custom
+drawing, all left alone inside `widgets::Imperative` leaves, with the title, the bands and the softkeys
+declared around them. The `Grid`/`Tabs`/`Toggle`/`Stepper` wrappers the plan sketched were *not*
+written, and the reason is worth recording: every one of them would have been a second implementation
+of arithmetic that already works, and the comparison would have been measuring the new copy against the
+old one. What the migration actually needed was the frame, not the furniture.
+
+Forty-three scenes across the four screens, all identical: drawer 11, grid 8, settings 14 (a scene per
+tab, because a tab is a different set of controls in the same place), panel 10.
+
+Three things this half found:
+
+- **`Group` had no `handle_key`.** `Screen::content` takes a widget, so a screen whose content is a
+  column reached `Group`'s own `Widget` impl, whose default answered `Ignored` — every widget below a
+  container on a screen was unreachable by any key. Settings is the first content that is not a single
+  leaf: it drew perfectly and answered nothing. Fixed in the SDK, with a test that the child is asked at
+  *its own* rect.
+- **The recents drawer's reference had already drifted.** Its drawing existed in the app and in
+  `examples/preview.rs`, and the preview labelled the left softkey "Open" and drew no header — so the
+  sheet everyone looked at was not the screen the phone showed. One function now, shared by the app's
+  reference, the preview and the comparison.
+- **Deleting a screen's `draw` can take an overlay with it.** The link question and the icon builder's
+  progress footer were the last two statements of `Launcher::draw`, over whichever screen was up. They
+  are a `Stack` layer over every screen now, and the question is still answered before any screen's bar,
+  because it covers what the user can no longer see.
 
 ## The harness, first
 
@@ -201,9 +236,13 @@ p.finish();                   // prints the report; panics if anything differed
 
 ## What remains, per screen
 
-Each one is: express it declaratively → add its scenes → make the comparison green → then delete the
-old screen, not before. All four of `tg`'s screens are done and none of them was deleted; the reasons
-are under Chats and they hold for the rest — a reference that is not there cannot fail a build.
+Nothing. All eight are done, and this section is kept as the record of what each one took — the
+findings are per-screen and most of them are not about that screen at all.
+
+The recipe each one followed: express it declaratively → add its scenes → make the comparison green →
+then delete the old screen, not before. **None of the eight was deleted.** The reason is under Chats
+and it held every time: a reference that is not there cannot fail a build, and twice the reference was
+the only thing that caught a change — once because a *second* copy of it had drifted.
 
 ### `tg` — Chats — **done**
 
@@ -293,23 +332,29 @@ is deliberately unlabelled: `Viewer::handle_key` treats it as Back, and with not
 `Screen` does not claim the key, so it reaches the image widget and is answered exactly as before. A
 label would have been a second name for one key.
 
-### `home` — Recents, Menu, Settings, Home
+### `home` — Recents, Menu, Settings, Home — **done**
 
-`home` needs the dependency first (pinned rev plus the local `[patch]`, as `tg` does), then the
-adapter, then screens in this order: **Recents** (a list with a picker, closest to work already
-done), **Menu**, **Settings**, **Home** last.
+In that order, each with its comparison in `crates/symbian-launcher/examples/*_parity.rs` and each
+keeping the screen it replaced as the reference. The pattern, which is the same for all four and worth
+copying for any screen whose drawing is genuinely custom:
 
-Home and Settings need widgets the catalogue does not have: a **`Grid`** (the home is configurable
-columns × rows) and wrappers for `Tabs`, `Toggle`, `Stepper` and `AppPicker` — all of which exist in
-`symbian-ui` underneath, so these are shells, not new arithmetic. Scenes: Home (full grid, empty
-grid, status bar with and without signal, an unread count); Menu (filter typed, no filter, empty);
-Settings (each tab, a toggle both ways, a stepper at its limit); Recents (running, closed history,
-the unclosable `(home)` row, CPU measured and unmeasured).
+1. split the screen's `draw` into *chrome* and *body*, leaving the whole thing as the reference;
+2. declare the chrome in a `*_decl` module beside it — title, bands, softkeys, and the key mapping;
+3. put the body in an `Imperative` leaf over whatever state it needs, which for the application is the
+   whole launcher and for the harness is the two or three things it has;
+4. claim the action key at the application level whenever the middle slot is labelled, because `Screen`
+   offers a key to its bar before its content;
+5. tell the tree when a key changed something the *declaration* reads — a filter in a title bar, a
+   softkey label that follows the cursor.
+
+Step 5 is the one that bites. It cost a stale "Enviar" in `tg` and would have cost a stale "Menu" here;
+in both cases the parity harness cannot see it, because a comparison renders one state and builds a
+fresh tree for it. `examples/preview.rs` can, because it presses keys and *then* draws.
 
 ## Verification, every time
 
 1. `cargo test --workspace` in all three repos. Baseline at handoff: SDK 1103, tg 267, home 97. After
-   all four of `tg`'s screens: **SDK 1155, tg 299, home 97** — and the parity example is
+   all eight screens: **SDK 1156, tg 299, home 134** — and the parity example is
    registered `test = true`, so a plain `cargo test` runs the comparison and a divergence fails the
    build rather than waiting to be asked.
 2. `cargo test -p <app> --example <screen>_parity` green, with the scene count asserted.
@@ -320,6 +365,14 @@ the unclosable `(home)` row, CPU measured and unmeasured).
    criterion and the first stage came in at **+5.2%** — see the measurement note above for what is in
    that number before anyone reacts to it.
 
+## What the adapter turned out to be
+
+`widgets::Imperative` was written as scaffolding — a way to be MVU on day one with every screen still
+the screen that ships. It is not scaffolding. `tg` no longer uses it and the launcher uses it on every
+one of its four screens, permanently, because a bitmap clock and a grid of icon tiles and a filtering
+list are *drawings*, and this layer's own documentation says so: express the frame, leave the ink alone.
+The adapter is what "leave the ink alone" looks like when the frame is declared.
+
 ## The standing risk
 
 `docs/decl-ui.md` argues against this migration: *"a screen that already works does not need
@@ -328,7 +381,7 @@ eight screens work today. The owner chose to migrate anyway, and what makes that
 harness: every screen is compared against the one it replaces, in the states that have branches.
 Without a scene, a claim of "identical" is worth what the first one turned out to be worth.
 
-**What these screens have not had: a phone.** The device build is green and the binary is measured,
+**What none of this has had: a phone.** The device build is green and the binary is measured,
 and every behaviour is asserted on the host — the cursor, the green key, pagination, leaving a
 conversation, a batch of keys, typing and pasting into the number field. None of that is the same as
 the list under a thumb. Step 3 of the verification above is owed on both migrated screens: install it,
