@@ -27,8 +27,8 @@ use alloc::rc::Rc;
 use alloc::string::String;
 use core::cell::RefCell;
 
-use symbian_gfx::{Align, Canvas, Rect, Size};
-use symbian_ui::{edit, Clipboard, Handled, KeyEvent, Theme};
+use symbian_gfx::{Canvas, Rect, Size};
+use symbian_ui::{chrome, edit, Clipboard, Handled, KeyEvent, Theme};
 
 use crate::constraints::Constraints;
 use crate::slot::SlotTable;
@@ -42,6 +42,8 @@ pub struct TextField {
     focused: bool,
     masked: bool,
     placeholder: Option<String>,
+    /// Drawn before the text and not part of it. See [`TextField::prefix`].
+    prefix: Option<String>,
 }
 
 impl TextField {
@@ -59,12 +61,36 @@ impl TextField {
         Self::from_slot(slots, move || edit::TextField::with_limit(max_chars))
     }
 
+    /// A field over a buffer the caller already owns.
+    ///
+    /// # When a slot is not enough
+    ///
+    /// A caret belongs in the slot table — [`crate::slot`] argues that at length and it is right for
+    /// every field whose text nobody outside asks about. A login screen is the exception, and the
+    /// reason is the *submit key*: it is a softkey, so it is answered by
+    /// [`DeclarativeApp::on_key`](crate::app::DeclarativeApp::on_key) and turned into a message, and
+    /// by the time `update` runs there is no widget in hand and no `view` to read one from. A slot
+    /// cannot be reached from `update`; an `Rc` the model holds can.
+    ///
+    /// So the app creates the buffer, keeps the handle, and hands a clone here. There is still one
+    /// buffer and one caret — this is a handle, not a copy, which is what stops the two from drifting
+    /// the way a model holding a `String` beside a field would.
+    ///
+    /// The trade is lifetime: a slot forgets when the field leaves the screen and this does not. For
+    /// a login form that is the behaviour you want — the number survives the transition to the code
+    /// screen and back. For a search box that should start empty each time, use
+    /// [`new`](Self::new) and let the slot do its job.
+    pub fn with_buffer(buffer: Rc<RefCell<edit::TextField>>) -> Self {
+        let masked = buffer.borrow().is_masked();
+        Self { state: buffer, focused: false, masked, placeholder: None, prefix: None }
+    }
+
     fn from_slot(slots: &mut SlotTable, initial: impl FnOnce() -> edit::TextField) -> Self {
         let state = slots
             .use_state_with(|| Rc::new(RefCell::new(initial())))
             .clone();
         let masked = state.borrow().is_masked();
-        Self { state, focused: false, masked, placeholder: None }
+        Self { state, focused: false, masked, placeholder: None, prefix: None }
     }
 
     /// Whether this field has the keyboard. Only a focused field edits or shows a caret.
@@ -84,6 +110,16 @@ impl TextField {
     /// Dimmed text shown while the field is empty.
     pub fn placeholder(mut self, s: impl Into<String>) -> Self {
         self.placeholder = Some(s.into());
+        self
+    }
+
+    /// Dimmed text drawn before the contents and *not* part of them.
+    ///
+    /// The fixed `+` of a phone number is the case this exists for, and the distinction matters: the
+    /// login screen draws it and does not store it, so a pasted `+55 21 99999-0000` leaves the digits
+    /// alone rather than arriving with a second plus in front of it.
+    pub fn prefix(mut self, s: impl Into<String>) -> Self {
+        self.prefix = Some(s.into());
         self
     }
 
@@ -154,48 +190,33 @@ impl Widget for TextField {
     }
 
     fn measure(&self, constraints: Constraints, theme: &Theme<'_>) -> Size {
-        // One line of the body font plus the vertical padding either side. The width is the
-        // parent's to give: a field that asked for its text width would grow as you typed and
-        // shrink as you deleted, which is not how a form behaves.
-        let h = theme.fonts.body.line_height() + theme.metrics.space.snug * 2;
-        constraints.constrain(Size::new(constraints.max_w, h))
+        // One line of the body font plus the vertical padding either side, asked of the toolkit so
+        // that the height measured here and the height drawn there cannot disagree. The width is the
+        // parent's to give: a field that asked for its text width would grow as you typed and shrink
+        // as you deleted, which is not how a form behaves.
+        constraints.constrain(Size::new(constraints.max_w, chrome::text_field_height(theme)))
     }
 
+    /// Nothing of its own: the box, the prefix, the text or its mask, the selection and the caret are
+    /// [`chrome::text_field`].
+    ///
+    /// This used to be drawn here — a stroked rectangle, no prefix, no selection, a caret centred in
+    /// the box — and `tg`'s login screens drew a different field by hand. Both were reasonable, and
+    /// the two could never agree, so the declarative login screen could never have been compared
+    /// against the one it replaces. The pixels moved into the toolkit and this widget places them.
     fn draw(&self, c: &mut Canvas<'_>, rect: Rect, theme: &Theme<'_>) {
         let f = self.state.borrow();
-        let pad = theme.metrics.space.snug;
-        let inner = Rect { x0: rect.x0 + pad, x1: rect.x1 - pad, ..rect };
-
-        c.fill_rect(rect, theme.palette.bg.mid());
-        let edge = if self.focused { theme.palette.accent } else { theme.palette.divider };
-        c.stroke_rect(rect, edge);
-
-        if f.is_empty() {
-            if let Some(p) = &self.placeholder {
-                c.draw_text_in(inner, p, theme.fonts.body, theme.palette.dim, Align::Start);
-            }
-        } else {
-            // `display()` is what hides a password, and it is asked for rather than reimplemented
-            // so a masked field can never leak through this draw call.
-            let shown = f.display();
-            c.draw_text_in(inner, &shown, theme.fonts.body, theme.palette.text, Align::Start);
-        }
-
-        if self.focused {
-            // The caret sits after the text drawn so far, measured in the same font that drew it.
-            // Measuring the *displayed* string and not the real one is what keeps the caret in the
-            // right place in a masked field, where `*` is rarely the width of the character it
-            // stands for.
-            let shown = f.display();
-            let upto = shown.chars().count().min(prefix_chars(&f));
-            let taken: String = shown.chars().take(upto).collect();
-            let x = inner.x0 + theme.fonts.body.measure(&taken);
-            let y0 = inner.y0 + (inner.height() - theme.fonts.body.line_height()) / 2;
-            c.fill_rect(
-                Rect::new(x, y0, x + 1, y0 + theme.fonts.body.line_height()),
-                theme.palette.accent,
-            );
-        }
+        chrome::text_field(
+            c,
+            rect,
+            theme,
+            &f,
+            chrome::FieldStyle {
+                prefix: self.prefix.as_deref(),
+                placeholder: self.placeholder.as_deref(),
+                focused: self.focused,
+            },
+        );
     }
 
     fn handle_key(&self, ev: KeyEvent, _rect: Rect, cx: &mut KeyCtx<'_>) -> Handled {
@@ -204,15 +225,6 @@ impl Widget for TextField {
         // meant a declarative field was the one field on the phone that could not paste.
         self.edit(ev, cx.clip)
     }
-}
-
-/// How many characters sit before the caret.
-///
-/// The caret is a byte offset and the mask is per character, so the two only agree after a
-/// conversion. Counting the characters of the real prefix is that conversion, and it is safe
-/// precisely because `edit.rs` guarantees the offset is on a `char` boundary.
-fn prefix_chars(f: &edit::TextField) -> usize {
-    f.text()[..f.cursor()].chars().count()
 }
 
 #[cfg(test)]
@@ -295,6 +307,40 @@ mod tests {
             frame(&f);
         }
         assert_eq!(f.cursor(), 10, "walking right stops at the end rather than running past it");
+    }
+
+    #[test]
+    fn a_buffer_the_app_owns_survives_the_field_leaving_the_screen() {
+        // The login screen's case. The app holds the `Rc`, so it can read what was typed from
+        // `update` — where there is no widget and no slot table — and the text survives a transition
+        // that a slot would have reclaimed.
+        let buffer = Rc::new(RefCell::new(edit::TextField::with_limit(16)));
+        {
+            let f = TextField::with_buffer(buffer.clone()).focused(true);
+            type_str(&f, "5521");
+            assert_eq!(f.text(), "5521");
+        }
+        // No field on screen at all for a frame, and the digits are still there.
+        assert_eq!(buffer.borrow().text(), "5521");
+
+        let again = TextField::with_buffer(buffer.clone()).focused(true);
+        type_str(&again, "9");
+        assert_eq!(again.text(), "55219", "the second field typed into the same buffer");
+        // And it is a handle, not a copy: the app's view of it moved too.
+        assert_eq!(buffer.borrow().text(), "55219");
+    }
+
+    #[test]
+    fn a_buffer_that_is_already_masked_says_so_without_being_told() {
+        // The mask lives on the editor, so a field built over an existing buffer must not silently
+        // reveal a password by defaulting to unmasked.
+        let buffer = Rc::new(RefCell::new(edit::TextField::new()));
+        buffer.borrow_mut().set_masked(true);
+        buffer.borrow_mut().insert_str("hunter2");
+        let f = TextField::with_buffer(buffer.clone());
+        assert_eq!(buffer.borrow().display(), "*******");
+        assert_eq!(f.text(), "hunter2");
+        frame(&f);
     }
 
     #[test]

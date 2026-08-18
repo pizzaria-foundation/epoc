@@ -146,6 +146,16 @@ impl<A: DeclarativeApp> DeclarativeAppBridge<A> {
         self
     }
 
+    /// Change the clipboard after construction.
+    ///
+    /// [`with_clipboard`](Self::with_clipboard) is the builder and reads better where a bridge is
+    /// created in one expression. This is for a *shell* that owns a bridge as a field and cannot move
+    /// it out to call a builder — which is the shape every host in this SDK ends up with, since it has
+    /// other things to hold as well.
+    pub fn set_clipboard(&mut self, clip: impl Clipboard + 'static) {
+        self.clip = Box::new(clip);
+    }
+
     /// The model, to read.
     ///
     /// There is deliberately no `model_mut`. A caller that could reach in would be a second

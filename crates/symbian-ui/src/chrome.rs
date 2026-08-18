@@ -379,3 +379,107 @@ mod tests {
 
 #[cfg(test)]
 extern crate alloc;
+
+/// What dresses a text field: what stands before the text, what stands in for it when empty.
+///
+/// A struct rather than four arguments, because three of the four are usually absent and a call site
+/// reading `text_field(c, r, t, &f, None, None, true)` says nothing about which `None` is which.
+#[derive(Copy, Clone, Debug, Default)]
+pub struct FieldStyle<'a> {
+    /// Drawn dimmed before the text and not part of it — the fixed `+` of a phone number, which the
+    /// field must not store or a paste would end up with two of them.
+    pub prefix: Option<&'a str>,
+    /// Shown dimmed while the field is empty.
+    pub placeholder: Option<&'a str>,
+    /// Only a focused field shows a caret. A screen with one field passes `true`; a screen with two
+    /// passes it to the one holding the keyboard, which is what stops both from looking active.
+    pub focused: bool,
+}
+
+/// A one-line editor: its box, its text or its mask, its selection, its caret.
+///
+/// # Why this is here and not in two places
+///
+/// It was in two places. `tg`'s login screens drew a field by hand — band, prefix, selection, caret
+/// — and `symbian-decl-ui`'s `TextField` widget drew a different one: a stroked rectangle, no
+/// prefix, no selection painting, a caret centred rather than inset. Both were reasonable and they
+/// could never agree, which means the declarative login screen could never have been compared with
+/// the one it replaces. Two drawings of one control is the same defect as two routings of one key.
+///
+/// So the pixels live here, next to the rest of the furniture, and the callers bring a rect and a
+/// [`crate::edit::TextField`]. The *placement* stays with the caller: a login screen centres its
+/// field in the panel and a composer pins it to the bottom, and neither is this function's business.
+///
+/// # The geometry, and why these numbers
+///
+/// They are the login screen's, because that is what ships on the phone: the text is inset 6 pixels
+/// from the left edge, the line box sits 3 pixels below the top, and the caret runs from there to 3
+/// pixels above the bottom. The field's *height* is `body.line_height() + space.snug * 2`, which the
+/// declarative widget already measured to and the login screen already spelled as `+ 8` — the same
+/// number, now named once.
+///
+/// The selection is painted before the text so the characters land on top of it. A selection nobody
+/// can see is worse than none: the next keystroke replaces text the user did not know was chosen.
+pub fn text_field(
+    c: &mut Canvas<'_>,
+    r: Rect,
+    theme: &Theme<'_>,
+    field: &crate::edit::TextField,
+    style: FieldStyle<'_>,
+) {
+    let p = &theme.palette;
+    let body = theme.fonts.body;
+    let (top, bottom) = (r.y0 + 3, r.y1 - 3);
+
+    paint::band(c, r, &p.chrome);
+
+    let mut text_x = r.x0 + 6;
+    if let Some(pre) = style.prefix {
+        c.draw_text(Point::new(text_x, top + body.ascent()), pre, body, p.dim);
+        text_x += body.measure(pre) + 2;
+    }
+
+    // `display()` rather than `text()`: it is the one call that hides a password, so asking for it
+    // here means no drawing path can leak one.
+    let display = field.display();
+    if display.is_empty() {
+        if let Some(ph) = style.placeholder.filter(|ph| !ph.is_empty()) {
+            c.draw_text(Point::new(text_x, top + body.ascent()), ph, body, p.dim);
+        }
+    } else {
+        if let Some((from, to)) = field.selection() {
+            paint::text_selection(
+                c,
+                text_x,
+                top,
+                top + body.line_height(),
+                &display,
+                field.display_offset(from),
+                field.display_offset(to),
+                body,
+                p.selection.mid(),
+            );
+        }
+        c.draw_text_in(
+            Rect::new(text_x, top, r.x1 - 4, top + body.line_height()),
+            &display,
+            body,
+            p.text,
+            Align::Start,
+        );
+    }
+
+    if style.focused {
+        // `display_offset` is the conversion a masked field needs: the caret is a byte offset into
+        // the password and the display is one `*` per character, so measuring the real prefix would
+        // put the caret wherever the password happened to be wider than its stars.
+        let shown = &display[..field.display_offset(field.cursor()).min(display.len())];
+        let cx = text_x + body.measure(shown);
+        c.fill_rect(Rect::new(cx, top, cx + 1, bottom), p.accent);
+    }
+}
+
+/// The height [`text_field`] draws into, so a caller can place it without guessing.
+pub fn text_field_height(theme: &Theme<'_>) -> i32 {
+    theme.fonts.body.line_height() + theme.metrics.space.snug * 2
+}

@@ -34,6 +34,13 @@ pub enum Ink {
     /// hand. That matters more than it sounds — `DeclarativeApp::view` has no theme, deliberately,
     /// so a widget that wanted a literal `Color` could not be built there at all.
     Divider,
+    /// The palette's `unread` colour, used as text.
+    ///
+    /// It is the colour of the unread pill, and `tg`'s login screens write their error line in it —
+    /// which is a palette gap recorded rather than papered over: there is no `error` role, and
+    /// inventing a literal here would put a colour in a view that a theme could not change. If an
+    /// error role is ever added, this variant is where the login screen stops needing it.
+    Unread,
     /// Text inside a selected row.
     ///
     /// Its own role rather than `Chrome`, which is the nearest-looking one and is wrong: a
@@ -55,6 +62,7 @@ impl Ink {
             Ink::Chrome => theme.palette.chrome_text,
             Ink::Selection => theme.palette.selection_text,
             Ink::Divider => theme.palette.divider,
+            Ink::Unread => theme.palette.unread,
             Ink::Fixed(c) => c,
         }
     }

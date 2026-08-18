@@ -46,6 +46,8 @@ use crate::widgets::title_bar::TitleBar;
 /// the other end.
 pub struct Screen<M> {
     title: Option<TitleBar>,
+    /// Whether the softkey band is kept when no key is labelled. See [`Screen::keep_softkey_band`].
+    keep_band: bool,
     content: Option<Box<dyn Widget>>,
     /// A band pinned to the bottom of the content area, above the softkey bar. See
     /// [`Screen::footer`].
@@ -55,7 +57,7 @@ pub struct Screen<M> {
 
 impl<M: Clone> Screen<M> {
     pub fn new() -> Self {
-        Self { title: None, content: None, footer: None, keys: Softkeys::new() }
+        Self { title: None, content: None, footer: None, keys: Softkeys::new(), keep_band: false }
     }
 
     /// A plain title bar with this text.
@@ -114,9 +116,23 @@ impl<M: Clone> Screen<M> {
         self.title.as_ref().map(TitleBar::title)
     }
 
+    /// Keep the softkey band even when no key is labelled.
+    ///
+    /// By default a screen with no labels gives the band's pixels to its content, which is right for
+    /// something drawn edge to edge — a photo viewer — and wrong for a *form* that happens to have
+    /// nothing to offer this second. `tg`'s login screen is the second case: with no connection yet
+    /// there is no "Avançar" to press, and the hand-written screen still draws the bar, because on
+    /// S60 the bar is furniture rather than a control. Without this the band vanishes, the content
+    /// band grows by seventeen pixels, and everything centred in it moves — which is what the
+    /// comparison against that screen found.
+    pub fn keep_softkey_band(mut self) -> Self {
+        self.keep_band = true;
+        self
+    }
+
     /// Whether there is a softkey bar at all.
     pub fn has_softkeys(&self) -> bool {
-        self.labels().iter().any(Option::is_some)
+        self.keep_band || self.labels().iter().any(Option::is_some)
     }
 
     /// The three bands, in screen coordinates.
@@ -357,6 +373,30 @@ mod tests {
                 assert_eq!(band.x0, screen.x0);
                 assert_eq!(band.x1, screen.x1);
             }
+        });
+    }
+
+    #[test]
+    fn a_form_can_keep_the_band_with_nothing_on_it() {
+        // The opposite case, and it is not symmetry for its own sake: on S60 the softkey bar is
+        // furniture, and a form with no offer this second — a login screen waiting for a connection
+        // — still draws it. Without this the band's seventeen pixels go to the content and
+        // everything centred in it moves, which is what the comparison against `tg`'s login screen
+        // found.
+        testing::with_theme(Palette::DARK, |t| {
+            let screen = testing::SCREEN;
+            let labelled = full().bands(screen, t);
+            let bare = Screen::<Msg>::new()
+                .title("Entrar")
+                .content(Fill)
+                .keep_softkey_band()
+                .bands(screen, t);
+
+            assert!(!bare.softkeys.is_empty(), "the band was dropped for want of a label");
+            assert_eq!(bare.content, labelled.content, "the content band must not have moved");
+            assert_eq!(bare.softkeys.height(), t.metrics.softkey_h);
+            // And it still routes nothing, because there is nothing to route.
+            assert_eq!(Screen::<Msg>::new().keep_softkey_band().dispatch(press(Key::Select)), None);
         });
     }
 
