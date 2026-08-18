@@ -10,5 +10,10 @@ rust-version.workspace = true
 symbian-gfx = { workspace = true }
 symbian-ui = { workspace = true }
 
+[dev-dependencies]
+# For the harness's own tests: `testing::with_theme` builds a Theme over a one-glyph atlas, which is
+# all `compare` needs — it reads two metrics off it. The real atlases are what callers pass in.
+symbian-ui = { workspace = true, features = ["testing"] }
+
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_vendor, values("symbian"))'] }

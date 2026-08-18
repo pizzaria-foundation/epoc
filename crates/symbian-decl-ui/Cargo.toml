@@ -1,0 +1,32 @@
+[package]
+name = "symbian-decl-ui"
+description = "Declarative screen-building over symbian-ui: widgets that describe, a layout pass that measures"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+symbian-gfx = { workspace = true }
+symbian-ui = { workspace = true }
+
+[features]
+# Host-only helpers for testing widgets from outside this crate: `with_key_ctx`, which assembles the
+# theme-and-clipboard context a key walk needs. Never in a device build — it pulls symbian-ui's own
+# testing module, which owns a font atlas.
+testing = ["symbian-ui/testing"]
+
+[dev-dependencies]
+# The one-call Theme + Canvas helpers, so a layout test is three lines rather than twenty of
+# byte-packing a font atlas. Host-only, never in a device build.
+symbian-ui = { workspace = true, features = ["testing"] }
+# The real font atlases and a PNG writer, for `--example compare`. The unit tests prove the
+# arithmetic against a one-glyph test atlas; only the real fonts can prove the pixels.
+symbian-preview = { workspace = true }
+
+# `test = true` so `cargo test` runs the pixel-parity assertion inside the example, not only
+# `cargo run --example compare`. A comparison nobody runs is a comparison that is already stale:
+# this one is the acceptance criterion for the chrome widgets, and it has to fail the build.
+[[example]]
+name = "compare"
+test = true

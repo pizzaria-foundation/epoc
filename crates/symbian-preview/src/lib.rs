@@ -23,6 +23,9 @@
 //! as `symbian-sim` — a crate apps pull in under `[dev-dependencies]`.
 
 mod png;
+pub mod parity;
+
+pub use parity::{Diff, Parity};
 
 use std::path::{Path, PathBuf};
 
