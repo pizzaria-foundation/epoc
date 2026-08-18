@@ -598,13 +598,20 @@ fn typing_reaches_a_field_inside_the_tree() {
 }
 
 #[test]
-fn a_key_before_the_first_frame_is_ignored_rather_than_guessed_at() {
-    // No frame has been drawn, so no widget has a rect and none of them is on screen. Answering a
-    // key here would be a widget acting at a position it has never occupied.
+fn a_key_before_the_first_frame_is_answered_at_a_layout_of_its_own() {
+    // No frame has been drawn, so no widget has a rect — and answering a key at a *stale* rect is a
+    // widget acting at a position it no longer occupies, which is the thing to avoid. The way to
+    // avoid it is not to drop the key: this path is handed the screen rect and the theme, so the
+    // tree is built and placed here and the field is asked at the rect it is about to be drawn at.
+    //
+    // What makes this matter is not the first frame, it is every frame after it. An `update` drops
+    // the tree, and the platform delivers a whole batch of key events before the host draws once —
+    // so without this, the second press of a held key would be answered by nobody.
     let mut b = DeclarativeAppBridge::<Compose>::new();
-    assert_eq!(compose_key(&mut b, Key::Char('x')), Handled::Ignored);
+    assert_eq!(compose_key(&mut b, Key::Char('x')), Handled::Consumed);
+    assert_eq!(typed(&b), "x");
     compose_frame(&mut b);
-    assert_eq!(typed(&b), "");
+    assert_eq!(typed(&b), "x", "and the frame that followed did not reset it");
 }
 
 #[test]

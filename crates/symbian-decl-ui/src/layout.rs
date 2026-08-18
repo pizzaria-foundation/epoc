@@ -438,10 +438,25 @@ pub fn draw_frame(
     c: &mut Canvas<'_>,
     theme: &Theme<'_>,
 ) {
+    place_frame(root, rect, cache, theme);
+    draw_tree(root, cache, c, theme);
+}
+
+/// A frame without the paint: begin it, measure, place.
+///
+/// Every rect [`dispatch_key`] reads comes from here, and there is one caller that needs them
+/// *without* a canvas — the bridge, when a key arrives against a tree that has not been drawn yet.
+/// That happens more often than it sounds: an `update` drops the tree, and the next key in the same
+/// batch of platform events arrives before any frame has been drawn. Without this, that key would
+/// find no rects and be answered by nobody, so holding a direction key would move a list once per
+/// frame instead of once per press.
+///
+/// Split out of [`draw_frame`] rather than reimplemented, so the two cannot disagree about the order
+/// of the passes or about who starts the frame.
+pub fn place_frame(root: &Node, rect: Rect, cache: &mut UiCache, theme: &Theme<'_>) {
     cache.begin_frame();
     measure_tree(root, Constraints::tight(rect.width(), rect.height()), theme, cache);
     layout_tree(root, rect, cache);
-    draw_tree(root, cache, c, theme);
 }
 
 /// Paint the tree into the rects [`layout_tree`] worked out.

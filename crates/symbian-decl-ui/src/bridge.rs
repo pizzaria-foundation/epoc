@@ -23,6 +23,19 @@
 //! microseconds; *not* rebuilding when something did is a screen that silently stops updating,
 //! which is the bug this crate's [`content_hash`](crate::Widget::content_hash) default is also
 //! written to avoid. Every path that touches the model drops the tree.
+//!
+//! # Except when a key arrives and there is no tree
+//!
+//! Then it is built, and laid out, before the key is offered to anything — see
+//! [`layout::place_frame`](crate::layout::place_frame). That is not a retreat from the paragraph
+//! above; it is what makes it survivable. The platform hands the host a *batch* of events and the
+//! host draws once at the end of it, so the press after any press that changed the model would
+//! otherwise reach widgets with no rects and be answered by nobody. Holding a direction key would
+//! advance a list one row per frame rather than one per press.
+//!
+//! The rule that is never bent is the other one: a widget is only ever asked about a key at the rect
+//! it would be drawn at *now*. A tree rebuilt and not placed would answer at last frame's positions,
+//! which is worse than answering nothing.
 
 use alloc::boxed::Box;
 use alloc::vec;
@@ -34,6 +47,7 @@ use symbian_ui::{Clipboard, Handled, KeyEvent, NoClipboard, Theme};
 use crate::app::DeclarativeApp;
 use crate::cache::UiCache;
 use crate::cmd::Cmd;
+use crate::outbox::Outbox;
 use crate::slot::SlotTable;
 use crate::widget::KeyCtx;
 use crate::widgets::Node;
@@ -88,8 +102,13 @@ impl<A: DeclarativeApp> DeclarativeAppBridge<A> {
     /// No view is built here. The first draw builds it, which keeps construction cheap enough to
     /// do before a window exists — and there is no theme to measure against yet anyway.
     pub fn new() -> Self {
+        Self::with_model(A::init())
+    }
+
+    /// The one place the fields are written, so the two constructors cannot drift.
+    fn from_model(model: A::Model) -> Self {
         Self {
-            model: A::init(),
+            model,
             tree: None,
             cache: UiCache::new(),
             slots: SlotTable::new(),
@@ -98,6 +117,21 @@ impl<A: DeclarativeApp> DeclarativeAppBridge<A> {
             clip: Box::new(NoClipboard),
             exit: false,
         }
+    }
+
+    /// Start from a model that was built elsewhere.
+    ///
+    /// [`init`](DeclarativeApp::init) is a function of nothing, which is right for an app whose
+    /// starting state is a constant and wrong for one whose first model comes from the world: a
+    /// dialog list read out of a cache file, a session restored from disk, a mock store in the
+    /// simulator where the device would open a connection. Those differ per *host*, not per app —
+    /// the same `DeclarativeApp` runs in both — so choosing between them cannot be `init`'s job
+    /// without a second app type existing only to hold a different constructor.
+    ///
+    /// `init` is still what the trait requires and still what the ordinary constructor calls: this
+    /// is the shell's door, used where the shell is the thing that knows.
+    pub fn with_model(model: A::Model) -> Self {
+        Self::from_model(model)
     }
 
     /// Give the screens a clipboard, so their text fields can copy and paste.
@@ -245,7 +279,7 @@ impl<A: DeclarativeApp> Default for DeclarativeAppBridge<A> {
 }
 
 impl<A: DeclarativeApp> symbian_ui::App for DeclarativeAppBridge<A> {
-    fn handle_key(&mut self, ev: KeyEvent, theme: &Theme<'_>, _screen: Rect) -> Handled {
+    fn handle_key(&mut self, ev: KeyEvent, theme: &Theme<'_>, screen: Rect) -> Handled {
         if let Some(msg) = A::on_key(&self.model, ev) {
             self.send(msg);
             return Handled::Consumed;
@@ -258,9 +292,38 @@ impl<A: DeclarativeApp> symbian_ui::App for DeclarativeAppBridge<A> {
         // keystroke and, worse, would build a tree the layout has not placed — so every widget in
         // it would be asked about a key at a rect from the frame before. A tree that has never been
         // drawn simply takes no keys.
-        let Some(root) = self.tree.as_ref() else { return Handled::Ignored };
-        let mut cx = KeyCtx::new(theme, self.clip.as_mut());
-        let handled = crate::layout::dispatch_key(root, ev, &self.cache, &mut cx);
+        // A key must be offered to the widgets at the rects they would be drawn at, so the tree has
+        // to exist *and* have been placed. Both are available here — `screen` is the rect, `theme` is
+        // what measures — so a tree that is missing is built and laid out rather than skipped.
+        //
+        // It is missing more often than it sounds. Every `update` drops it, and the platform hands
+        // over a whole batch of events before the host draws anything: hold a direction key and the
+        // first press moves the list, invalidates the tree, and every other press in that batch would
+        // reach a widget with no rect and be answered by nobody. The list would advance one row per
+        // frame instead of one per press, and nothing in a screenshot would say why.
+        //
+        // What must never happen is asking a widget about a key at a rect from an *older* layout,
+        // which is what an unplaced rebuild would do. `place_frame` is that layout, minus the paint.
+        if self.tree.is_none() {
+            let (model, slots) = (&self.model, &mut self.slots);
+            let root = self.tree.get_or_insert_with(|| {
+                slots.begin_frame();
+                A::view(model, slots)
+            });
+            crate::layout::place_frame(root, screen, &mut self.cache, theme);
+        }
+        // Scoped so every borrow of a field is finished before `send` wants all of `self`. The two
+        // inside — `self.clip` mutably for the context, `self.model` immutably for the queue — are
+        // disjoint fields, which is the only reason both can be live at once.
+        let (handled, produced) = {
+            let Some(root) = self.tree.as_ref() else { return Handled::Ignored };
+            let mut cx = KeyCtx::new(theme, self.clip.as_mut());
+            let handled = crate::layout::dispatch_key(root, ev, &self.cache, &mut cx);
+            // Drained on every key, not only on a consumed one: a widget is allowed to produce a
+            // message and still leave the key for something else, and a queue emptied on some paths
+            // and not others is a message that arrives on whichever later press happens to drain it.
+            (handled, A::outbox(&self.model).map(Outbox::take).unwrap_or_default())
+        };
         // No `invalidate()` when a widget took it: what changed is slot state — a caret, an
         // offset — which the next `view` reads through the same `Rc` it always had. Rebuilding
         // would throw away a tree that is still correct and allocate to produce an identical one.
@@ -268,7 +331,17 @@ impl<A: DeclarativeApp> symbian_ui::App for DeclarativeAppBridge<A> {
         // `Ignored` for a key nothing answered is what tells the host not to repaint, and a
         // full-screen blit for a press that changed nothing is the difference between a screen that
         // feels immediate and one that does not.
-        handled
+        if produced.is_empty() {
+            return handled;
+        }
+        for msg in produced {
+            // The same path a softkey takes: `update`, then invalidate, then whatever `Cmd` asked
+            // for. A widget's decision is not a second way for the model to change.
+            self.send(msg);
+        }
+        // The model moved, whatever the widget said about the key itself — so the host has to
+        // repaint, and `Ignored` here would be a screen that lags one press behind.
+        Handled::Consumed
     }
 
     fn draw(&mut self, c: &mut Canvas<'_>, theme: &Theme<'_>) {
@@ -668,6 +741,41 @@ mod tests {
         }
         assert!(b.take_effects().is_empty());
         assert_eq!(b.model().updates, 1, "frames must not re-run update either");
+    }
+
+    #[test]
+    fn a_model_built_outside_is_never_a_second_init() {
+        // The reason `with_model` exists at all, and the reason it does not build one and throw it
+        // away: this app's live initialiser opens a connection and arms a timer. Running it for a
+        // model nobody keeps is a socket nobody owns.
+        use core::sync::atomic::{AtomicU32, Ordering};
+        static INITS: AtomicU32 = AtomicU32::new(0);
+
+        struct Counted;
+        impl DeclarativeApp for Counted {
+            type Model = i32;
+            type Message = ();
+            type Screen = ();
+            const TITLE: &'static str = "Counted";
+            fn init() -> i32 {
+                INITS.fetch_add(1, Ordering::Relaxed);
+                -1
+            }
+            fn update(_m: &mut i32, _msg: ()) -> Cmd {
+                Cmd::None
+            }
+            fn view(_m: &i32, _slots: &mut SlotTable) -> Node {
+                Node::leaf(Mirror(0))
+            }
+        }
+
+        let given = DeclarativeAppBridge::<Counted>::with_model(7);
+        assert_eq!(*given.model(), 7);
+        assert_eq!(INITS.load(Ordering::Relaxed), 0, "with_model ran the app's initialiser");
+
+        let defaulted = DeclarativeAppBridge::<Counted>::new();
+        assert_eq!(*defaulted.model(), -1, "and the ordinary constructor still uses it");
+        assert_eq!(INITS.load(Ordering::Relaxed), 1);
     }
 
     #[test]

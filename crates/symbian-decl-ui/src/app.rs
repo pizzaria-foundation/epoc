@@ -43,6 +43,7 @@ use symbian_ui::KeyEvent;
 
 use crate::cmd::Cmd;
 use crate::keys::Softkeys;
+use crate::outbox::Outbox;
 use crate::slot::SlotTable;
 use crate::widgets::Node;
 
@@ -131,6 +132,29 @@ pub trait DeclarativeApp {
     /// The table is begun and ended by the bridge. An app that had to remember `begin_frame` is an
     /// app whose state silently stops persisting when it forgets.
     fn view(model: &Self::Model, slots: &mut SlotTable) -> Node;
+
+    /// Where widgets leave messages for [`update`](Self::update), if this app has any that do.
+    ///
+    /// A widget answers a key with [`Handled`](symbian_ui::Handled) and nothing else, which is all
+    /// every widget in the catalogue needs — what they change on a key is their own slot state. A
+    /// widget that answers a key with a *decision* has nowhere to put it, and the adapter around a
+    /// hand-written screen ([`Imperative`](crate::widgets::Imperative)) is exactly that case: the
+    /// old screen hands back `(Handled, Action)` and the action has to reach `update`.
+    ///
+    /// So the queue lives on the model and this hook points at it. The bridge drains it immediately
+    /// after the key walk and feeds each message through the same path a softkey takes — see
+    /// [`crate::outbox`] for why the bridge drains it rather than the app.
+    ///
+    /// ```ignore
+    /// fn outbox(m: &Model) -> Option<&Outbox<Msg>> { Some(&m.out) }
+    /// ```
+    ///
+    /// The default is `None`, which is the honest answer for a screen built entirely out of the
+    /// catalogue: nothing in it produces a message the softkeys and [`on_key`](Self::on_key) do not
+    /// already carry.
+    fn outbox(_model: &Self::Model) -> Option<&Outbox<Self::Message>> {
+        None
+    }
 
     /// The navigation stack moved; `top` is where the app is now, or `None` at the root.
     ///

@@ -84,6 +84,21 @@ impl<M: Clone> Softkeys<M> {
         ]
     }
 
+    /// The same bar, with every message put through `f`.
+    ///
+    /// For a screen that owns its softkeys and an application that owns the enum they arrive in: a
+    /// migrating app wraps a screen's messages in a variant of its own — `Msg::Chats(..)` — and the
+    /// bar has to travel with them. Written by hand that is three `Option::map`s and a struct
+    /// literal per screen, and the one slot somebody forgets is a key that stops working.
+    ///
+    /// Labels are untouched. This changes who a message is addressed to, never what it says.
+    pub fn map<N: Clone>(self, f: impl Fn(M) -> N) -> Softkeys<N> {
+        let one = |d: Option<SoftkeyDef<M>>| {
+            d.map(|d| SoftkeyDef { label: d.label, msg: f(d.msg) })
+        };
+        Softkeys { options: one(self.options), action: one(self.action), back: one(self.back) }
+    }
+
     /// The message this key press means, if it means one.
     ///
     /// The mapping, and the reason this function exists rather than each screen writing it out:
@@ -171,6 +186,25 @@ mod tests {
         assert_eq!(bar().dispatch(press(Key::Down)), None);
         assert_eq!(bar().dispatch(press(Key::Char('a'))), None);
         assert_eq!(bar().dispatch(press(Key::Backspace)), None);
+    }
+
+    #[test]
+    fn a_bar_can_be_readdressed_without_losing_a_slot() {
+        // A migrating app wraps a screen's messages in a variant of its own. Every slot has to make
+        // the journey: the one that is forgotten by hand is a key that silently stops working.
+        #[derive(Clone, Debug, PartialEq, Eq)]
+        enum Outer {
+            Screen(Msg),
+        }
+        let mapped = bar().map(Outer::Screen);
+        assert_eq!(mapped.labels(), [Some("Refresh"), Some("Open"), Some("Back")]);
+        assert_eq!(mapped.dispatch(press(Key::Softkey(Softkey::Left))), Some(Outer::Screen(Msg::Refresh)));
+        assert_eq!(mapped.dispatch(press(Key::Select)), Some(Outer::Screen(Msg::Open)));
+        assert_eq!(mapped.dispatch(press(Key::End)), Some(Outer::Screen(Msg::Back)));
+        // An empty slot stays empty rather than becoming a key that does nothing.
+        let partial = Softkeys::new().back("Back", Msg::Back).map(Outer::Screen);
+        assert_eq!(partial.labels(), [None, None, Some("Back")]);
+        assert_eq!(partial.dispatch(press(Key::Select)), None);
     }
 
     #[test]

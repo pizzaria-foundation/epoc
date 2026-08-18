@@ -50,6 +50,7 @@ pub mod constraints;
 pub mod keys;
 pub mod layout;
 pub mod length;
+pub mod outbox;
 pub mod widget;
 
 pub use app::DeclarativeApp;
@@ -60,6 +61,7 @@ pub use constraints::Constraints;
 pub use keys::{SoftkeyDef, Softkeys};
 pub use layout::{draw_frame, draw_tree, layout_tree, measure_tree, Axis, CrossAlign, MainAlign};
 pub use length::Length;
+pub use outbox::Outbox;
 pub use widget::{Widget, WidgetHash};
 
 /// Re-exported so a screen needs one `use` rather than three.
@@ -70,5 +72,5 @@ pub mod slot;
 pub mod theme;
 pub mod widgets;
 
-pub use widgets::{Column, Group, Node, Row, Spacer};
+pub use widgets::{Column, Group, Imperative, Node, Row, Spacer};
 pub mod overflow;

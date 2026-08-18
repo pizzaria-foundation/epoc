@@ -44,7 +44,7 @@ use core::cell::Cell;
 use core::cell::RefCell;
 
 use symbian_gfx::{Canvas, Rect, Size};
-use symbian_ui::{chrome, Handled, KeyEvent, ListState, Rows, Theme, Uniform};
+use symbian_ui::{chrome, Handled, Key, KeyEvent, ListState, Rows, Theme, Uniform};
 
 use crate::layout::MainAlign;
 
@@ -127,6 +127,23 @@ pub struct ScrollList {
     /// last frame simply misses on its digest and re-measures, which is a cost, not a bug.
     cache: Rc<RefCell<UiCache>>,
     row: Box<RowFn>,
+    /// Where the cursor went, for a list that moves its own. See [`ScrollList::on_move`].
+    moved: Option<Box<dyn Fn(usize)>>,
+    /// A navigation key that had nowhere to go. See [`ScrollList::on_edge`].
+    edge: Option<Box<dyn Fn(Edge)>>,
+}
+
+/// Which end of a list a key ran into.
+///
+/// Reported by [`ScrollList::on_edge`], which exists for the one thing a clamped cursor cannot say:
+/// the dialog list asks the server for another page when Down is pressed on the last row, and a
+/// selection that simply refused to move looks identical to one that never got the key.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum Edge {
+    /// Up or page-up, already at the first row. A transcript pages *older* here.
+    Top,
+    /// Down or page-down, already at the last row. A dialog list asks for the next page.
+    Bottom,
 }
 
 impl ScrollList {
@@ -150,6 +167,8 @@ impl ScrollList {
             state,
             cache,
             row: Box::new(|_, _| Node::leaf(Empty)),
+            moved: None,
+            edge: None,
         }
     }
 
@@ -216,6 +235,58 @@ impl ScrollList {
     /// How to build the widget for a row. Called only for rows on screen.
     pub fn row(mut self, f: impl Fn(usize, bool) -> Node + 'static) -> Self {
         self.row = Box::new(f);
+        self
+    }
+
+    /// Move the cursor here, and tell the app where it went.
+    ///
+    /// # Why a list is ever allowed to move its own cursor
+    ///
+    /// [`focused`](Self::focused) states the rule this bends: the model owns the selection, because
+    /// two owners drift. The rule has one problem, and it is not a matter of taste — moving a cursor
+    /// correctly needs the *viewport*. `Left` and `Right` are page keys in
+    /// [`ListState::handle_key`], a page is "how many rows fit on screen", and the model does not
+    /// know how tall the band is. An `update` that paged would be guessing at a number only the
+    /// layout knows, which is the same objection [`crate::slot`] makes about scroll offsets.
+    ///
+    /// So the list moves the cursor — it has the rect, so it has the viewport — and hands the new
+    /// index straight back to the app, which records it in the model like any other message:
+    ///
+    /// ```ignore
+    /// let out = m.out.clone();
+    /// ScrollList::new(slots, n, row_h)
+    ///     .selected(m.selected)                      // the model still drives it
+    ///     .on_move(move |i| out.push(Msg::Select(i))) // and is told where it moved to
+    /// ```
+    ///
+    /// That is one owner, not two: the model holds the value and the list is the only thing that
+    /// changes it. The closure pushes into an [`Outbox`](crate::outbox::Outbox) — a `dyn Fn(usize)`
+    /// rather than a message and a queue, so this widget never learns the app's message type.
+    ///
+    /// Implies [`focused`](Self::focused): a list that reports movement has to be doing the moving.
+    /// Do not *also* claim `Up`/`Down` in [`DeclarativeApp::on_key`](crate::app::DeclarativeApp::on_key)
+    /// — that runs first, so the app would win and this would silently never fire.
+    pub fn on_move(mut self, f: impl Fn(usize) + 'static) -> Self {
+        self.moved = Some(Box::new(f));
+        self.focused = true;
+        self
+    }
+
+    /// A navigation key arrived with nowhere left to go.
+    ///
+    /// The dialog list's pagination: `chats.rs` asks the server for another page when Down is
+    /// pressed on the last row, and a clamped cursor cannot report that — nothing moved, so
+    /// [`on_move`](Self::on_move) is silent, and the press is indistinguishable from one that landed
+    /// on a list already at rest.
+    ///
+    /// Fires *instead of* a move, never as well: it is the answer to "this key had no effect on the
+    /// selection". The key is still consumed, exactly as [`ListState::handle_key`] consumes a
+    /// clamped arrow — the app asked for a page, which is something happening.
+    ///
+    /// Also implies [`focused`](Self::focused), for the same reason.
+    pub fn on_edge(mut self, f: impl Fn(Edge) + 'static) -> Self {
+        self.edge = Some(Box::new(f));
+        self.focused = true;
         self
     }
 
@@ -357,10 +428,43 @@ impl Widget for ScrollList {
         }
         // `rect.height()` and not the content band: the scrollbar gutter is taken off the width,
         // never the height, and there is no theme here to ask for its width anyway.
-        let mut st = self.state.get();
+        // Reconciled against this frame's rows *before* the key, not after: the app may have moved
+        // the selection since the last draw, and moving from a stale cursor is how a list scrolls
+        // from where it used to be. `sync` also clamps a selection left dangling by deleted rows.
+        let mut st = self.sync(rect.height());
+        let before = st.selected;
         let out = st.handle_key(ev, &self.rows, rect.height());
         self.state.set(st);
+        if out != Handled::Consumed {
+            return out;
+        }
+        match (st.selected == before, &self.moved, &self.edge) {
+            // It moved, and somebody wants to know where to.
+            (false, Some(report), _) => report(st.selected),
+            // It did not, so this key ran into an end. Which end is decided by the key rather than
+            // by the position, because a one-row list is at both at once and `Down` still means
+            // "further on" — which is where another page would be.
+            (true, _, Some(report)) => {
+                if let Some(edge) = edge_of(ev) {
+                    report(edge);
+                }
+            }
+            _ => {}
+        }
         out
+    }
+}
+
+/// Which end a navigation key was reaching for, or `None` if it was not a navigation key.
+///
+/// Reads the key rather than the position, so a list with one row — which is at the top and the
+/// bottom simultaneously — still reports `Bottom` for Down, which is the direction another page
+/// would come from.
+fn edge_of(ev: KeyEvent) -> Option<Edge> {
+    match ev.key {
+        Key::Up | Key::Left => Some(Edge::Top),
+        Key::Down | Key::Right => Some(Edge::Bottom),
+        _ => None,
     }
 }
 
@@ -377,6 +481,145 @@ impl Widget for Empty {
 
 #[cfg(test)]
 mod tests {
+    // ---- a list that moves its own cursor ---------------------------------------------------------
+
+    /// The list, the reports it made, and the state behind it — assembled once per test.
+    fn reporting(
+        slots: &mut SlotTable,
+        count: usize,
+        selected: usize,
+    ) -> (ScrollList, Rc<RefCell<Vec<usize>>>, Rc<RefCell<Vec<Edge>>>) {
+        let moves: Rc<RefCell<Vec<usize>>> = Rc::new(RefCell::new(Vec::new()));
+        let edges: Rc<RefCell<Vec<Edge>>> = Rc::new(RefCell::new(Vec::new()));
+        let (m, e) = (moves.clone(), edges.clone());
+        let list = ScrollList::new(slots, count, ROW)
+            .selected(selected)
+            .on_move(move |i| m.borrow_mut().push(i))
+            .on_edge(move |edge| e.borrow_mut().push(edge));
+        (list, moves, edges)
+    }
+
+    #[test]
+    fn a_reporting_list_says_where_its_cursor_went() {
+        let mut slots = SlotTable::new();
+        slots.begin_frame();
+        let (list, moves, edges) = reporting(&mut slots, 10, 3);
+        crate::widget::with_key_ctx(|cx| {
+            assert_eq!(list.handle_key(press(Key::Down), viewport(), cx), Handled::Consumed);
+        });
+        assert_eq!(*moves.borrow(), alloc::vec![4]);
+        assert!(edges.borrow().is_empty(), "it moved, so it did not run into anything");
+        assert_eq!(list.selection(), 4);
+    }
+
+    #[test]
+    fn the_page_keys_move_by_a_viewport_the_model_could_not_have_known() {
+        // The reason a list is allowed to move its own cursor at all: `Left`/`Right` page by "how
+        // many rows fit", which is a layout fact. H/ROW rows fit here.
+        let mut slots = SlotTable::new();
+        slots.begin_frame();
+        let (list, moves, _) = reporting(&mut slots, 100, 0);
+        crate::widget::with_key_ctx(|cx| {
+            list.handle_key(press(Key::Right), viewport(), cx);
+        });
+        let page = *moves.borrow().first().expect("a page key reported nothing");
+        assert!(page > 1, "a page is more than one row");
+        assert!(page <= (H / ROW) as usize, "and no more than a screenful");
+    }
+
+    #[test]
+    fn down_on_the_last_row_reports_the_bottom_rather_than_a_move() {
+        // The dialog list's pagination. Nothing moved, so `on_move` is silent — and a press that
+        // changed nothing is exactly what asking for another page looks like from here.
+        let mut slots = SlotTable::new();
+        slots.begin_frame();
+        let (list, moves, edges) = reporting(&mut slots, 10, 9);
+        crate::widget::with_key_ctx(|cx| {
+            assert_eq!(list.handle_key(press(Key::Down), viewport(), cx), Handled::Consumed);
+        });
+        assert!(moves.borrow().is_empty());
+        assert_eq!(*edges.borrow(), alloc::vec![Edge::Bottom]);
+    }
+
+    #[test]
+    fn up_on_the_first_row_reports_the_top() {
+        let mut slots = SlotTable::new();
+        slots.begin_frame();
+        let (list, moves, edges) = reporting(&mut slots, 10, 0);
+        crate::widget::with_key_ctx(|cx| {
+            list.handle_key(press(Key::Up), viewport(), cx);
+        });
+        assert!(moves.borrow().is_empty());
+        assert_eq!(*edges.borrow(), alloc::vec![Edge::Top]);
+    }
+
+    #[test]
+    fn a_one_row_list_still_has_two_ends() {
+        // It is at the top and the bottom at once, so the *key* decides which end was reached.
+        // Deciding from the position would make `Down` on a single row report `Top`.
+        let mut slots = SlotTable::new();
+        slots.begin_frame();
+        let (list, _, edges) = reporting(&mut slots, 1, 0);
+        crate::widget::with_key_ctx(|cx| {
+            list.handle_key(press(Key::Down), viewport(), cx);
+            list.handle_key(press(Key::Up), viewport(), cx);
+        });
+        assert_eq!(*edges.borrow(), alloc::vec![Edge::Bottom, Edge::Top]);
+    }
+
+    #[test]
+    fn a_key_that_is_not_navigation_reports_nothing_and_is_not_taken() {
+        let mut slots = SlotTable::new();
+        slots.begin_frame();
+        let (list, moves, edges) = reporting(&mut slots, 10, 3);
+        crate::widget::with_key_ctx(|cx| {
+            assert_eq!(list.handle_key(press(Key::Char('a')), viewport(), cx), Handled::Ignored);
+            assert_eq!(list.handle_key(press(Key::Select), viewport(), cx), Handled::Ignored);
+        });
+        assert!(moves.borrow().is_empty());
+        assert!(edges.borrow().is_empty(), "Select is the action key, not an end of the list");
+    }
+
+    #[test]
+    fn an_unfocused_list_reports_nothing_because_it_never_sees_the_key() {
+        // The default. `on_move` turns focus on for you; without either, the model is the only thing
+        // moving the cursor and this widget must not answer arrows at all.
+        let mut slots = SlotTable::new();
+        slots.begin_frame();
+        let list = ScrollList::new(&mut slots, 10, ROW).selected(3);
+        crate::widget::with_key_ctx(|cx| {
+            assert_eq!(list.handle_key(press(Key::Down), viewport(), cx), Handled::Ignored);
+        });
+        // Untouched: `sync` runs in `draw` and in a focused `handle_key`, and neither happened —
+        // so the slot still holds the initial cursor rather than the model's, which is exactly what
+        // "this widget did nothing" looks like from outside.
+        assert_eq!(list.selection(), 0, "the cursor moved behind the model's back");
+    }
+
+    #[test]
+    fn the_cursor_starts_from_where_the_model_left_it() {
+        // A key can arrive before the next draw, so the widget's own state may be a frame behind
+        // what the model says. Moving from the stale value is how a list jumps back to where it was
+        // two presses ago.
+        let mut slots = SlotTable::new();
+        slots.begin_frame();
+        let (list, moves, _) = reporting(&mut slots, 20, 0);
+        crate::widget::with_key_ctx(|cx| {
+            list.handle_key(press(Key::Down), viewport(), cx);
+        });
+        assert_eq!(*moves.borrow(), alloc::vec![1]);
+
+        // Next frame: the app decided the selection is 10, and the key that follows moves from
+        // there rather than from 1.
+        slots.begin_frame();
+        let (list, moves, _) = reporting(&mut slots, 20, 10);
+        crate::widget::with_key_ctx(|cx| {
+            list.handle_key(press(Key::Down), viewport(), cx);
+        });
+        assert_eq!(*moves.borrow(), alloc::vec![11]);
+    }
+
+
     use super::*;
     use alloc::rc::Rc;
     use alloc::vec::Vec;
