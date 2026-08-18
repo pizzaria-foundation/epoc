@@ -57,13 +57,13 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use symbian_gfx::{Canvas, Color, Edges, Rect, Size};
-use symbian_ui::Theme;
+use symbian_ui::{Handled, KeyEvent, Theme};
 
 use crate::cache::UiCache;
 use crate::constraints::Constraints;
 use crate::layout::{draw_group, layout_group, measure_group, Axis, CrossAlign, MainAlign};
 use crate::length::Length;
-use crate::widget::{hash_bytes, hash_i32, Widget, WidgetHash};
+use crate::widget::{hash_bytes, hash_i32, KeyCtx, Widget, WidgetHash};
 
 /// One position in the tree: something that draws itself, or something that arranges others.
 pub enum Node {
@@ -420,6 +420,29 @@ impl Widget for Group {
         draw_group(self, 0, &scratch, c, theme);
     }
 
+    /// Offer a key to everything inside, at the rects this group would draw them at.
+    ///
+    /// Reached only when a group is used as a plain widget — [`Screen::content`](crate::widgets::Screen::content)
+    /// takes a `Box<dyn Widget>`, so a screen whose content is a row or a column arrives here. Without
+    /// it the default applied and the answer was `Ignored`: every widget below a container handed to a
+    /// screen was unreachable by any key.
+    ///
+    /// That is not hypothetical. The launcher's settings screen is a strip of tabs above a panel of
+    /// rows — one column, two bands — and the first frame of it drew correctly and answered nothing at
+    /// all. Every screen before it had a single leaf for content, so the gap sat there unnoticed.
+    ///
+    /// The scratch layout is the same bargain [`draw`](Self::draw) makes and for the same reason: a
+    /// group asked to act as a leaf has no cache of its own, so it measures and places into a
+    /// throwaway one. That is a cost, not a mistake — and the rects it produces are the rects it would
+    /// draw at, which is the only property a key walk needs.
+    fn handle_key(&self, ev: KeyEvent, rect: Rect, cx: &mut KeyCtx<'_>) -> Handled {
+        let mut scratch = UiCache::with_capacity(self.slots);
+        let offer = Constraints::tight(rect.width(), rect.height());
+        measure_group(self, 0, offer, cx.theme, &mut scratch);
+        layout_group(self, 0, rect, &mut scratch);
+        crate::layout::dispatch_key_group(self, 0, ev, &scratch, cx)
+    }
+
     /// A group's share of its own parent's line, for the case where the parent is another group
     /// and reads it through [`Node::weight`] instead.
     ///
@@ -490,6 +513,49 @@ mod tree_tests {
         assert_eq!(inner.content_hash(), 0);
         let outer = Column::new().child(Spacer::new().width(3)).group(inner);
         assert_eq!(outer.content_hash(), 0, "an ancestor that cached would silence the child");
+    }
+
+    #[test]
+    fn a_group_used_as_a_leaf_still_hands_keys_to_its_children() {
+        // The gap this closes: `Screen::content` takes a widget, so a screen whose content is a column
+        // arrives at `Group`'s own `Widget` impl — which had no `handle_key`, so the default said
+        // `Ignored` and nothing inside a container on a screen could ever be pressed. The launcher's
+        // settings screen is exactly that shape and answered no keys at all.
+        use core::cell::Cell;
+
+        struct Taker(alloc::rc::Rc<Cell<Option<Rect>>>);
+        impl Widget for Taker {
+            fn content_hash(&self) -> WidgetHash {
+                hash_i32(0, 7)
+            }
+            fn measure(&self, c: Constraints, _t: &Theme<'_>) -> Size {
+                c.constrain(Size::new(c.max_w, 10))
+            }
+            fn draw(&self, _c: &mut Canvas<'_>, _r: Rect, _t: &Theme<'_>) {}
+            fn handle_key(&self, _ev: KeyEvent, rect: Rect, _cx: &mut KeyCtx<'_>) -> Handled {
+                self.0.set(Some(rect));
+                Handled::Consumed
+            }
+        }
+
+        let seen = alloc::rc::Rc::new(Cell::new(None));
+        let column = Column::new()
+            .stretch_width()
+            .align(CrossAlign::Stretch)
+            .child(Spacer::new().height(20))
+            .child(Taker(seen.clone()));
+
+        let rect = Rect::from_xywh(0, 0, 100, 60);
+        crate::widget::with_key_ctx(|cx| {
+            assert_eq!(
+                column.handle_key(KeyEvent::new(symbian_ui::Key::Down), rect, cx),
+                Handled::Consumed,
+                "the key never reached the child"
+            );
+        });
+        // And at the rect the child would have been *drawn* at — below the spacer, not at the top of
+        // the group. A key answered at the wrong rect is the failure this walk has to avoid.
+        assert_eq!(seen.get(), Some(Rect::from_xywh(0, 20, 100, 10)));
     }
 
     #[test]
