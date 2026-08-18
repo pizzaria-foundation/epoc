@@ -51,16 +51,81 @@ the driver's completions are not keys and are not the bridge's to route. After a
 model"; the adapter pushes the same message after a key it consumed, and that is what stops backing
 out of a conversation from showing a blank screen.
 
-**Measured, once, as the plan asks.** Device build, `telegram.exe`: 404,708 → 425,568 bytes,
-**+20,860 (+5.2%)** — marginally past the "≤ 5%" criterion, and worth reading before anyone trims it.
+**Measured, per stage, as the plan asks.** Device build, `telegram.exe`: 404,708 bytes before any of
+this; **425,568 (+5.2%)** with the adapter, the bridge and the dialog list; **431,488 (+1.4%)** with
+the login screens; **435,136 (+0.8%)** with the conversation — **+7.5% in total**. Only the first
+stage is past the "≤ 5%" criterion, and it is the one worth reading before anyone trims anything: it
+paid for the whole layer at once.
 The baseline has `chats.rs` linked and all of `symbian-decl-ui` swept out by `--gc-sections`, because
 nothing referenced it; this build has the layout engine, the widget catalogue, the bridge and the
 adapter linked *for real* and `chats.rs` swept out instead. It is the cost of the first screen and
 almost all of it is the cost of the only screen — the next four add rows to a table that is already
-there. Idle frames still measure nothing: `an_idle_frame_does_not_re_measure_the_adapter`.
+there — the second stage's 5,920 bytes for a whole screen is what that looks like once the table
+exists. Idle frames still measure nothing: `an_idle_frame_does_not_re_measure_the_adapter`.
 
-**Not started — the other screens.** `tg`'s login, conversation and viewer run through the adapter,
-unchanged and untranslated. `home` does not depend on the crate at all.
+**Done — `tg`'s login screens.** All three, plus the waiting screen, compared in **seventeen** states
+by `examples/login_parity.rs` and identical in every one. What the stage needed beyond the screens
+themselves:
+
+- **One drawing of a text field.** `chrome::text_field` — the box, the `+`, the mask, the selection
+  and the caret — called by `login.rs` *and* by `symbian-decl-ui`'s `TextField`. They drew different
+  fields before (a stroked rectangle, a caret in another place), so the declarative login screen could
+  never have been compared with the one it replaces. Two drawings of one control is the same defect as
+  two routings of one key. The refactor was verified by rendering the three login previews before and
+  after: byte-identical.
+- **`widgets::Stack`.** The panel is centred in the whole content band and the status line is written
+  *over* the bottom of it; as a column the two compete for the axis and the block sits half a line
+  high. Layers are what the hand-written screen actually does.
+- **`Screen::keep_softkey_band`.** With no connection there is no "Avançar" to offer, and the
+  hand-written screen still draws the bar — on S60 it is furniture. Without this the band's seventeen
+  pixels went to the content and everything centred in it moved.
+- **`TextField::with_buffer`**, and `login::Field` — the field's buffer is an `Rc` the application
+  holds. The submit key is a *softkey*, so it is answered by `on_key` and turned into a message, and by
+  the time `update` runs there is no widget to read the text from. A slot cannot be reached from
+  `update`; a handle can. One buffer serves the declarative screen and the reference.
+- **A clipboard on the bridge.** The hand-written screen reached for `symbian_app::SystemClipboard`
+  itself; a declarative field pastes through `KeyCtx`. Without `Shell::new` handing one over, the login
+  field would have been the one field on the phone that cannot paste — silently. The simulator now gets
+  a `MemClipboard`, so paste works there too.
+
+Two behaviours are preserved *and* flagged rather than tidied, both in `login_decl::on_key`: the phone
+screen answers an unlabelled right softkey, and the middle key submits even when its label is hidden
+for want of a connection. Both are keys doing what the bar does not say, which is what this crate's
+`keys` module exists to prevent; both are the original's, and fixing either changes the pixels the
+comparison is measuring against. The fix belongs in its own change, with the scenes updated on purpose.
+
+**Done — `tg`'s conversation.** Compared in **thirteen** states and identical in every one. The
+transcript and the composer stay hand-written, as the plan says: they are drawn by
+`Conversation::draw_transcript` and `draw_composer` — the same functions the shipping screen calls —
+inside two leaf widgets that do nothing but place them. What became declarative is the chrome: the
+title bar, the two bands and the softkey bar, with the band arithmetic now `Frame::split` plus the
+footer's measured height instead of a second copy of it.
+
+Three findings, in order of how much they cost:
+
+- **`Screen`'s footer band was inverted, and had no test at all.** `split_bottom` answers *bottom
+  first*; `content_and_footer` read it the other way round, so the footer got the whole panel and the
+  content got a strip as tall as the footer wanted. The band was added for "the one screen shape that
+  needs it" and this is that screen — the first frame drew a composer over the whole conversation with
+  one chat bubble beneath it. Fixed, with four tests that pin the geometry rather than the names.
+- **A widget can go stale in the *description*, not just in its own state.** The bridge does not
+  rebuild the view for a key a widget consumed, which is right for a caret and wrong for the first
+  character typed into this composer: the "Enviar" label lives in the tree. `conv_decl::ViewState`
+  lists everything `view` reads out of the conversation — the note and whether the composer is empty —
+  and the transcript widget compares it across a key. Anything added to that view has to be added
+  there too. The comparison harness *cannot* find this: it renders one state and builds a fresh tree
+  for it. `examples/preview.rs` found it, because it presses keys and then draws, which is the order
+  the device uses.
+- **The red key stopped closing the application**, on every screen that had left the adapter, because
+  the global `End` arm lived in `App::on_key`. It is `Tg::on_key`'s first arm now. The login code
+  screen is what makes it sharp: its left softkey is "Voltar", so the *back* slot is empty and `End`
+  fell through to a field that ignores it.
+
+Also removed on the way past: `App::paint` cloned the entire chat — message window, inline JPEGs and
+all — on every frame of a conversation, to satisfy a borrow that splits perfectly well by field.
+
+**Not started.** `tg`'s viewer runs through the adapter, unchanged. `home` does not depend on the
+crate at all.
 
 ## The harness, first
 
@@ -165,23 +230,44 @@ like the screen. It is unreferenced by the application and referenced by the par
 header says so. Nothing in it should change again — a reference that moves to agree with what it is
 checking is not a reference.
 
-### `tg` — Login (`src/login.rs`)
+### `tg` — Login — **done**
 
-Through the adapter today, so this is a translation with a working screen underneath it rather than a
-screen to keep alive while it is written. Three `Screen`s with a declarative `TextField` each; the
-first screen that needs the key path. The digits filter is already inside the buffer (`TextField::accepting`, and `login.rs`'s `digits_field`),
-so it survives a paste. Submit reads the text through `TextField::buffer()`. The "show password" eye
-stays on the left softkey. Scenes: each screen empty and filled, masked and revealed, the error line,
-`Waiting` with a status, a visible text selection, both themes.
+Three screens and the waiting screen, on screen and compared in seventeen states. `login.rs` stays for
+the same reason `chats.rs` does: it is the reference the comparison measures against, and it is now
+also the home of the login *machine*, which never moved — `login_decl` owns a description of what is
+drawn and nothing else.
 
-### `tg` — Conversation (`src/conv.rs`)
+The digits filter did survive the translation, and it survives a paste, because it was already inside
+the buffer (`TextField::accepting`) rather than in front of it. The test that says so is in `mvu`:
+pasting `+55 21 99999-0000` into the phone field leaves `5521999990000`.
 
-The transcript stays imperative — bubbles, link runs and media labels are custom drawing, which is
-the case `docs/decl-ui.md` says to leave alone — as a leaf `Widget`. The rest is declarative:
-`Screen` with the title, the transcript as content, and the composer as `footer` (that band exists
-for exactly this shape). Focus between transcript and composer is model state. `Ctrl+C` copying the
-highlighted message or focused link stays in the screen, not the field. Scenes: focus in each place,
-a focused link, media, wrapped text, the note line, an empty chat, both themes.
+The one inconsistency found and deliberately kept: the code screen's "Voltar" clears the number, while
+every other route back to the phone screen pre-fills it from the last one used. That is the original's
+behaviour, a pixel comparison cannot see it, and it is written down in `Login::back_to_phone` for
+whoever decides to fix it on both paths at once.
+
+### `tg` — Conversation — **done**
+
+Thirteen scenes, compared and identical: focus in each half, an older message selected, a focused
+link, media, wrapped text, the note line, an empty chat, text in the composer with focus in the
+transcript, and both palettes over the two scenes with the most colour in them.
+
+Two things about this one are worth knowing before the next screen.
+
+**The comparison lives in `src/conv_decl.rs`, not in `examples/`.** This screen's state cannot be
+assembled from outside the crate — the screen enum is private, and a link cursor is reached by walking
+the transcript with keys — so an example would have needed a public constructor per scene. Inventing
+API so that a test can exist is how a test starts deciding what the code looks like. It runs under
+`cargo test` like the other two and writes the same pictures.
+
+**The action key is routed by the application, by focus.** `Screen` offers a key to its softkey bar
+before its content, so a labelled action can never reach the transcript — leaving it unclaimed would
+make Select do nothing at all whenever there was text in the composer. So `conv_decl::on_key` claims
+it and sends `Activate` or `Send` depending on which half has focus, and *what* the activation means
+is still `Conversation::activate`. That function lost its font in the process: the note it used to
+write — `abrindo [🖼 47 KB]…`, built by `media_label`, which asks the atlas which glyphs it has — was
+never visible, because every path that follows it reports again within the same keypress. `update` has
+no theme by design, and this is the first place that mattered.
 
 ### `tg` — Viewer
 
@@ -203,7 +289,7 @@ the unclosable `(home)` row, CPU measured and unmeasured).
 ## Verification, every time
 
 1. `cargo test --workspace` in all three repos. Baseline at handoff: SDK 1103, tg 267, home 97. After
-   the adapter and the dialog list: **SDK 1141, tg 283, home 97** — and the parity example is
+   the adapter, the dialog list, the login screens and the conversation: **SDK 1154, tg 297, home 97** — and the parity example is
    registered `test = true`, so a plain `cargo test` runs the comparison and a divergence fails the
    build rather than waiting to be asked.
 2. `cargo test -p <app> --example <screen>_parity` green, with the scene count asserted.
@@ -222,10 +308,12 @@ eight screens work today. The owner chose to migrate anyway, and what makes that
 harness: every screen is compared against the one it replaces, in the states that have branches.
 Without a scene, a claim of "identical" is worth what the first one turned out to be worth.
 
-**What the first screen has not had: a phone.** The device build is green and the binary is measured,
-and every behaviour above is asserted on the host — the cursor, the green key, pagination, leaving a
-conversation, a batch of keys. None of that is the same as the list under a thumb. Step 3 of the
-verification above is still owed on this screen: install it, hold Down through the end of the list,
-open a chat with the green key, and read `epoc logcat`. The one thing to watch for is timing rather
-than layout, because timing is what the host cannot show — every path that changes the model now
-drops and rebuilds the screen description, and the adapter rebuilds it after every key it consumes.
+**What these screens have not had: a phone.** The device build is green and the binary is measured,
+and every behaviour is asserted on the host — the cursor, the green key, pagination, leaving a
+conversation, a batch of keys, typing and pasting into the number field. None of that is the same as
+the list under a thumb. Step 3 of the verification above is owed on both migrated screens: install it,
+hold Down through the end of the list, open a chat with the green key, type a number, paste one, reveal
+a password with the left softkey, walk a transcript onto a link and press Select, type a message and
+send it, and read `epoc logcat`. What to watch for is timing rather than
+layout, because timing is the thing the host cannot show — every path that changes the model now drops
+and rebuilds the screen description, and the adapter rebuilds it after every key it consumes.
