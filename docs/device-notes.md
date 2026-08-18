@@ -334,6 +334,24 @@ word, and any key the shim does not recognise is reported as `Key::Raw` rather t
 dropped, because a silently discarded event is how the Fn key stayed invisible for two
 rounds.
 
+**Ctrl is a real key here, and nothing had ever asked it a question.** The keymap dump and the
+keyprobe sweep were both about *characters*, so the Ctrl bit rode along in `iModifiers` for two
+years without one line of this repo reading it. Two things were wrong underneath, both found by
+tracing rather than by pressing keys, and both now fixed:
+
+- `Ctrl+letter` arrives as the letter's **control character** (`0x01..=0x1A`) with `EModifierCtrl`
+  set, which is below the shim's printable gate and in no key map — so it reached Rust as
+  `Key::Raw(3)`, the letter thrown away. Chords are now resolved before anything else looks at the
+  key, in `symbian_app::to_key_events`.
+- `symbian-keys` treated `ctrl` as another name for Fn (a fallback from before the shim tracked the
+  Fn key itself). So `Ctrl+M` typed `0`, from the numeric overlay, and `Ctrl+C` would have typed
+  nothing at all. The chord is now taken first, which is what puts that alias out of reach.
+
+That the key exists at all is the owner's report, not a measurement of ours: `Ctrl+C` and `Ctrl+V`
+already work in the handset's own editors. What is still unmeasured is the numbers — worth one
+`examples/keyprobe` run, where the expectation is `chr 0003` / `chr 0016` with `EModifierCtrl`
+(0x80) present in the unmasked `native` word.
+
 ## A panic that says where it was
 
 A Rust panic reaches `User::Panic(category, number)` through `shim_panic`, with the category
@@ -1309,3 +1327,254 @@ previous process. Eight phases of nothing.
 Any state a resuming diagnostic holds in memory is state it does not have. Each phase opens
 the database itself now, which costs an open per phase and cannot be wrong about a launch it
 was not present for.
+
+## App icons: three routes, and which questions are still open
+
+> Status: all three routes have now been run on the E72, and the answer is that **only route C
+> works on this handset**. Route A cannot be fixed here — not because of a bug in this code, but
+> because of what the platform does. The measurements are at the end of this section.
+
+Drawing another app's icon — the thing that turns a grid of captions into something that looks
+like a phone — has been the longest-running unknown in this SDK. The knowledge lived only in
+`shim/src/shim_apparc.cpp` comments; this is it written down, with the measured parts separated
+from the assumed ones.
+
+There are three ways to ask, and they fail differently.
+
+**A — `GetAppIcon(TSize)` into a `CApaMaskedBitmap`.** The obvious route, and the one the code has
+had all along. Three things are known about it here:
+
+- Pixels must be read with `CFbsBitmap::GetScanLine` (fbscli ord 109/110), never `GetPixel`
+  (ord 131). GDesk, a home screen that runs on this exact handset, imports the former and not the
+  latter; its E32 import table is the evidence. An earlier version used `GetPixel` and the image
+  would not run at all.
+- `CApaMaskedBitmap::Mask()` (apgrfx ord 183) is **absent**. A device test bricked the load with it
+  and loaded without it. So this route has no mask, and its icons draw as opaque rectangles.
+- `GetAppIcon` **panics the caller** — does not return an error — for an app whose icon is in a
+  non-MBM (MIF, scalable) format. Measured: GDesk, Quickword and Email all closed the probe here.
+  The guard is to call `GetAppIconSizes` first, which answers `KErrNotSupported` for those apps
+  instead of panicking, and to refuse before touching `GetAppIcon`.
+
+One question about route A is still **unmeasured**: whether `CApaMaskedBitmap::NewLC` (apgrfx
+ord 33) resolves on this handset at all. GDesk does not import it, which means only that GDesk did
+not need it. The `KERN-EXEC 3` recorded against this path came from an earlier misuse — the other
+overload, `NewL(const*)`, *copies* its argument, and it was being passed NULL — and that has been
+fixed. Nobody has run the probe since, so "the icon fetch crashes" is at present a claim about code
+that no longer exists.
+
+**B — `GetAppIcon(TInt)`.** A diagnostic, not a route: same call, the pre-rendered-size overload
+(ord 145) instead of the scaling one (ord 144), with the colour plane filled green rather than read.
+It answers one question — is the *scaling* what upsets the MIF-icon apps, or the call itself? Note
+that its `TInt` is a size *index*, not a pixel count; passing 44 indexed out of range and panicked
+every app.
+
+**C — the icon file, through `AknIconUtils`. This is the one that works.**
+`RApaLsSession::GetAppIcon(TUid, HBufC*&)` answers with the *path* of the app's registered icon file
+rather than its pixels, and `AknIconUtils::CreateIconL` + `SetSize` turn that into a bitmap and a
+mask. It sidesteps all three of route A's defects at once: no `CApaMaskedBitmap`, so ord 33 stops
+mattering; a genuine mask plane, so icons are cut out rather than square; and MIF files are just
+another input, so the apps that panic route A are ordinary.
+
+Measured: `OKC 44x44 mask real`, on `.mif` apps, repeatedly, across several apps. The size comes
+back as exactly what was asked for, the mask is genuine coverage rather than the opaque fallback,
+and the icon drawn is the app's own.
+
+Two facts make C cheap rather than exotic. `aknicon.dll` is present on the handset — it is in the
+devdump sweep (`docs/device-dump.txt`) — and `aknicon.dso` ships in the vendored S60 3.2 SDK under
+`sdk/epoc32/release/armv5/lib/`. So it is an ordinary link. It does **not** need a `.dso` synthesised
+from the firmware's ordinals, which is the technique this project elsewhere calls its riskiest line.
+
+What is still a measurement, not a constant: the **bitmap index** inside the icon file. Colour and
+mask sit at consecutive indices, but MBM files count from 0 while mifconv-generated MIF headers are
+conventionally offset (16384). `shim_app_icon_c` therefore takes the index as a parameter and
+`apps/iconprobe` puts both candidates on a dial, rather than one being baked in on a guess.
+
+### Why this is three gates and not one
+
+`USE_APPARC` compiles the safe AppArc calls — list, launch, kill — which every launcher needs.
+`USE_APPICON` adds routes A and B. `USE_AKNICON` adds route C and, with it, a library import that
+nothing else in the SDK needs.
+
+The nesting exists because of the rule recorded above: an import that does not resolve makes the
+whole image vanish, with no panic, no log and no report file. A resident home screen that vanishes
+takes the phone's usable UI with it. So the risk is taken first by `apps/iconprobe` — an ordinary,
+non-resident app that can simply be reopened — and only moves into the launcher once the handset has
+answered. `apps/iconprobe` is the only binary in the tree with `USE_AKNICON=1`.
+
+### What the handset actually did
+
+From `C:\Data\iconprobe.log`, the probe's own journal. It appends `P` before each attempt and the
+verdict after, so an attempt that never returned is recovered on the next start as `C` — which is
+the only way to record a panic, since no `TRAP` can catch one.
+
+```
+O A 2000745E 38x31                                          Adobe Reader, route A, "succeeded"
+F A 10207839 (no file: NotFound)                            this app has no icon file at all
+O A 10207839 38x31                                          ...and route A "succeeded" anyway
+F A 1000590A Z:\Resource\Apps\Speeddial_aif.mif
+C A 1000590A                                                crash
+F A 2000CD2B Z:\Resource\Apps\ap_Q0_FileManager_aif.mif
+C A 2000CD2B                                                crash
+```
+
+Four findings, in order of how much they cost to learn.
+
+**1. `aSize` is a request, not a promise.** Adobe Reader's icon came back **38x31** — not square, and
+not the 44 that was asked for. The old code hardcoded `w = h = aSize` and read that many pixels per
+row. On an icon large enough the rows merely walked sideways (the first device photo: a recognisable
+picture, skewed, with a stripe down it); on anything smaller it read past the end of the bitmap and
+took the process with it. One bug, two symptoms that look nothing alike. The size is now read back
+with `SizeInPixels` and never assumed.
+
+**2. `GetAppIconSizes` does not guard.** The SDK documents it as returning `KErrNotSupported` for an
+app whose icons are not MBM, and route A used it for exactly that. On this firmware it does not:
+Speeddial and File manager both passed the guard and then panicked inside `GetAppIcon`. The guard is
+now the icon file's **extension**, which the platform cannot answer wrongly.
+
+**3. Route A reports success for apps that have no icon.** App `10207839` has no icon file —
+`GetAppIcon(TUid, HBufC*&)` says `NotFound` — and `GetAppIcon` still returned `KErrNone` with a
+38x31 bitmap, the same size it returned for Adobe Reader. That is where "the icon loaded, but it is
+not that app's icon" came from: a default or a leftover, handed over confidently. Route A now
+declines when there is no file, because drawing a wrong icon is worse than drawing a caption.
+
+**4. This handset's app icons are MIF.** `Speeddial_aif.mif`, `ap_Q0_FileManager_aif.mif` — scalable,
+which route A cannot read by construction. Between that and finding 3, route A has no useful domain
+left on the E72: it either panics, or it answers about an app it did not read. **Use route C.**
+
+The bitmap index inside the file is **16384**, not 0 — the mifconv convention, confirmed on the
+device rather than assumed. `BITMAP_IDS` in the probe keeps both on a dial so the next handset can
+be asked rather than guessed at.
+
+### One thing left to check
+
+In the run that produced `OKC`, the probe showed caption "Adobe Reader" against UID `2000CD2B` and
+file `ap_Q0_FileManager_aif.mif`. The drawn icon looked right for the caption. Caption and UID are
+read from the same roster entry so they cannot disagree, which leaves either a genuine duplicate
+caption on this device (there are several — apps sharing a name and differing only by UID, and they
+do not behave alike) or an icon file registered against an unexpected app. Worth confirming before
+anything relies on the file path for identity rather than for diagnosis.
+
+## A HAL attribute read at the wrong id, and why nothing caught it
+
+`HALData::TAttribute` numbers its members positionally — the enum in `hal_data.h` carries no
+explicit `= value` on any enumerator — and `crates/symbian/src/hal.rs` had the ordinals hand-copied.
+From index 41 onward they were wrong:
+
+| what the table said | what that id actually is |
+|---|---|
+| 41/42 `EDisplayBrightness`, `…Max` | `EPen`, `EPenX` (brightness is 64/65) |
+| 43..51 the `EPen` family | shifted two high; the family is 41..49 |
+| 21/22 `EPowerBackupStatus`, `EPowerBackup` | the pair is the other way round |
+| 70/71/72 `ENanoTickPeriod`, `EFastCounterFrequency`, `EFastCounterCountsUp` | `EMaxRAMDriveSize`, `EKeyboardState`, `ESystemDrive` (the timing trio is 92/93/94) |
+
+So `docs/device-dump.txt` has three lines that read as measurements and are not. "ENanoTickPeriod:
+not supported" is `EMaxRAMDriveSize` declining; the `65535` under `EFastCounterCountsUp` is
+`ESystemDrive` answering. **The three timing attributes have never been read on this handset.**
+
+That matters beyond tidiness. `shim_now_us` (`shim/src/shim_time.cpp`) picks its 1000 µs-per-tick
+fallback *because* `ENanoTickPeriod` appeared to fail, and every duration this SDK prints rides on
+that. The attribute may well be supported; nobody has asked it yet.
+
+### Why the test did not catch it
+
+There was a test. It asserted that `ENanoTickPeriod` was **in the table** — by name. It passed for
+months, because the entry was there and only its id was wrong, and a wrong number reads exactly like
+a right one. A test that checks a name can catch a deletion; only one that checks the id can catch a
+lie. There are now two, in `hal.rs` and `device.rs`, both pinned against `hal_data.h`.
+
+### The method note that made this findable
+
+Every header under `sdk/epoc32/include/` trips GNU grep's binary heuristic. **`grep` without `-a`
+returns nothing at all** for these files — not "no match", *nothing* — so a search that should have
+found `class RProcess`, `EGray256` or the enum body comes back empty and reads as "does not exist".
+At least one conclusion in this project ("there is no CPU API") was drawn that way and was wrong:
+`RThread::GetCpuTime` is declared in `e32std.h` and exported from `euser.dso`. Use `grep -a` on the
+SDK headers, always.
+
+## CPU load is measurable on this handset, and the total is not the answer
+
+Two things were believed here and both were wrong. First, that Symbian offers no CPU measurement at
+all — it does: `RThread::GetCpuTime` is declared in `e32std.h` and exported from `euser.dso`.
+(The belief came from grepping the SDK headers without `-a`; see the note above.) Second, that the
+kernel might not account for it, since on some 9.x builds it is compiled out and the call answers
+`KErrNotSupported`.
+
+**Measured on the E72: it is supported. 214 threads answered.** So per-process load is obtainable,
+by differencing `GetCpuTime` across an interval and dividing by the wall clock, summed over the
+threads a `TFindThread("name*::*")` pattern matches.
+
+### The idle thread makes the obvious reading useless
+
+The probe's first run reported `Device: 100%` and kept reporting it. That is correct arithmetic and
+a worthless number: summing *every* thread includes the kernel's idle thread, whose entire job is to
+consume whatever the processor is not otherwise doing. The total therefore always equals the wall
+clock.
+
+Busy time is total minus idle:
+
+```
+  busy% = (Σ all threads Δcpu  −  idle thread Δcpu) / Δwall
+```
+
+The idle thread is `ekern.exe::Null`, matched as `*::Null`. That name is a platform convention and
+appears in no SDK header, so `symbian::cpu::IDLE_THREAD` names it in one place: if it ever stops
+matching, the sample fails and the caller reports "unknown" rather than silently calling the phone
+100% busy again. The probe shows busy and idle side by side for exactly that reason — a derived
+figure whose working is hidden is a figure nobody can check.
+
+### Also from that run
+
+A process cannot be excluded from its own report by name. The probe filtered on the string
+`"cpuprobe"` and its own row appeared anyway, because the name the kernel reports is not the one the
+source spells. Filter on the UID, which is in the full name as `[ec4c5533]`.
+
+### What is still not available
+
+Per-process **memory**. `RProcess::GetMemoryInfo` returns the static code/data section sizes from
+the ELF image — a constant per binary, identical for two instances of the same app, and unrelated to
+what it has allocated. There is no heap, chunk, or working-set figure for another process anywhere
+in the public headers. A task manager on this platform can show CPU per app and memory only for the
+device as a whole.
+
+## Opening a URL: starting an application is not the same as talking to one
+
+Measured on the E72, 2026-08-16, driving the native browser (`0x10008D39`) from the launcher.
+
+**There is no `OpenUrl` on S60.** A browser is asked to open an address by *convention*, and the
+convention has two halves that are easy to mistake for one:
+
+| The application is | The call that works |
+|---|---|
+| not running | `RApaLsSession::StartDocument` / `CApaCommandLine` with the document `"4 <url>"` |
+| already running | `TApaTask::SendMessage(TUid(0), "4 <url>")`, after `BringToForeground` |
+
+`4` is the browser's own command number for "open this URL". The message UID is not read.
+
+The second row is the one that cost time. `StartApp`, `StartDocument` and every `CApaCommandLine`
+route *start* an application; none of them does anything useful to one that is already up. The
+platform accepts the launch and reports success, nothing comes to the front, and the user sees
+whatever page was already open. **A route can answer `KErrNone` and have done nothing** — AppArc has
+no way to report otherwise, and an application that starts and ignores its command line is
+indistinguishable, from the caller, from one that honoured it.
+
+So the launcher tries the running-task path first and falls through to the starting paths. Each
+attempt is logged with its route and result (`C:\Data\logs_launcher.txt`), which makes the handset
+its own instrument: the log names the route that worked without anyone re-running a probe.
+
+`apps/urlprobe` is the isolated probe that established the symbols link and run. It can stay as the
+place to try a new route without touching the resident launcher.
+
+### A false negative worth remembering
+
+The first test looked like a failure — the browser opened its home page — and it was run with the
+network off. A browser that *received* the URL and could not load it shows the same thing as one
+that received nothing. The evidence was ambiguous and was nearly written down as a finding. **Test
+this with the radio on**, or the instrument reads a network failure as a protocol failure.
+
+### The capability and import cost is nil
+
+All four starting routes plus `SendMessage` use `RApaLsSession`, `CApaCommandLine` and
+`TApaTaskList` — every one of which the launcher already linked for `StartApp`. No new DLL, no new
+import, so the failure mode that rule about isolating risky calls exists for (an image that will not
+load, with no panic and no log) does not apply. What remains is a leave at run time, and the shim
+traps each at the `extern "C"` boundary. Launching needs no capability.

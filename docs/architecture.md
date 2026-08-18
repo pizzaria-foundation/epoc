@@ -175,3 +175,94 @@ The crash that established this: `RHandleBase::Duplicate` takes the handle to co
 `this->iHandle`, not from its argument. A default-constructed `RThread` therefore asked the
 kernel to duplicate handle 0 — `KERN-EXEC 0`, on the GUI thread, which closes the
 application. `RThread::Open(TThreadId)` has no such reading.
+
+
+## The key convention
+
+Three keys, three jobs, every screen. It is the native S60 arrangement, and that is the argument:
+the phone trained its user for a decade before we arrived, and the screen that disagrees is the one
+that feels broken.
+
+```
+  ┌──────────────────────────────────────────────┐
+  │  Options            Open            Back     │
+  └──────────────────────────────────────────────┘
+     left softkey    D-pad centre   right softkey
+     secondary       THE ACTION     way out
+```
+
+**The middle slot is not a softkey.** S60 wires it to the selection key, so it arrives as
+`Key::Select` and `Softkey::Middle` never does. A screen labels the middle slot and handles
+`Select`. This is not a hypothetical: the launcher's task manager shipped with its refresh bound to
+`Softkey::Middle`, the arm never fired, and pressing the key opened the highlighted app instead —
+the label promised one thing and the key did another.
+
+**The left softkey is options** — refresh, a mode switch, a menu. Blank when a screen has nothing
+secondary to offer, which is most of them.
+
+**The right softkey is back**, and only ever back or exit. It is the key a user presses without
+reading; making it a second action key is how an app becomes frightening.
+
+`chrome::Softkeys` builds the bar by name (`new(options, action, back)`, `action(a, back)`,
+`back(b)`) rather than as a bare array, because `[a, b, c]` reads the same whichever order the
+author meant and nothing checks it. The three constructors are pinned by a test, and the crate
+documentation in `symbian-ui` says the same thing where a reader of the API will find it.
+
+Two screens in this repo had the action on the left softkey while handling `Select` — the label was
+pointing at a key that did nothing. Both were corrected when the convention was written down, which
+is the usual way a convention pays for itself: it turns "that screen is a bit odd" into a defect
+with a name.
+
+## Copy and paste
+
+`Ctrl+C`, `Ctrl+X`, `Ctrl+V`, `Ctrl+A` and `Shift`+arrow work in every text field this SDK draws,
+and an application writes no code for any of them. The phone's own editors have had these bindings
+since 2009; a field of ours without them is the one that feels broken.
+
+```text
+  handset          symbian-app              symbian-ui            the app
+  ⌃+C  ──────▶  Key::Ctrl('c')  ──────▶  TextField::handle_key ──▶  (only if the
+  0x03 + Ctrl     the chord, resolved       selection, copy,          field ignored it)
+                  before any key map        cut, paste
+```
+
+**A chord is not text, and the type says so.** `Ctrl+C` arrives from the window server as the
+control character `0x03` — and `Ctrl+M` as `0x0D`, which is also Enter, and `Ctrl+H` as `0x08`,
+which is also Backspace. `symbian-app` resolves the chord *before* the key map and the keyboard
+layout, and reports `Key::Ctrl('c')` rather than `Key::Char('c')` with a modifier. The reason is the
+same one behind the middle-softkey rule above: every consumer of `Key::Char` — a text field, a
+list's type-to-filter, a digits-only login field — would otherwise have to remember to check
+`mods.ctrl`, and the one that forgot would type `v` when the user asked to paste. An old `match` arm
+simply stops matching instead, which the compiler notices for us.
+
+**The clipboard is an argument, not a global.** `symbian-ui` is `#![forbid(unsafe_code)]` and knows
+nothing about the device, so it cannot hold a mutable static and could not call the platform if it
+did. `TextField::handle_key` therefore takes a `&mut dyn Clipboard`; `symbian-app::SystemClipboard`
+is the device one, `NoClipboard` is for a build without it, and `MemClipboard` makes copy and paste
+an ordinary host unit test. Handing one over is the whole of an application's part in it.
+
+**A filter belongs to the field, not to the screen in front of it.** A digits-only field used to be
+enforced by the caller, which inspected `Key::Char` before passing the key on. That held only while
+typing was the only way text got in: pasted text is not keystrokes and walked straight past the
+check. `TextField::accepting` moved the rule inside, where every route in has to pass it.
+
+**A masked field never copies.** `Ctrl+C` in a password field is refused, because the phone's
+clipboard is readable by every application on it and a password left there outlives the keypress by
+a long way. Pasting *into* one is fine, and is how a password manager is used.
+
+**It is a default, and it gets out of the way.** A chord the field could not honour — an empty
+clipboard, a refused copy, a masked field — answers `Ignored` rather than `Consumed`, so a screen
+can put its own behaviour *underneath* the default instead of having to pre-empt it:
+
+```rust,ignore
+// The field copies its selection; with nothing to copy, this screen copies what the cursor is on.
+self.composer.handle_key(ev, clip).or_else(|| self.copy_highlighted(clip))
+```
+
+That is the general shape of overriding anything here, and there are three rungs of it: hand over a
+different `Clipboard` (per app, or per screen — it is an argument, not a global); take the chord
+before the field sees it; or skip `handle_key` entirely and call `paste`/`copy`/`cut`/`select_all`,
+which are public precisely so an app can keep the caret arithmetic and replace the bindings.
+`symbian-ui`'s `clip` module documents all three with an example of each. The editing keys are
+deliberately the other way round — `Backspace` in an empty field still consumes, because a field
+being typed into owns them outright.

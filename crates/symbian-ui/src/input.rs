@@ -32,6 +32,15 @@ pub enum Key {
     Call,
     /// Red key. The system captures this to close the app; treat it as advisory.
     End,
+    /// A Ctrl chord, carrying the letter in lower case: `Ctrl('v')` for Ctrl+V.
+    ///
+    /// A variant of its own rather than [`Key::Char`] with `mods.ctrl`, because a chord is not
+    /// text and the type should say so. Every consumer of `Char` — a text field, a list's
+    /// type-to-filter, a digits-only login field — would otherwise have to remember to check the
+    /// modifier, and the one that forgot would silently type `v` when the user asked to paste.
+    /// This way an old `match` arm simply stops matching, which the compiler and the user both
+    /// notice immediately.
+    Ctrl(char),
     /// A scan code we have no name for. Carried through so an app can special-case
     /// hardware keys the toolkit does not model.
     Raw(u16),
@@ -94,6 +103,23 @@ impl Handled {
         match self {
             Handled::Consumed => self,
             Handled::Ignored => other(),
+        }
+    }
+}
+
+impl From<bool> for Handled {
+    /// `true` consumed the key, `false` left it for someone else.
+    ///
+    /// For the many handlers whose real answer is "did I do anything?" — a paste with an empty
+    /// clipboard, a copy a masked field refused. Writing that as an `if` produced the same four
+    /// lines at every one of them, and the shape it invites is `Consumed` unconditionally, which
+    /// is how a key gets swallowed by a widget that ignored it.
+    #[inline]
+    fn from(did_something: bool) -> Self {
+        if did_something {
+            Handled::Consumed
+        } else {
+            Handled::Ignored
         }
     }
 }

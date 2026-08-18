@@ -68,7 +68,62 @@ pub fn title_bar(c: &mut Canvas<'_>, r: Rect, theme: &Theme<'_>, title: &str, de
     c.draw_text_in(text_area, title, theme.fonts.title, p.chrome_text, Align::Start);
 }
 
+/// The three slots of the softkey bar, in the order this SDK uses them.
+///
+/// # The convention
+///
+/// ```text
+///   ┌──────────────────────────────────────────────┐
+///   │  Options            Open            Back     │
+///   └──────────────────────────────────────────────┘
+///      left softkey    D-pad centre   right softkey
+///      secondary       THE ACTION     way out
+/// ```
+///
+/// **Middle is the action**, and it is not a softkey at all: S60 wires the centre of the D-pad to
+/// the selection key, so it arrives as [`crate::Key::Select`], never as `Softkey::Middle`. Screens
+/// therefore *label* the middle slot and handle `Select`. Getting this backwards is not a
+/// theoretical mistake — a screen in this project bound its middle label to `Softkey::Middle`, the
+/// arm never fired, and the key opened the highlighted row instead of doing what the label said.
+///
+/// **Left is options**: the secondary thing this screen offers — refresh, a menu, a mode switch.
+/// Blank when there is nothing, which is common and fine.
+///
+/// **Right is back**, always, and only ever back or exit. It is the one key a user must be able to
+/// press without reading, so it never becomes a second action key.
+///
+/// This mirrors what the native S60 applications do, which is the real argument for it: the phone
+/// has trained its user for a decade, and a launcher that disagrees is the one that feels wrong.
+pub struct Softkeys;
+
+impl Softkeys {
+    /// The standard arrangement: `(options, action, back)`.
+    ///
+    /// A named constructor rather than a bare array so the order cannot be transposed silently —
+    /// `[a, b, c]` reads the same whichever meaning you had in mind, and the compiler cannot help.
+    pub const fn new<'a>(
+        options: Option<&'a str>,
+        action: Option<&'a str>,
+        back: Option<&'a str>,
+    ) -> [Option<&'a str>; 3] {
+        [options, action, back]
+    }
+
+    /// An action and a way out, with nothing on the left. The common shape.
+    pub const fn action<'a>(action: &'a str, back: &'a str) -> [Option<&'a str>; 3] {
+        [None, Some(action), Some(back)]
+    }
+
+    /// Only a way out — for a screen that reads rather than does.
+    pub const fn back(back: &str) -> [Option<&str>; 3] {
+        [None, None, Some(back)]
+    }
+}
+
 /// Softkey bar. `labels` is left, middle, right; `None` leaves a slot blank.
+///
+/// Build them with [`Softkeys`], which documents what each slot means in this SDK and why the
+/// middle one is the D-pad centre rather than a softkey.
 ///
 /// The middle label is centred and the outer two hug their edges, which is what
 /// S60 does and therefore what muscle memory expects.
@@ -215,6 +270,19 @@ pub fn placeholder(c: &mut Canvas<'_>, area: Rect, theme: &Theme<'_>, text: &str
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_softkey_helpers_place_each_job_in_its_own_slot() {
+        // The order is the convention, and the whole reason these constructors exist: an array
+        // literal reads the same whichever meaning the author had in mind, and the compiler cannot
+        // tell you that you transposed two of them.
+        assert_eq!(Softkeys::new(Some("Options"), Some("Open"), Some("Back")),
+                   [Some("Options"), Some("Open"), Some("Back")]);
+        // The action goes in the MIDDLE, which is the D-pad centre — never on the left.
+        assert_eq!(Softkeys::action("Open", "Back"), [None, Some("Open"), Some("Back")]);
+        // Back is always the right-hand slot, alone.
+        assert_eq!(Softkeys::back("Back"), [None, None, Some("Back")]);
+    }
+
     use super::*;
     use crate::theme::{Fonts, Theme};
     use symbian_gfx::{BitmapFont, Size};

@@ -239,9 +239,12 @@ exercise or serve the SDK itself.
                    what the last boot did. Ships bootd in its package. docs/bootmanager.md
       bootd        The headless supervisor behind it, and the only executable registered
                    in the platform's start-up list
-      iconprobe    The app-icon fetch (GetAppIcon -> CApaMaskedBitmap -> GetScanLine),
-                   isolated in a non-resident app because bisecting it inside a resident
-                   home screen kept taking the home screen with it. Still unresolved
+      iconprobe    The app-icon fetch, isolated in a non-resident app because bisecting it
+                   inside a resident home screen kept taking the home screen with it.
+                   Resolved on the E72: reading the app's registered icon FILE through
+                   AknIconUtils works (right size, real mask, MIF included); the
+                   CApaMaskedBitmap route cannot work here. docs/device-notes.md has the
+                   measurements and the journal the probe keeps to survive a panic
       killhome     Escape hatch: stop a resident home screen that captures the Menu key
                    and will not close on End
       dlltest      A minimal polymorphic DLL, built to prove the toolchain can

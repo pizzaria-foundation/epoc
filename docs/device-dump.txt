@@ -90,9 +90,9 @@
   .    EDisplayContrastMax: not supported
   .    EBacklight: 1
   .    EBacklightState: not supported
-  .    EDisplayBrightness: 0
-  .    EDisplayBrightnessMax: not supported
-  .    EPen: not supported
+  .    EDisplayBrightness: 0                   <-- likewise read at 41/42, which are EPen and
+  .    EDisplayBrightnessMax: not supported    <-- EPenX; brightness is 64/65. The EPen family
+  .    EPen: not supported                     <-- below was read two ids high. Re-run pending.
   .    EPenX: 0
   .    EPenY: 0
   .    EPenDisplayOn: not supported
@@ -101,9 +101,13 @@
   .    EPenClickVolume: 0
   .    EPenClickVolumeMax: not supported
   .    EMouse: not supported
-  .    ENanoTickPeriod: not supported
-  .    EFastCounterFrequency: not supported
-  .    EFastCounterCountsUp: 65535
+  .    ENanoTickPeriod: not supported          <-- SEE NOTE BELOW: this was attribute 70,
+  .    EFastCounterFrequency: not supported    <-- which is EMaxRAMDriveSize, not this. The
+  .    EFastCounterCountsUp: 65535             <-- three timing attributes (92/93/94) have
+                                               <-- never actually been read on this handset.
+                                               <-- The 65535 is ESystemDrive (72). Corrected
+                                               <-- in crates/symbian/src/hal.rs; a re-run of
+                                               <-- devdump will replace these three lines.
 
 -- entering drives
 

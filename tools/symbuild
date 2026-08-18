@@ -154,6 +154,21 @@ if [ "${USE_SHIM:-0}" = 1 ]; then
   # resident-launcher path uses TApaTask from it unconditionally. USE_APPARC's RApaLsSession and
   # CApaCommandLine resolve from the same library, so that gate no longer adds one of its own.
   : "${SYMBIAN_LIBS:=euser apparc apgrfx cone eikcore avkon ws32 fbscli bitgdi gdi fntstr efsrv estor hal $NET_LIBS $FEP_LIBS}"
+  if [ "${USE_AKNICON:-0}" = 1 ]; then
+    # aknicon is AknIconUtils -- the icon route that reads an app's registered icon FILE, so MIF
+    # (scalable) icons work and the mask plane is real. Unlike apgrfx this is NOT in the base set:
+    # it is a library no other feature needs, and an import that does not resolve makes the whole
+    # image vanish silently (docs/device-notes.md). aknicon.dll is present on the E72 (measured,
+    # docs/device-dump.txt) and aknicon.dso ships in the SDK, but the gate stays so the risk is
+    # taken by an isolated probe first and never by a resident launcher that has not proven it.
+    SYMBIAN_LIBS="$SYMBIAN_LIBS aknicon"
+  fi
+  if [ "${USE_CLIPBOARD:-0}" = 1 ]; then
+    # bafl is CClipboard, etext is CPlainText. The clipboard is a stream store on disk and the
+    # document is what Paste knows how to read, so both are needed to put text somewhere another
+    # application can take it from.
+    SYMBIAN_LIBS="$SYMBIAN_LIBS bafl etext"
+  fi
   if [ "${USE_IMAGE:-0}" = 1 ]; then
     SYMBIAN_LIBS="$SYMBIAN_LIBS imageconversion"
   fi
@@ -427,6 +442,19 @@ if [ "${USE_SHIM:-0}" = 1 ] || [ "${USE_SHIM_DAEMON:-0}" = 1 ]; then
       shim_prop.cpp)
         [ "${USE_PROP:-0}" = 1 ] || continue
         ;;
+      # The system clipboard. Gated because it imports bafl (CClipboard) and etext (CPlainText),
+      # neither of which anything else here needs -- and an import that does not resolve makes the
+      # whole image fail to load with no panic and no log.
+      shim_clip.cpp)
+        [ "${USE_CLIPBOARD:-0}" = 1 ] || continue
+        ;;
+      # Per-thread CPU time (RThread::GetCpuTime) and the process walk around it. Gated because
+      # it is the only load measurement the platform has and nobody has yet confirmed this kernel
+      # accounts for it -- on some 9.x builds the call answers KErrNotSupported. Kept opt-in so
+      # the probe that asks is the only binary paying for the question.
+      shim_cpu.cpp)
+        [ "${USE_CPUTIME:-0}" = 1 ] || continue
+        ;;
       # Signal strength via CTelephony. Gated because it imports etel3rdparty — a load risk kept
       # out of every app that does not opt in (only the network daemon does).
       shim_tele.cpp)
@@ -538,7 +566,11 @@ if [ ${#SRCS[@]} -gt 0 ]; then
       ${USE_SQL:+$([ "$USE_SQL" = 1 ] && echo -DSHIM_USE_SQL)} \
       ${USE_PROC:+$([ "$USE_PROC" = 1 ] && echo -DSHIM_USE_PROC)} \
       ${USE_APPARC:+$([ "$USE_APPARC" = 1 ] && echo -DSHIM_USE_APPARC)} \
+      ${USE_CPUTIME:+$([ "$USE_CPUTIME" = 1 ] && echo -DSHIM_USE_CPUTIME)} \
       ${USE_APPICON:+$([ "$USE_APPICON" = 1 ] && echo -DSHIM_USE_APPICON)} \
+      ${USE_AKNICON:+$([ "$USE_AKNICON" = 1 ] && echo -DSHIM_USE_AKNICON)} \
+      ${USE_LAUNCH_DOC:+$([ "$USE_LAUNCH_DOC" = 1 ] && echo -DSHIM_USE_LAUNCH_DOC)} \
+      ${USE_CLIPBOARD:+$([ "$USE_CLIPBOARD" = 1 ] && echo -DSHIM_USE_CLIPBOARD)} \
       ${USE_TELEPHONY:+$([ "$USE_TELEPHONY" = 1 ] && echo -DSHIM_USE_TELEPHONY)} \
       ${USE_CENREP:+$([ "$USE_CENREP" = 1 ] && echo -DSHIM_USE_CENREP)} \
       ${USE_PROP:+$([ "$USE_PROP" = 1 ] && echo -DSHIM_USE_PROP)} \

@@ -1,0 +1,27 @@
+/* The localisable resource: the caption and icon the S60 menu shows. */
+
+NAME CNPR
+
+#include <eikon.rh>
+#include <appinfo.rh>
+
+RESOURCE RSS_SIGNATURE { }
+RESOURCE TBUF { buf = ""; }
+
+/* Empty on purpose: the AppUi is constructed with ENoScreenFurniture, so Avkon has no
+ * menu bar or CBA to populate — the softkey bar is drawn by the Rust toolkit. The
+ * resource is still required for Avkon to finish initialising. */
+RESOURCE EIK_APP_INFO { }
+
+RESOURCE LOCALISABLE_APP_INFO r_cpuprobe_localisable_app_info
+    {
+    short_caption = "CPU Probe";
+    caption_and_icon =
+        CAPTION_AND_ICON_INFO
+            {
+            caption = "CPU Probe";
+            /* Add an icon by writing data/mkicon.py; symbuild runs it and packages the
+             * result. Zero means the shell draws a default. */
+            number_of_icons = 0;
+            };
+    }

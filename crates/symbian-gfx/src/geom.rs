@@ -184,6 +184,37 @@ impl Rect {
     }
 
     #[inline]
+    /// The largest `w`x`h`-proportioned rect that fits inside this one, centred.
+    ///
+    /// For drawing an image into a slot whose shape it does not share. Scaling to *fill* the slot
+    /// is what a blit does by default, and it squashes anything that is not the same shape — the
+    /// icons this SDK reads back come in sizes like 38x31, which a square cell would compress by a
+    /// fifth. Fitting instead keeps them honest.
+    ///
+    /// Never enlarges past the source: nearest-neighbour upscaling turns a small icon into visible
+    /// blocks, and a crisp small image reads better than a chunky large one. Integer arithmetic
+    /// throughout — this runs on a soft-float handset. A degenerate size returns the slot unchanged
+    /// rather than collapsing to nothing.
+    pub fn fit_inside(self, w: i32, h: i32) -> Self {
+        if w <= 0 || h <= 0 || self.is_empty() {
+            return self;
+        }
+        let (dw, dh) = (self.width(), self.height());
+        // Compare aspect ratios by cross-multiplying: no division, no float.
+        let (mut tw, mut th) = if w * dh <= h * dw {
+            ((w * dh) / h, dh)
+        } else {
+            (dw, (h * dw) / w)
+        };
+        if tw > w {
+            tw = w;
+            th = h;
+        }
+        tw = tw.max(1).min(dw);
+        th = th.max(1).min(dh);
+        Self::from_xywh(self.x0 + (dw - tw) / 2, self.y0 + (dh - th) / 2, tw, th)
+    }
+
     pub fn inset_xy(self, x: i32, y: i32) -> Self {
         Self { x0: self.x0 + x, y0: self.y0 + y, x1: self.x1 - x, y1: self.y1 - y }
     }
@@ -265,6 +296,54 @@ impl Edges {
 
 #[cfg(test)]
 mod tests {
+    const CELL: Rect = Rect { x0: 10, y0: 20, x1: 54, y1: 64 }; // 44x44 at (10,20)
+
+    #[test]
+    fn fit_keeps_a_square_square() {
+        let r = CELL.fit_inside(44, 44);
+        assert_eq!((r.width(), r.height()), (44, 44));
+        assert_eq!((r.x0, r.y0), (10, 20));
+    }
+
+    #[test]
+    fn fit_does_not_distort_a_measured_icon() {
+        // 38x31 is a size this SDK actually reads back from the handset; filling the cell would
+        // stretch it by a fifth in one axis.
+        let r = CELL.fit_inside(38, 31);
+        assert_eq!((r.width(), r.height()), (38, 31));
+        assert_eq!(r.x0, 10 + (44 - 38) / 2);
+        assert_eq!(r.y0, 20 + (44 - 31) / 2);
+    }
+
+    #[test]
+    fn fit_scales_an_oversized_image_in_proportion() {
+        assert_eq!({ let r = CELL.fit_inside(88, 44); (r.width(), r.height()) }, (44, 22));
+        assert_eq!({ let r = CELL.fit_inside(44, 88); (r.width(), r.height()) }, (22, 44));
+    }
+
+    #[test]
+    fn fit_never_enlarges() {
+        let r = CELL.fit_inside(16, 16);
+        assert_eq!((r.width(), r.height()), (16, 16));
+    }
+
+    #[test]
+    fn fit_survives_degenerate_input() {
+        assert_eq!(CELL.fit_inside(0, 10), CELL);
+        assert_eq!(CELL.fit_inside(10, 0), CELL);
+        assert_eq!(CELL.fit_inside(-5, -5), CELL);
+    }
+
+    #[test]
+    fn fit_never_escapes_the_slot() {
+        for (w, h) in [(1, 1000), (1000, 1), (3, 7), (7, 3), (1, 1), (999, 999)] {
+            let r = CELL.fit_inside(w, h);
+            assert!(r.x0 >= CELL.x0 && r.y0 >= CELL.y0, "{w}x{h} starts outside");
+            assert!(r.x1 <= CELL.x1 && r.y1 <= CELL.y1, "{w}x{h} ends outside");
+            assert!(r.width() >= 1 && r.height() >= 1, "{w}x{h} collapsed");
+        }
+    }
+
     use super::*;
 
     #[test]

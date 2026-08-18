@@ -1,7 +1,14 @@
 #!/bin/bash
 # symnew — scaffold a working Symbian app.
 #
-#   tools/symnew <name> [uid3]
+#   tools/symnew <name> [uid3]                 imperative: an App with draw() and handle_key()
+#   tools/symnew declarative-app <name> [uid3] declarative: a Model, an update(), a view()
+#
+# The two templates produce the same project — same manifest, same resources, same UID
+# wiring — and differ only in src/lib.rs and the two lines that start the app. Pick the
+# declarative one unless you are writing something the toolkit has no widget for: it is
+# the same screen with the placement arithmetic and the key routing taken away, and the
+# softkey labels and their messages declared in one place instead of two.
 #
 # Produces a project that builds, installs and runs, so the first thing you do is see
 # something on screen rather than debug a manifest. Then you edit src/lib.rs.
@@ -15,7 +22,16 @@
 set -euo pipefail
 
 SDK="$(cd "$(dirname "$0")/.." && pwd)"
-NAME="${1:?usage: symnew <name> [uid3]}"
+
+# The template selector is a first argument rather than a flag so that the incantation in
+# docs/plan-declarative-ui-sdk.md reads as written, and so a name can never be mistaken for
+# one: names are lowercase-with-underscores, and none of these spellings is a legal name.
+DECL=0
+case "${1:-}" in
+  declarative-app|declarative|--declarative|-d) DECL=1; shift ;;
+esac
+
+NAME="${1:?usage: symnew [declarative-app] <name> [uid3]}"
 UID3="${2:-}"
 
 case "$NAME" in
@@ -46,6 +62,16 @@ while [ ${#RSSNAME} -lt 4 ]; do RSSNAME="${RSSNAME}X"; done
 TYPE=$(printf '%s' "$NAME" | awk -F_ '{for(i=1;i<=NF;i++) printf toupper(substr($i,1,1)) substr($i,2)}')
 CAPTION=$(printf '%s' "$NAME" | awk -F_ '{for(i=1;i<=NF;i++) printf (i>1?" ":"") toupper(substr($i,1,1)) substr($i,2)}')
 
+# How the app is handed to a host. The declarative one is wrapped: the bridge is what
+# turns a Model/update/view into the App the simulator and the device both speak, and it
+# is also what owns the layout cache — which has to outlive a frame to be worth anything,
+# so it lives in the host object rather than inside the drawing code.
+if [ "$DECL" = 1 ]; then
+  SIM_APP="symbian_decl_ui::bridge::DeclarativeAppBridge::<$NAME::$TYPE>::new()"
+else
+  SIM_APP="$NAME::$TYPE::new()"
+fi
+
 mkdir -p "$DIR/src" "$DIR/data" "$DIR/device/src" "$DIR/examples"
 
 # ------------------------------------------------------------------ the app crate
@@ -60,15 +86,234 @@ publish = false
 [dependencies]
 symbian-ui = { path = "../../crates/symbian-ui" }
 symbian-gfx = { path = "../../crates/symbian-gfx" }
+$([ "$DECL" = 1 ] && echo 'symbian-decl-ui = { path = "../../crates/symbian-decl-ui" }')
 
 # Host-only. The simulator pulls in a windowing library, which has no business anywhere
 # near the device build — keeping it here means it never gets there.
 [dev-dependencies]
 symbian-sim = { path = "../../crates/symbian-sim" }
-# `testing` gives you a Theme and a Canvas in one call, so a test of handle_key or draw is
+# \`testing\` gives you a Theme and a Canvas in one call, so a test of handle_key or draw is
 # three lines rather than twenty of byte-packing a font atlas.
 symbian-ui = { path = "../../crates/symbian-ui", features = ["testing"] }
 EOF
+
+if [ "$DECL" = 1 ]; then
+
+cat > "$DIR/src/lib.rs" <<EOF
+//! $CAPTION.
+//!
+//! A declarative screen. Three things and no others: a Model that holds the state, an
+//! update() that is the only function allowed to change it, and a view() that says what
+//! the screen looks like for a given model. Nothing here computes a rectangle, measures a
+//! string or routes a key by hand.
+
+#![cfg_attr(not(test), no_std)]
+
+extern crate alloc;
+
+use symbian_decl_ui::app::DeclarativeApp;
+use symbian_decl_ui::cmd::Cmd;
+use symbian_decl_ui::keys::Softkeys;
+use symbian_decl_ui::slot::SlotTable;
+use symbian_decl_ui::theme::FontRole;
+use symbian_decl_ui::widgets::{screen::Screen, text::Text, Column, Group, Node, Row};
+use symbian_gfx::Align;
+use symbian_ui::{Key, KeyEvent};
+
+/// Everything this app knows.
+pub struct Model {
+    pub count: i32,
+}
+
+/// Everything that can happen to it.
+///
+/// A message is a fact rather than an instruction: it says what the user did, and update()
+/// decides what that means. That is what lets the whole of this app's behaviour be tested
+/// without a screen.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Msg {
+    Add,
+    Subtract,
+    Reset,
+    Quit,
+}
+
+pub struct $TYPE;
+
+impl DeclarativeApp for $TYPE {
+    type Model = Model;
+    type Message = Msg;
+    /// One screen, so there is nothing to push. When you add a second, this becomes an
+    /// enum, Cmd::PushScreen carries it, and screen_changed() tells the model where it is.
+    type Screen = ();
+
+    const TITLE: &'static str = "$CAPTION";
+
+    fn init() -> Model {
+        Model { count: 0 }
+    }
+
+    /// The softkey bar, declared once.
+    ///
+    /// This is the part to copy. A label and the message it promises are one declaration,
+    /// so the bar cannot say one thing while the key does another — view() hands this same
+    /// value to the Screen, which draws it, and the bridge routes keys through it. Two
+    /// uses, one source, no way for them to disagree.
+    ///
+    /// The middle slot is not a softkey on this platform: S60 wires it to the centre of
+    /// the D-pad and delivers Key::Select, which the dispatch below already knows.
+    fn keys(_m: &Model) -> Softkeys<Msg> {
+        Softkeys::new()
+            .options("Reset", Msg::Reset)
+            .action("Add", Msg::Add)
+            .back("Exit", Msg::Quit)
+    }
+
+    /// Keys the bar does not claim. Anything this does not answer falls through to it.
+    fn on_key(m: &Model, ev: KeyEvent) -> Option<Msg> {
+        match ev.key {
+            Key::Up => Some(Msg::Add),
+            Key::Down => Some(Msg::Subtract),
+            _ => Self::keys(m).dispatch(ev),
+        }
+    }
+
+    /// The only place the model changes.
+    ///
+    /// No canvas, no platform, no clock: anything this wants the world to do comes back as
+    /// a Cmd for the host to carry out.
+    fn update(m: &mut Model, msg: Msg) -> Cmd<()> {
+        match msg {
+            Msg::Add => {
+                m.count = m.count.saturating_add(1);
+                Cmd::None
+            }
+            Msg::Subtract => {
+                m.count = m.count.saturating_sub(1);
+                Cmd::None
+            }
+            Msg::Reset => {
+                m.count = 0;
+                Cmd::None
+            }
+            // Never close the app yourself: Avkon owns the loop. Ask, and the host does it.
+            Msg::Quit => Cmd::Exit,
+        }
+    }
+
+    /// What the screen looks like for this model.
+    ///
+    /// Called when something changed, not once per frame, and never for a key nobody bound.
+    /// It may allocate; it must not have opinions, because it may be skipped.
+    ///
+    /// The slot table is where a widget keeps what the model does not own — a list's scroll
+    /// offset, a field's caret. Nothing on this screen needs one yet; pass it along the
+    /// moment you add a ScrollList or a TextField.
+    fn view(m: &Model, _slots: &mut SlotTable) -> Node {
+        let mut buf = [0u8; 16];
+        Node::leaf(
+            Screen::new()
+                .title(Self::TITLE)
+                .softkeys(Self::keys(m))
+                .content(
+                    Column::new()
+                        .pad(8)
+                        .gap(4)
+                        .group(centred(Text::new(fmt_i32(m.count, &mut buf)).font(FontRole::Title)))
+                        .group(centred(Text::new("up / down").dim())),
+                ),
+        )
+    }
+}
+
+/// A label centred across the screen.
+///
+/// A piece of text is as wide as its text, so centring it inside its own box does nothing
+/// at all. Giving it a share of a row is what makes it as wide as the row — and the row,
+/// having a child that takes the whole share, is as wide as the column that holds it.
+fn centred(t: Text) -> Group {
+    Row::new().child(t.align(Align::Center).flex(1))
+}
+
+/// Format an integer without core::fmt, which on this target pulls in far more code than a
+/// two-line loop.
+fn fmt_i32(v: i32, buf: &mut [u8; 16]) -> &str {
+    let neg = v < 0;
+    let mut m = v.unsigned_abs();
+    let mut i = buf.len();
+    loop {
+        i -= 1;
+        buf[i] = b'0' + (m % 10) as u8;
+        m /= 10;
+        if m == 0 || i == 0 {
+            break;
+        }
+    }
+    if neg && i > 0 {
+        i -= 1;
+        buf[i] = b'-';
+    }
+    core::str::from_utf8(&buf[i..]).unwrap_or("?")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use symbian_decl_ui::bridge::DeclarativeAppBridge;
+    use symbian_gfx::Size;
+    use symbian_ui::{testing, App as _, Palette, Softkey};
+
+    #[test]
+    fn the_middle_label_is_what_the_dpad_centre_fires() {
+        // The defect this SDK exists to make unwriteable: a bar that promises one thing
+        // and a key that does another. Here they are the same declaration, so this can
+        // only fail once somebody splits them.
+        let m = $TYPE::init();
+        assert_eq!($TYPE::keys(&m).labels(), [Some("Reset"), Some("Add"), Some("Exit")]);
+        assert_eq!($TYPE::on_key(&m, KeyEvent::new(Key::Select)), Some(Msg::Add));
+        assert_eq!($TYPE::on_key(&m, KeyEvent::new(Key::Softkey(Softkey::Left))), Some(Msg::Reset));
+        assert_eq!($TYPE::on_key(&m, KeyEvent::new(Key::Softkey(Softkey::Right))), Some(Msg::Quit));
+    }
+
+    #[test]
+    fn the_arrows_move_the_count() {
+        let mut m = $TYPE::init();
+        for _ in 0..3 {
+            $TYPE::update(&mut m, Msg::Add);
+        }
+        $TYPE::update(&mut m, Msg::Subtract);
+        assert_eq!(m.count, 2);
+        $TYPE::update(&mut m, Msg::Reset);
+        assert_eq!(m.count, 0);
+    }
+
+    #[test]
+    fn back_asks_to_close_rather_than_closing() {
+        let mut m = $TYPE::init();
+        assert!(matches!($TYPE::update(&mut m, Msg::Quit), Cmd::Exit));
+    }
+
+    #[test]
+    fn a_key_this_app_does_not_use_costs_nothing() {
+        // Returning None is what lets the platform act on the key instead, and on this
+        // device that includes the red End key — which is how the user gets out.
+        let m = $TYPE::init();
+        assert_eq!($TYPE::on_key(&m, KeyEvent::new(Key::Left)), None);
+    }
+
+    #[test]
+    fn a_frame_actually_paints() {
+        // A view that silently draws nothing passes every test about its return value.
+        let mut app = DeclarativeAppBridge::<$TYPE>::new();
+        let (_, px) = testing::with_canvas(Size::new(320, 240), |c| {
+            testing::with_theme(Palette::DARK, |theme| app.draw(c, theme));
+        });
+        assert!(px.iter().any(|&p| p != 0), "the first frame was empty");
+    }
+}
+EOF
+
+else
 
 cat > "$DIR/src/lib.rs" <<EOF
 //! $CAPTION.
@@ -220,6 +465,8 @@ mod tests {
 }
 EOF
 
+fi
+
 cat > "$DIR/examples/sim.rs" <<EOF
 //! \`cargo run -p $NAME --example sim\` — this app in a window, on your desktop.
 //!
@@ -228,7 +475,7 @@ cat > "$DIR/examples/sim.rs" <<EOF
 //! moment a question is about speed it has to go back to the phone.
 
 fn main() {
-    if let Err(e) = symbian_sim::run($NAME::$TYPE::new()) {
+    if let Err(e) = symbian_sim::run($SIM_APP) {
         eprintln!("{e}");
         std::process::exit(1);
     }
@@ -258,6 +505,7 @@ crate-type = ["staticlib"]
 [dependencies]
 $NAME = { path = ".." }
 symbian-app = { path = "../../../crates/symbian-app" }
+$([ "$DECL" = 1 ] && echo 'symbian-decl-ui = { path = "../../../crates/symbian-decl-ui" }')
 
 [profile.release]
 opt-level = "z"
@@ -280,7 +528,7 @@ cat > "$DIR/device/src/lib.rs" <<EOF
 
 extern crate alloc;
 
-symbian_app::entry!($NAME::$TYPE::new());
+symbian_app::entry!($SIM_APP);
 EOF
 
 # -------------------------------------------------------------------- the manifest
@@ -403,6 +651,7 @@ PY
 cat <<EOF
 
 created apps/$NAME
+  template    $([ "$DECL" = 1 ] && echo "declarative (Model / update / view)" || echo "imperative (draw / handle_key)")
   uid3        $UID3   (derived from the name, so re-running is idempotent)
   resource    $RSSNAME
   type        ${TYPE}

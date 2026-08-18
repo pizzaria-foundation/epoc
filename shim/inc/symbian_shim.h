@@ -50,6 +50,7 @@ extern "C" {
 #define SHIM_ERR_BAD_HANDLE       -8
 #define SHIM_ERR_OVERFLOW         -9
 #define SHIM_ERR_ALREADY_EXISTS  -11
+#define SHIM_ERR_DIED            -13
 #define SHIM_ERR_IN_USE          -14
 #define SHIM_ERR_NOT_READY       -18
 #define SHIM_ERR_ACCESS_DENIED   -21
@@ -170,6 +171,26 @@ void shim_request_exit(void);
  * make the End key send to background instead of closing. SHIM_OK, or SHIM_ERR_NOT_READY if
  * called before the window group exists. Needs SwEvent, granted at load on a ROM-patched handset. */
 int32_t shim_set_resident(int32_t on);
+/* Drop this app behind the others without closing it — for a helper the user never asked to see.
+ * SHIM_OK, or SHIM_ERR_NOT_READY before the UI environment exists. */
+int32_t shim_app_to_background(void);
+/* Bring this app back to the front, focus included — the move a resident launcher makes when
+ * something else has taken the screen from it (an app restarted by the platform after being killed,
+ * for one). SHIM_OK, or SHIM_ERR_NOT_READY before the UI environment exists. */
+int32_t shim_app_to_foreground(void);
+
+/* ------------------------------------------------------------------- cpu time --
+ * The only load measurement Symbian offers: cumulative microseconds a thread has spent on the
+ * processor (RThread::GetCpuTime). Difference it over an interval for utilisation. Compiled in
+ * only when the app sets USE_CPUTIME, because on some 9.x kernels the accounting is a build
+ * option and the call answers KErrNotSupported — which is a measurement, not a failure. */
+/* Sum the CPU microseconds of every thread whose full name matches `pattern` (UTF-16, e.g.
+ * "foo*::*" for one process, "*::*" for all). SHIM_OK with *total_us and *threads set,
+ * SHIM_ERR_NOT_SUPPORTED where the kernel does not account for it. */
+int32_t shim_cpu_time(const uint16_t* pattern, int32_t pattern_len,
+                      int64_t* total_us, int32_t* threads);
+/* The full name of the nth running process ("name[uid]0001"). SHIM_ERR_NOT_FOUND past the end. */
+int32_t shim_process_at(int32_t index, uint16_t* out, int32_t cap, int32_t* len);
 
 /* ------------------------------------------------------------ framebuffer --
  * The back buffer is a CFbsBitmap, whose pixels live in a chunk shared with the
@@ -614,6 +635,32 @@ int32_t shim_app_at(int32_t index, uint32_t* uid3, uint8_t* hidden,
                     uint16_t* caption, int32_t cap, int32_t* caption_len);
 /* Start the installed app with this UID3, the way the shell would. SHIM_OK on acceptance. */
 int32_t shim_app_launch(uint32_t uid3);
+
+/* Launch app `uid3` pointed at `doc` (a URL, UTF-16, `doc_len` units) by `route`.
+ *
+ * Only compiled when the app opts into USE_LAUNCH_DOC. There is no `OpenUrl` on S60 — a browser is
+ * asked to open a URL by convention, and which convention a handset honours is a question the
+ * handset answers, so `route` selects between four of them: 0 document name, 1 the browser's
+ * `4 <url>` tail end, 2 StartDocument at an explicit app, 3 StartDocument letting the platform
+ * resolve. See the comment on DoLaunchDocL. SHIM_OK means the platform accepted the launch, not
+ * that the URL opened — nothing here can tell us that. */
+int32_t shim_app_launch_doc(uint32_t uid3, const uint16_t* doc, int32_t doc_len, int32_t route);
+
+/* Deliver `msg` (8-bit, `msg_len` bytes) to the running application `uid3`, bringing it forward.
+ *
+ * The way the shell hands a URL to a browser that is already open — which `StartDocument` cannot
+ * do, because it starts applications rather than talking to them. SHIM_ERR_NOT_FOUND when the
+ * application is not running, which is the caller's cue to start it instead. */
+int32_t shim_app_task_message(uint32_t uid3, const uint8_t* msg, int32_t msg_len);
+
+/* Put `text` (UTF-16, `len` units) on the system clipboard, in the plain-text format Avkon's Paste
+ * reads. Only compiled when the app opts into USE_CLIPBOARD; every other build links a stub that
+ * answers SHIM_ERR_NOT_SUPPORTED. */
+int32_t shim_clip_set_text(const uint16_t* text, int32_t len);
+/* Read the clipboard's plain text into `out` (at most `cap` UTF-16 units); `len` gets the count.
+ * SHIM_ERR_NOT_FOUND when there is nothing to paste — an empty clipboard is a state, not a failure.
+ * Same USE_CLIPBOARD gate as the write above. */
+int32_t shim_clip_get_text(uint16_t* out, int32_t cap, int32_t* len);
 /* Kill the installed app with this UID3 through the window server (TApaTask::KillTask) — the way
  * to stop an app that will not close itself, like a resident launcher. SHIM_OK if killed,
  * SHIM_ERR_NOT_FOUND if it has no running task. */
@@ -637,6 +684,17 @@ int32_t shim_app_icon(uint32_t uid3, int32_t size,
 int32_t shim_app_icon_b(uint32_t uid3, int32_t size,
                         uint16_t* rgb_out, uint8_t* mask_out, int32_t cap,
                         int32_t* w, int32_t* h);
+/* Variant C (USE_AKNICON): the icon read from the app's registered icon FILE through Avkon's
+ * AknIconUtils, rather than from a CApaMaskedBitmap. Handles MIF (scalable) icons as well as MBM,
+ * and yields a real mask plane. `bitmap_id` is the colour plane's index within that file; the mask
+ * is taken to be the next index. Same returns as shim_app_icon. */
+int32_t shim_app_icon_c(uint32_t uid3, int32_t size, int32_t bitmap_id,
+                        uint16_t* rgb_out, uint8_t* mask_out, int32_t cap,
+                        int32_t* w, int32_t* h);
+/* The full path of the file this app's icon comes from (USE_AKNICON), as UTF-16 units into `out`
+ * with its length in *len. Diagnostic: it says whether a fetch read the right file at all, and its
+ * extension (.mbm vs .mif) says which route can read it. */
+int32_t shim_app_icon_file(uint32_t uid3, uint16_t* out, int32_t cap, int32_t* len);
 
 /* ------------------------------------------------------------------ memory --
  * How much room is left, for an app that wants to know its own. Compiled in only when the

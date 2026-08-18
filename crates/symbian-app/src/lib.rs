@@ -252,6 +252,23 @@ pub fn to_key_events(kb: &mut symbian_keys::Keyboard, e: &sys::ShimEvent) -> Key
     let repeat = e.c > 0;
     let one = |key| [Some(KeyEvent { key, mods, repeat }), None];
 
+    // A Ctrl chord, before anything else looks at the key.
+    //
+    // It has to come first, and the reason is the codes: Ctrl+letter arrives as the *control
+    // character* for that letter — Ctrl+C is 0x03, and Ctrl+M is 0x0D, which is also Enter, and
+    // Ctrl+H is 0x08, which is also Backspace. Read in the ordinary order, half the alphabet
+    // would arrive as some other key entirely, and the keypad-overlay table would answer for the
+    // rest (Ctrl+M typed `0`, because the layout treats Ctrl as another name for Fn).
+    //
+    // The chord is resolved here rather than in the shim because the shim reports what the
+    // hardware sent and nothing more; what a key *means* has always been decided on this side.
+    if mods.ctrl {
+        if let Some(key) = ctrl_chord(e) {
+            kb.cancel();
+            return one(key);
+        }
+    }
+
     match e.kind {
         sys::SHIM_EV_KEY_CHAR => strokes(kb, e, mods, repeat, true).unwrap_or([None, None]),
         sys::SHIM_EV_KEY_DOWN => {
@@ -283,6 +300,86 @@ pub fn to_key_events(kb: &mut symbian_keys::Keyboard, e: &sys::ShimEvent) -> Key
         }
         _ => [None, None],
     }
+}
+
+/// The phone's clipboard, as the toolkit's [`symbian_ui::Clipboard`].
+///
+/// The join between a widget that must not know what a device is and a platform that keeps its
+/// clipboard in a stream store on disk. It lives in this crate because this is the one that
+/// already depends on both — the same reason the key pump and the allocator are here.
+///
+/// Zero-sized: there is no session to hold. `symbian::clipboard` opens and closes its own file
+/// server session per call, since a copy happens a few times a day and a session held for the life
+/// of the process to serve it would be the wrong trade.
+///
+/// ```ignore
+/// // Every text field in an app, with paste and copy already in it:
+/// self.composer.handle_key(ev, &mut symbian_app::SystemClipboard);
+/// ```
+///
+/// An app built without `USE_CLIPBOARD=1` links a shim stub that answers "not supported", so this
+/// degrades to doing nothing rather than failing to load — which is what makes it safe to pass
+/// unconditionally.
+#[derive(Copy, Clone, Debug, Default)]
+pub struct SystemClipboard;
+
+impl symbian_ui::Clipboard for SystemClipboard {
+    fn get(&mut self) -> Option<alloc::string::String> {
+        #[cfg(not(target_vendor = "symbian"))]
+        return host_clip(None);
+        // An empty clipboard reports NotFound, which is not an error worth showing anyone: there
+        // is simply nothing to paste, and the platform's own Paste is silent about it too.
+        #[cfg(target_vendor = "symbian")]
+        symbian::clipboard::get_text().ok().filter(|s| !s.is_empty())
+    }
+
+    fn set(&mut self, text: &str) -> bool {
+        #[cfg(not(target_vendor = "symbian"))]
+        return host_clip(Some(text)).is_some();
+        #[cfg(target_vendor = "symbian")]
+        symbian::clipboard::set_text(text).is_ok()
+    }
+}
+
+/// The simulator's clipboard: a `String` in this process.
+///
+/// Off the device every shim call answers "not ready", which would make copy and paste the two
+/// features nobody could try without a handset — and they are exactly the features where the feel
+/// of them is the thing to judge. So the host build keeps its own, and the simulator behaves like
+/// the phone: copy in one field, paste in another.
+///
+/// `Some(text)` stores and returns it; `None` reads.
+#[cfg(not(target_vendor = "symbian"))]
+fn host_clip(set: Option<&str>) -> Option<alloc::string::String> {
+    use alloc::string::ToString;
+    static mut CLIP: Option<alloc::string::String> = None;
+    // SAFETY: single-threaded, GUI thread only — the same rule the keyboard state above follows.
+    unsafe {
+        if let Some(text) = set {
+            CLIP = Some(text.to_string());
+        }
+        (*(&raw const CLIP)).clone()
+    }
+}
+
+/// The letter of a Ctrl chord, when this event is one.
+///
+/// Two shapes, because two kinds of keyboard produce them:
+///
+/// - the handset, which sends the control character (`0x01..=0x1A` for A..Z) with the Ctrl bit
+///   set — the phone's own editors read exactly this;
+/// - a Bluetooth or emulated keyboard, which may send the letter itself with the bit set.
+///
+/// Anything else with Ctrl held — a digit, a symbol, an arrow — is left alone, and goes on to be
+/// whatever it would have been without the modifier. Reporting those as chords would invent
+/// bindings the platform does not have.
+fn ctrl_chord(e: &sys::ShimEvent) -> Option<Key> {
+    let code = e.a as u32;
+    let letter = match code {
+        0x01..=0x1A => char::from_u32(code + 0x60),
+        _ => char::from_u32(code).filter(|c| c.is_ascii_alphabetic()).map(|c| c.to_ascii_lowercase()),
+    }?;
+    Some(Key::Ctrl(letter))
 }
 
 /// Run one event through the keyboard.
@@ -1095,6 +1192,58 @@ mod tests {
         ev.b = sys::modifier::SHIFT | sys::modifier::FUNC;
         let k = only(&mut plain(), &ev).unwrap();
         assert!(k.mods.shift && k.mods.func && !k.mods.ctrl);
+    }
+
+    /// Ctrl+`letter` as the handset sends it: the control character, with the Ctrl bit set.
+    fn ctrl_event(letter: char) -> sys::ShimEvent {
+        let mut ev = sys::ShimEvent::default();
+        ev.kind = sys::SHIM_EV_KEY_DOWN;
+        ev.a = (letter as i32) - 0x60;
+        ev.b = sys::modifier::CTRL;
+        ev.d = 0x0F01;
+        ev
+    }
+
+    #[test]
+    fn a_ctrl_chord_arrives_as_its_letter() {
+        // Before this it arrived as Key::Raw(3) — a control byte with the letter thrown away, so
+        // nothing downstream could tell Ctrl+C from Ctrl+anything.
+        for letter in ['c', 'v', 'x', 'a'] {
+            let k = only(&mut plain(), &ctrl_event(letter)).expect("a chord must translate");
+            assert_eq!(k.key, Key::Ctrl(letter));
+        }
+    }
+
+    #[test]
+    fn a_chord_is_not_mistaken_for_the_key_that_shares_its_code() {
+        // The trap this ordering exists for: Ctrl+M is 0x0D, which is also Enter, and Ctrl+H is
+        // 0x08, which is also Backspace. Read in the ordinary order, a chord in a text field
+        // would submit the form or delete a character instead.
+        assert_eq!(only(&mut plain(), &ctrl_event('m')).unwrap().key, Key::Ctrl('m'));
+        assert_eq!(only(&mut plain(), &ctrl_event('h')).unwrap().key, Key::Ctrl('h'));
+        assert_eq!(only(&mut plain(), &ctrl_event('i')).unwrap().key, Key::Ctrl('i'));
+    }
+
+    #[test]
+    fn a_keyboard_that_sends_the_letter_itself_produces_the_same_chord() {
+        // A Bluetooth or emulated keyboard may report Ctrl+V as `v` with the modifier set,
+        // rather than as 0x16. Both are the same chord to everything downstream.
+        let mut ev = char_event('V');
+        ev.b = sys::modifier::CTRL;
+        assert_eq!(only(&mut plain(), &ev).unwrap().key, Key::Ctrl('v'));
+    }
+
+    #[test]
+    fn ctrl_with_a_key_that_is_not_a_letter_is_left_alone() {
+        // Only letters are chords. An arrow with Ctrl held is still an arrow, and inventing
+        // Key::Ctrl for it would take the key away from the screen that wanted it.
+        let mut ev = sys::ShimEvent::default();
+        ev.kind = sys::SHIM_EV_KEY_DOWN;
+        ev.a = sys::key::DOWN;
+        ev.b = sys::modifier::CTRL;
+        let k = only(&mut plain(), &ev).unwrap();
+        assert_eq!(k.key, Key::Down);
+        assert!(k.mods.ctrl, "the modifier still rides along for whoever wants it");
     }
 
     #[test]

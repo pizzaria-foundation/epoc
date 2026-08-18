@@ -220,6 +220,8 @@ keys
   Esc           right softkey (Back)
   Tab           next theme
   letters       typed into the composer
+  Shift+arrows  select text in a field
+  Ctrl+C/X/V/A  copy / cut / paste / select all
   Ctrl+S        write sim-frame.png
   Ctrl+Q        quit"
     );
@@ -242,6 +244,24 @@ keys
         if window.is_key_pressed(MKey::Tab, KeyRepeat::No) {
             sim.palette = (sim.palette + 1) % Palette::ALL.len();
             sim.dirty = true;
+        }
+
+        // Ctrl chords, exactly as the handset delivers them — which is what lets copy and paste
+        // be tried here at all. Q and S stay the simulator's own; everything else is the app's,
+        // including the Ctrl+C/V/X/A that every text field now answers.
+        if ctrl {
+            for k in window.get_keys_pressed(KeyRepeat::No) {
+                if matches!(k, MKey::Q | MKey::S) {
+                    continue;
+                }
+                let Some(letter) = ascii_of(k, false).filter(|c| c.is_ascii_alphabetic()) else {
+                    continue;
+                };
+                let ev = KeyEvent { key: Key::Ctrl(letter), mods, repeat: false };
+                if sim.app.handle_key(ev, &theme, screen) == Handled::Consumed {
+                    sim.dirty = true;
+                }
+            }
         }
 
         // Navigation first, then text. Both go through the same `handle_key` the device

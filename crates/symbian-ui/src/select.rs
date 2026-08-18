@@ -9,7 +9,7 @@
 
 use symbian_gfx::{Align, Canvas, Rect};
 
-use crate::input::{Handled, Key, KeyEvent};
+use crate::input::{Handled, Key, KeyEvent, Softkey};
 use crate::list::{ListState, Uniform};
 use crate::theme::Theme;
 
@@ -86,7 +86,12 @@ impl Select {
                     (Handled::Consumed, SelectAction::None)
                 }
             }
-            Key::End | Key::Backspace => {
+            // Back cancels, same as the red key and Backspace. The popup is modal and its
+            // catch-all eats everything else, so without this the Back softkey did nothing at all
+            // while it was open — the same defect the app picker had, in the sibling widget.
+            // `Viewer` had it right all along, which is how three widgets ended up with three
+            // different answers to "what closes this".
+            Key::End | Key::Backspace | Key::Softkey(Softkey::Right) => {
                 self.open = false;
                 (Handled::Consumed, SelectAction::None)
             }
@@ -122,7 +127,7 @@ impl Select {
         c.fill_rect(area.inset(1), p.bg.mid());
 
         let rows = Uniform { count: options.len(), height: self.row_h };
-        self.list.for_visible(&rows, area, |i, row| {
+        self.list.draw_visible(c, &rows, area, |c, i, row| {
             if i == self.list.selected {
                 crate::chrome::selection(c, row, theme);
             }
@@ -163,6 +168,30 @@ mod tests {
         assert_eq!(a, SelectAction::Changed(2));
         assert_eq!(s.selected(), 2);
         assert!(!s.is_open());
+    }
+
+    #[test]
+    fn the_back_softkey_closes_the_popup_and_keeps_the_old_value() {
+        // Same defect as the app picker's, in the sibling widget: the open popup is modal and its
+        // catch-all ate the Back softkey. `Viewer` already handled it, which is how three modal
+        // widgets ended up with three different answers to "what closes this".
+        let mut s = Select::new(1);
+        s.handle_key(ev(Key::Select), OPTS);
+        s.handle_key(ev(Key::Down), OPTS);
+        let (h, a) = s.handle_key(ev(Key::Softkey(Softkey::Right)), OPTS);
+        assert_eq!(h, Handled::Consumed);
+        assert_eq!(a, SelectAction::None);
+        assert_eq!(s.selected(), 1, "cancelling must not commit the highlight");
+        assert!(!s.is_open());
+    }
+
+    #[test]
+    fn back_is_ignored_while_the_popup_is_closed() {
+        // The closed field must let Back through, or a screen with a dropdown on it could never be
+        // left. Consuming it here would trade one stuck screen for another.
+        let mut s = Select::new(1);
+        let (h, _) = s.handle_key(ev(Key::Softkey(Softkey::Right)), OPTS);
+        assert_eq!(h, Handled::Ignored);
     }
 
     #[test]

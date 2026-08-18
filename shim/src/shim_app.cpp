@@ -35,8 +35,12 @@
 #include <coeinput.h>
 #include <coemain.h>
 #include <w32std.h>
+#include <apgtask.h>  /* TApaTask — moving our own window group behind the others */
 #include <fbs.h>
 #include <e32keys.h>
+
+/* Defined further down, beside its opposite. Declared here because the key handlers above use it. */
+static void ShimRaiseSelf();
 
 /* Must match UID3 in the app's _reg.rss and the --uid3 given to elf2e32, so
  * symbuild passes all three from the single value in app.conf. Getting them out of
@@ -489,7 +493,7 @@ TKeyResponse CShimControl::OfferKeyEventL(const TKeyEvent& aKeyEvent, TEventCode
         /* casinha/red still come to the front on the way down. Every captured key is consumed: the
          * dedicated app keys are ours to remap now, and the Rust side decides what each does. */
         if (aType == EEventKeyDown && isHome)
-            ControlEnv()->RootWin().SetOrdinalPosition(0);
+            ShimRaiseSelf();
         return EKeyWasConsumed;
         }
 
@@ -551,7 +555,7 @@ TKeyResponse CShimControl::OfferKeyEventL(const TKeyEvent& aKeyEvent, TEventCode
                 {
                 if (gResident)
                     {
-                    ControlEnv()->RootWin().SetOrdinalPosition(0);
+                    ShimRaiseSelf();
                     return EKeyWasConsumed;
                     }
                 return EKeyWasNotConsumed;
@@ -607,6 +611,17 @@ TKeyResponse CShimControl::OfferKeyEventL(const TKeyEvent& aKeyEvent, TEventCode
     e.d = aKeyEvent.iScanCode;
     e.native = aKeyEvent.iModifiers;
     ShimPushEvent(e);
+
+    /* A Ctrl chord is ours, and this is the one place that can say so.
+     *
+     * Ctrl+C, Ctrl+V and the rest arrive here rather than above, because the control character
+     * they carry (0x03, 0x16 ...) is below the printable gate and in no key map. The Rust side
+     * turns them into `Key::Ctrl` and acts on them — a text field pastes — so passing the same
+     * press on to Avkon invites it to act a second time on a key we have already spent.
+     *
+     * Everything else with no name keeps going, which is what the paragraph above is about. */
+    if (aKeyEvent.iModifiers & EModifierCtrl)
+        return EKeyWasConsumed;
 
     return EKeyWasNotConsumed;
     }
@@ -848,6 +863,63 @@ extern "C" void shim_request_exit(void)
  * the launcher declares it, matching GDesk. Safe before the window group exists — returns
  * SHIM_ERR_NOT_READY — though the launcher calls it from rust_app_start, by which point CCoeEnv
  * is up. */
+/* Bring our own window group to the front, the way the shell does it.
+ *
+ * `RWindowGroup::SetOrdinalPosition(0)` looks like it does this and does not do it reliably: it
+ * moves the group to the front *of its own priority band*, and it does not move focus. The symptom
+ * on this handset is a launcher that comes up on roughly one press in three — pressed again and
+ * again until something else happens to reshuffle the z-order.
+ *
+ * `TApaTask::BringToForeground` is the operation the shell performs, focus included. Same class of
+ * mistake as trying to open a URL in a browser that is already running: the call that *starts*
+ * something is not the call that talks to something already up. */
+static void ShimRaiseSelf()
+    {
+    CCoeEnv* env = CCoeEnv::Static();
+    if (!env)
+        return;
+    TApaTask task(env->WsSession());
+    task.SetWgId(env->RootWin().Identifier());
+    task.BringToForeground();
+    }
+
+/* Drop this application behind whatever else is on screen, without closing it.
+ *
+ * For a helper the user never asked to see. A GUI app is brought to the foreground when it is
+ * started, which is right for something launched from a menu and wrong for a background job the
+ * home screen kicked off — the icon builder needs Avkon (so it cannot be a headless daemon) but has
+ * no business taking the screen from the launcher that started it.
+ *
+ * The same TApaTask move shim_net.cpp uses to get out of the way after opening a connection. */
+extern "C" int32_t shim_app_to_background(void)
+    {
+    CCoeEnv* env = CCoeEnv::Static();
+    if (!env)
+        return SHIM_ERR_NOT_READY;
+    TApaTask task(env->WsSession());
+    task.SetWgId(env->RootWin().Identifier());
+    task.SendToBackground();
+    return SHIM_OK;
+    }
+
+/* Bring this application back to the front, focus and all.
+ *
+ * The mirror of shim_app_to_background, and it exists for one measured reason: killing another
+ * app's task can leave *that* app in front — the platform restarts some of them, and a window group
+ * dying reshuffles the z-order — which puts the user back in the application they just asked to
+ * close. A task manager that has to be dug back out is not one.
+ *
+ * Same call the captured Menu key makes (see ShimRaiseSelf on why it is TApaTask rather than
+ * RWindowGroup::SetOrdinalPosition). */
+extern "C" int32_t shim_app_to_foreground(void)
+    {
+    CCoeEnv* env = CCoeEnv::Static();
+    if (!env)
+        return SHIM_ERR_NOT_READY;
+    ShimRaiseSelf();
+    return SHIM_OK;
+    }
+
 extern "C" int32_t shim_set_resident(int32_t on)
     {
     CCoeEnv* env = CCoeEnv::Static();

@@ -42,6 +42,12 @@
 # Rendered UI previews. Regenerate with `cargo run -p preview`.
 /preview-out/
 
+# The declarative/imperative parity sheets. Regenerate with
+# `cargo run -p symbian-decl-ui --example compare`. Unanchored, because they land in whatever
+# directory the example was run from and a developer runs it from the crate as often as from the
+# root — an anchored rule would quietly track a hundred kilobytes of PNG.
+compare-out/
+
 # Generated icon bitmaps. The generator (data/mkicon.py) is the source; a checked-in
 # .bmp is a binary nobody can review.
 **/data/*_icon.bmp

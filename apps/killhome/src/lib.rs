@@ -98,7 +98,10 @@ impl App for KillHome {
         let frame = chrome::Frame::split(screen, theme, true, true);
         chrome::clear(c, theme);
         chrome::title_bar(c, frame.title, theme, "Kill Home", None);
-        chrome::softkey_bar(c, frame.softkeys, theme, [Some("Stop"), None, Some("Exit")]);
+        // The action is on the D-pad centre (see `handle_key`), so its label goes in the middle
+        // slot. It sat on the left for a while, which told the user to press a key that did
+        // nothing — the label is a promise about which key acts.
+        chrome::softkey_bar(c, frame.softkeys, theme, chrome::Softkeys::action("Stop", "Exit"));
 
         let body = theme.fonts.body;
         let mut y = frame.content.y0 + 6;

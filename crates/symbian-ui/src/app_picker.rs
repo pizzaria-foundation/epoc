@@ -18,9 +18,24 @@ use alloc::vec::Vec;
 
 use symbian_gfx::{Align, Canvas, Rect};
 
-use crate::input::{Handled, Key, KeyEvent};
+use crate::input::{Handled, Key, KeyEvent, Softkey};
 use crate::list::{ListState, Uniform};
 use crate::theme::Theme;
+
+/// Borrowed pixels for one image: a colour plane and its coverage mask.
+///
+/// A plain view over two slices rather than an owned type, and deliberately not the services
+/// crate's `Icon`: this crate knows about drawing and must not learn about the device. The caller
+/// holds the storage — usually a cache keyed by app UID — and lends it for the duration of a draw.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct IconRef<'a> {
+    /// RGB565, row-major, `w`*`h`, tightly packed.
+    pub pixels: &'a [u16],
+    /// 8-bit coverage per pixel, same shape.
+    pub mask: &'a [u8],
+    pub w: i32,
+    pub h: i32,
+}
 
 /// One pickable row: an opaque id the caller cares about, the label the user reads and filters on,
 /// and an optional icon. `id` is deliberately untyped (a launcher passes an app UID3) so the widget
@@ -29,6 +44,9 @@ use crate::theme::Theme;
 pub struct Item<'a> {
     pub id: u32,
     pub label: &'a str,
+    /// The app's real icon, when the caller has one. Drawn in place of the letter tile; the tile
+    /// stays the fallback, because an icon is decoration and a row must never depend on one.
+    pub icon: Option<IconRef<'a>>,
     /// `Some(seed)` draws the seeded [`crate::letter_tile`] (the launcher's fake app icon) at the
     /// left of the row; `None` leaves the icon gutter blank — used to set non-app "command" rows
     /// apart from real apps. The seed is usually the same id.
@@ -38,12 +56,19 @@ pub struct Item<'a> {
 impl<'a> Item<'a> {
     /// A plain row with no icon.
     pub const fn new(id: u32, label: &'a str) -> Self {
-        Self { id, label, tile: None }
+        Self { id, label, icon: None, tile: None }
     }
 
     /// A row that draws the seeded letter-tile icon (pass the app UID as the seed for a stable hue).
     pub const fn with_tile(id: u32, label: &'a str, seed: u32) -> Self {
-        Self { id, label, tile: Some(seed) }
+        Self { id, label, icon: None, tile: Some(seed) }
+    }
+
+    /// Lend this row a real icon. The seeded tile stays as the fallback for when there is none, so
+    /// a list is never half-decorated and half-empty.
+    pub const fn with_icon(mut self, icon: IconRef<'a>) -> Self {
+        self.icon = Some(icon);
+        self
     }
 }
 
@@ -128,7 +153,12 @@ impl AppPicker {
                 self.reclamp(items);
                 (Handled::Consumed, PickerAction::None)
             }
-            Key::End => (Handled::Consumed, PickerAction::Cancelled),
+            // The red key and the Back softkey both leave. Back is the one people actually press:
+            // it is the SDK's convention for "go back" and it is what the drawer's own softkey bar
+            // is labelled with, so a drawer that swallowed it left the only visible way out doing
+            // nothing at all. It was reported from the handset, not found here — the modal
+            // catch-all below is what ate it, and a catch-all is exactly the shape that hides this.
+            Key::End | Key::Softkey(Softkey::Right) => (Handled::Consumed, PickerAction::Cancelled),
             Key::Up | Key::Down => {
                 let n = self.matches(items).len();
                 let rows = Uniform { count: n, height: self.row_h.max(1) };
@@ -205,7 +235,7 @@ impl AppPicker {
         let rows = Uniform { count: m_idx.len(), height: self.row_h };
         self.list.clamp(&rows, self.view_h);
         let sel = self.list.selected;
-        self.list.for_visible(&rows, list_area, |row_i, row| {
+        self.list.draw_visible(c, &rows, list_area, |c, row_i, row| {
             if row_i == sel {
                 crate::chrome::selection(c, row, theme);
             }
@@ -220,10 +250,16 @@ impl AppPicker {
                 Rect::from_xywh(cell.x0, cell.y0, gutter, cell.height()),
                 Rect { x0: cell.x0 + gutter + m.pad, ..cell },
             );
-            if let Some(seed) = it.tile {
-                let side = (icon_area.height() - 4).clamp(4, gutter);
-                let iy = icon_area.y0 + (icon_area.height() - side) / 2;
-                crate::tile::letter_tile(c, Rect::from_xywh(icon_area.x0, iy, side, side), it.label, seed, theme);
+            let side = (icon_area.height() - 4).clamp(4, gutter);
+            let iy = icon_area.y0 + (icon_area.height() - side) / 2;
+            let slot = Rect::from_xywh(icon_area.x0, iy, side, side);
+            if let Some(icon) = it.icon {
+                // Fitted, not stretched: an icon is rarely the same shape as its slot, and filling
+                // would squash it. `fit_inside` centres the largest proportional rect that fits.
+                let target = slot.fit_inside(icon.w, icon.h);
+                c.blit_icon(target, icon.pixels, icon.mask, symbian_gfx::Size::new(icon.w, icon.h), icon.w as usize);
+            } else if let Some(seed) = it.tile {
+                crate::tile::letter_tile(c, slot, it.label, seed, theme);
             }
             c.draw_text_in(text_area, it.label, theme.fonts.body, color, Align::Start);
         });
@@ -343,6 +379,33 @@ mod tests {
     }
 
     #[test]
+    fn the_back_softkey_cancels_the_drawer() {
+        // Reported from the handset: picking an application or an action opened the drawer and the
+        // Back softkey then did nothing, because the modal catch-all consumed it and returned
+        // `None`. The drawer's own softkey bar is labelled "Voltar", so the only visible way out
+        // was the one that did not work. `Key::End` is the red key and the system may take it
+        // first, which is why this is not a duplicate of `red_key_cancels`.
+        let its = items();
+        let mut p = AppPicker::new();
+        let (h, a) = p.handle_key(ev(Key::Softkey(Softkey::Right)), &its);
+        assert_eq!(h, Handled::Consumed);
+        assert_eq!(a, PickerAction::Cancelled);
+    }
+
+    #[test]
+    fn a_typed_filter_does_not_change_what_back_does() {
+        // The one way this could regress quietly: Backspace shortens the filter and only backs out
+        // on an empty one, so a reader could reasonably make Back do the same. It must not — Back
+        // leaves, whatever has been typed.
+        let its = items();
+        let mut p = AppPicker::new();
+        p.handle_key(ev(Key::Char('c')), &its);
+        p.handle_key(ev(Key::Char('a')), &its);
+        let (_, a) = p.handle_key(ev(Key::Softkey(Softkey::Right)), &its);
+        assert_eq!(a, PickerAction::Cancelled, "Back leaves even with a filter typed");
+    }
+
+    #[test]
     fn backspace_on_an_empty_filter_backs_out() {
         let its = items();
         let mut p = AppPicker::new();
@@ -439,5 +502,35 @@ mod tests {
             });
             assert!(px2.iter().any(|&v| v != 0));
         }
+    }
+
+    #[test]
+    fn a_row_with_a_real_icon_draws_its_pixels_not_a_letter() {
+        // One solid red pixel, so its presence in the framebuffer is unambiguous.
+        let px = [0xF800u16; 4];
+        let mask = [255u8; 4];
+        let icon = IconRef { pixels: &px, mask: &mask, w: 2, h: 2 };
+        let its = [Item::with_tile(1, "Web", 1).with_icon(icon)];
+        let mut p = AppPicker::new();
+        let (_, out) = testing::with_canvas(symbian_gfx::Size::new(320, 200), |c| {
+            testing::with_theme(Palette::DARK, |th| {
+                p.draw(c, symbian_gfx::Rect::from_xywh(0, 0, 320, 200), th, &its, "No matches");
+            });
+        });
+        assert!(out.contains(&0xF800), "the icon's own pixels should reach the screen");
+    }
+
+    #[test]
+    fn a_row_without_an_icon_still_gets_its_tile() {
+        // The fallback matters more than the icon: a list half-decorated and half-blank looks
+        // broken, and an icon is decoration that must never be load-bearing.
+        let its = [Item::with_tile(1, "Web", 1)];
+        let mut p = AppPicker::new();
+        let (_, out) = testing::with_canvas(symbian_gfx::Size::new(320, 200), |c| {
+            testing::with_theme(Palette::DARK, |th| {
+                p.draw(c, symbian_gfx::Rect::from_xywh(0, 0, 320, 200), th, &its, "No matches");
+            });
+        });
+        assert!(out.iter().any(|&v| v != 0));
     }
 }

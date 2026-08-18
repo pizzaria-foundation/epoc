@@ -198,6 +198,37 @@ pub fn band_round(c: &mut Canvas, r: Rect, s: &Surface, radius: i32) {
 ///
 /// The radius is half the height, so it is a stadium at any size and never looks
 /// like a rounded rectangle that got it slightly wrong.
+/// The band behind selected text: `display[from..to]`, drawn at `x` in `font`, between `y0` and
+/// `y1`.
+///
+/// Call it *before* the text, so the characters land on top of it. The offsets are into the string
+/// as displayed rather than the string as stored — `TextField::display_offset` converts — because a
+/// masked field shows `*` and a selection has to highlight the stars the user can see.
+///
+/// A flat fill and not a [`Surface`]: this sits behind text at body size, where a gradient reads as
+/// dirt on the screen rather than as depth.
+pub fn text_selection(
+    c: &mut Canvas,
+    x: i32,
+    y0: i32,
+    y1: i32,
+    display: &str,
+    from: usize,
+    to: usize,
+    font: &dyn symbian_gfx::Font,
+    fill: Color,
+) {
+    if from >= to || from > display.len() {
+        return;
+    }
+    let to = to.min(display.len());
+    let x0 = x + font.measure(&display[..from]);
+    let x1 = x + font.measure(&display[..to]);
+    if x1 > x0 {
+        c.fill_rect(Rect::new(x0, y0, x1, y1), fill);
+    }
+}
+
 pub fn pill(c: &mut Canvas, r: Rect, fill: Color) {
     c.fill_round_rect(r, r.height() / 2, fill);
 }
@@ -214,6 +245,40 @@ mod tests {
 
     fn px(buf: &[u16], size: Size, x: i32, y: i32) -> u16 {
         buf[(y * size.w + x) as usize]
+    }
+
+    #[test]
+    fn a_selection_band_covers_exactly_the_selected_characters() {
+        // The test atlas advances 5px per character, so the arithmetic is checkable rather than a
+        // magic number. Selecting characters 2..5 of text drawn at x=10 must fill 20..35 and
+        // nothing either side — a band one pixel wide of the truth reads as a rendering bug in a
+        // font, which is a long way from where the mistake would actually be.
+        let (mut buf, size) = canvas(40, 4);
+        let fill = Color::hex(0xFFFFFF);
+        crate::testing::with_theme(crate::theme::Palette::DARK, |theme| {
+            let mut c = Canvas::from_slice(&mut buf, size);
+            text_selection(&mut c, 10, 0, 4, "aaaaaaa", 2, 5, theme.fonts.body, fill);
+        });
+        assert_eq!(px(&buf, size, 19, 1), 0, "nothing before the selection");
+        assert_eq!(px(&buf, size, 20, 1), fill.to_rgb565().0, "the first selected column");
+        assert_eq!(px(&buf, size, 34, 1), fill.to_rgb565().0, "the last selected column");
+        assert_eq!(px(&buf, size, 35, 1), 0, "nothing after it");
+    }
+
+    #[test]
+    fn an_empty_or_backwards_selection_draws_nothing() {
+        // `from == to` is a caret, not a selection, and a reversed pair is a caller bug. Painting
+        // either would put a stray block on the screen with no key able to remove it.
+        let (mut buf, size) = canvas(40, 4);
+        crate::testing::with_theme(crate::theme::Palette::DARK, |theme| {
+            let mut c = Canvas::from_slice(&mut buf, size);
+            let white = Color::hex(0xFFFFFF);
+            text_selection(&mut c, 10, 0, 4, "aaaa", 2, 2, theme.fonts.body, white);
+            text_selection(&mut c, 10, 0, 4, "aaaa", 3, 1, theme.fonts.body, white);
+            // And an offset past the end of the string, which must not panic on the slice.
+            text_selection(&mut c, 10, 0, 4, "aaaa", 9, 12, theme.fonts.body, white);
+        });
+        assert!(buf.iter().all(|p| *p == 0), "nothing should have been drawn");
     }
 
     #[test]

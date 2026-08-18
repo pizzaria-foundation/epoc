@@ -63,8 +63,8 @@ pub const INVENTORY: &[Attr] = &[
     // power
     a(19, "EPowerGood"),
     a(20, "EPowerBatteryStatus"),
-    a(21, "EPowerBackupStatus"),
-    a(22, "EPowerBackup"),
+    a(21, "EPowerBackup"),
+    a(22, "EPowerBackupStatus"),
     a(23, "EPowerExternal"),
     // display
     a(24, "EKeyboard"),
@@ -84,22 +84,25 @@ pub const INVENTORY: &[Attr] = &[
     a(38, "EDisplayContrastMax"),
     a(39, "EBacklight"),
     a(40, "EBacklightState"),
-    a(41, "EDisplayBrightness"),
-    a(42, "EDisplayBrightnessMax"),
+    a(64, "EDisplayBrightness"),
+    a(65, "EDisplayBrightnessMax"),
     // input
-    a(43, "EPen"),
-    a(44, "EPenX"),
-    a(45, "EPenY"),
-    a(46, "EPenDisplayOn"),
-    a(47, "EPenClick"),
-    a(48, "EPenClickState"),
-    a(49, "EPenClickVolume"),
-    a(50, "EPenClickVolumeMax"),
-    a(51, "EMouse"),
-    // timing — the one that has already cost this project a wrong number
-    a(70, "ENanoTickPeriod"),
-    a(71, "EFastCounterFrequency"),
-    a(72, "EFastCounterCountsUp"),
+    a(41, "EPen"),
+    a(42, "EPenX"),
+    a(43, "EPenY"),
+    a(44, "EPenDisplayOn"),
+    a(45, "EPenClick"),
+    a(46, "EPenClickState"),
+    a(47, "EPenClickVolume"),
+    a(48, "EPenClickVolumeMax"),
+    a(49, "EMouse"),
+    // storage and system
+    a(70, "EMaxRAMDriveSize"),
+    a(72, "ESystemDrive"),
+    // timing — the one that has already cost this project a wrong number, twice
+    a(92, "ENanoTickPeriod"),
+    a(93, "EFastCounterFrequency"),
+    a(94, "EFastCounterCountsUp"),
 ];
 
 /// Read one attribute.
@@ -149,6 +152,53 @@ mod tests {
     fn the_timing_attributes_are_in_the_sweep() {
         for want in ["ENanoTickPeriod", "ESystemTickPeriod", "EFastCounterFrequency"] {
             assert!(INVENTORY.iter().any(|a| a.name == want), "{want} missing");
+        }
+    }
+
+    /// Names paired with the ordinals `HALData::TAttribute` actually has.
+    ///
+    /// This test exists because the one above did not catch the bug it was written for. The
+    /// table had `ENanoTickPeriod` at 70 for months; 70 is `EMaxRAMDriveSize`, so every dump
+    /// reported that attribute's answer under the timing attribute's name — and the report read
+    /// perfectly well, because a wrong number and a right number look identical. Asserting on
+    /// names alone can only catch a deletion; only the id catches a lie.
+    ///
+    /// The enum carries no explicit `= value` on any enumerator, so these are positional
+    /// ordinals read straight out of `sdk/epoc32/include/hal_data.h`. Spot checks across the
+    /// whole range rather than the full 104: enough that a shift anywhere moves at least one.
+    #[test]
+    fn the_ids_match_the_platform_enum() {
+        const KNOWN: &[(i32, &str)] = &[
+            (0, "EManufacturer"),
+            (5, "EMachineUid"),
+            (11, "ECPUSpeed"),
+            (14, "ESystemTickPeriod"),
+            (15, "EMemoryRAM"),
+            (16, "EMemoryRAMFree"),
+            (20, "EPowerBatteryStatus"),
+            (21, "EPowerBackup"),
+            (22, "EPowerBackupStatus"),
+            (31, "EDisplayXPixels"),
+            (32, "EDisplayYPixels"),
+            (41, "EPen"),
+            (49, "EMouse"),
+            (64, "EDisplayBrightness"),
+            (65, "EDisplayBrightnessMax"),
+            (70, "EMaxRAMDriveSize"),
+            (72, "ESystemDrive"),
+            (92, "ENanoTickPeriod"),
+            (93, "EFastCounterFrequency"),
+            (94, "EFastCounterCountsUp"),
+        ];
+        for (id, name) in KNOWN {
+            if let Some(at) = INVENTORY.iter().find(|a| a.name == *name) {
+                assert_eq!(at.id, *id, "{name} is attribute {id}, not {}", at.id);
+            }
+            // The reverse direction matters just as much: an id in the table under the wrong
+            // name is exactly the bug this is here for.
+            if let Some(at) = INVENTORY.iter().find(|a| a.id == *id) {
+                assert_eq!(at.name, *name, "attribute {id} is {name}, not {}", at.name);
+            }
         }
     }
 }

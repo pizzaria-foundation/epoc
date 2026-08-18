@@ -11,7 +11,7 @@
 //! maintaining a prefix-sum tree, and it cannot go stale.
 
 use crate::input::{Handled, Key, KeyEvent};
-use symbian_gfx::Rect;
+use symbian_gfx::{Canvas, Rect};
 
 pub trait Rows {
     fn len(&self) -> usize;
@@ -197,12 +197,54 @@ impl ListState {
         Handled::Consumed
     }
 
+    /// Draw each visible row, clipped to the viewport.
+    ///
+    /// This is [`for_visible`](Self::for_visible) with the canvas passed through and the clip
+    /// applied, and it is what a *drawing* caller should use. Every one of them wants the clip and
+    /// none of them can be trusted to remember it — the count when this was added was eight loops
+    /// across the SDK and the launcher with no clip at all, and two in the Telegram client that had
+    /// hand-rolled the same `clip_to` at their own call sites. See [`for_visible`](Self::for_visible)
+    /// for why an unclipped row rect is correct and dangerous at the same time.
+    ///
+    /// The canvas is a parameter of the closure rather than something it captures, because the
+    /// method needs it too and the borrow checker is right to refuse both.
+    ///
+    /// ```ignore
+    /// self.list.draw_visible(c, &rows, area, |c, i, row| {
+    ///     if i == sel { chrome::selection(c, row, theme); }
+    ///     c.draw_text_in(row.inset_xy(pad, 0), label, theme.fonts.body, colour, Align::Start);
+    /// });
+    /// ```
+    pub fn draw_visible<R: Rows + ?Sized>(
+        &self,
+        c: &mut Canvas<'_>,
+        rows: &R,
+        viewport: Rect,
+        mut f: impl FnMut(&mut Canvas<'_>, usize, Rect),
+    ) {
+        let saved = c.save();
+        c.clip_to(viewport);
+        self.for_visible(rows, viewport, |i, r| f(c, i, r));
+        c.restore(saved);
+    }
+
     /// Call `f` for each row intersecting the viewport, with the row's rect in
     /// viewport coordinates — already shifted by the scroll offset, so a widget
     /// can draw straight into it.
     ///
     /// Rows are visited in order and stop as soon as one starts past the bottom,
     /// so cost is proportional to what is on screen plus the walk to reach it.
+    ///
+    /// # The rect can start above the viewport, and that is on purpose
+    ///
+    /// A partially-visible first row *is* partly above the band, and a caller that wants to draw
+    /// the visible sliver of it needs to know where the whole row would have gone — text has to be
+    /// positioned against the row it belongs to, not against the edge that cut it. So this hands
+    /// out the true rect and leaves the trimming to the caller.
+    ///
+    /// Which every caller forgot. Unclipped, that row's text lands on whatever is above the list,
+    /// and on a screen that is the title bar. **Prefer [`draw_visible`](Self::draw_visible)** unless
+    /// you want geometry without a canvas — a hit test, a measurement, a test.
     pub fn for_visible<R: Rows + ?Sized>(
         &self,
         rows: &R,

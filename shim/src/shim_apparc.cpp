@@ -39,8 +39,25 @@
  * binary that opts into USE_APPICON (an isolated icon probe/daemon) pays the load risk. */
 #ifdef SHIM_USE_APPICON
 #include <apgicnfl.h>   /* CApaMaskedBitmap — the colour+mask pair GetAppIcon fills */
-#include <fbs.h>        /* CFbsBitmap (CApaMaskedBitmap's base, and its Mask() plane) */
-#include <gdi.h>        /* TRgb, for the per-pixel read */
+#endif
+
+/* Shared by both icon routes: the bitmap type whose rows they read, and the display-mode constants
+ * they ask the server to convert to. Neither header is an icon-specific risk — fbscli and gdi are
+ * in every app's base library set (tools/symbuild) — so they sit outside the gates. */
+#if defined(SHIM_USE_APPICON) || defined(SHIM_USE_AKNICON)
+#include <fbs.h>        /* CFbsBitmap — GetScanLine lives here */
+#include <gdi.h>        /* TRgb and the TDisplayMode constants */
+#endif
+
+/* A third gate, nested one level deeper than SHIM_USE_APPICON, for the icon path that goes through
+ * Avkon rather than AppArc's masked bitmap. It adds a whole new library import (aknicon), so by the
+ * rule in docs/device-notes.md — an import that does not resolve makes the image vanish, with no
+ * panic and no log — it gets its own switch and lands in the isolated probe first, never straight
+ * in the resident launcher. aknicon.dll is present on the E72 (measured, docs/device-dump.txt) and
+ * aknicon.dso ships in the vendored S60 3.2 SDK, so this is an ordinary link, not the .dso-from-
+ * firmware synthesis the repo elsewhere calls its riskiest line. */
+#ifdef SHIM_USE_AKNICON
+#include <AknIconUtils.h> /* AknIconUtils::CreateIconL / SetSize, and TScaleMode */
 #endif
 
 /* Kept in step with ShimAppInfo::caption in symbian_shim.h. Captions are TBuf<256> on the
@@ -180,6 +197,142 @@ static void DoLaunchL(TUint32 aUid3)
     CleanupStack::PopAndDestroy(cmd);
     }
 
+#ifdef SHIM_USE_LAUNCH_DOC
+
+/* Launching an app AT something — a URL — rather than merely launching it.
+ *
+ * A separate gate from the rest of AppArc for the usual reason, and with a twist worth stating: the
+ * calls below are all apgrfx, the same library `StartApp` already uses, so the *load* risk is low.
+ * What is unknown is whether any of them does anything useful on this firmware. A native S60
+ * browser is asked to open a URL by a convention, not by an API — there is no `OpenUrl` — and which
+ * convention a given handset honours is a question only the handset answers. So all four routes are
+ * compiled and the probe tries each, rather than one being chosen here on faith.
+ *
+ * Routes, in the order a probe should try them:
+ *
+ *   0  document name   CApaCommandLine::SetDocumentNameL, then StartApp at an explicit UID.
+ *                      The documented way to say "open this app on this thing".
+ *   1  tail end        SetTailEndL("4 <url>") — the S60 browser's own convention, where 4 is the
+ *                      "open URL" command in its private command set. Undocumented and the one most
+ *                      likely to actually work on the E72.
+ *   2  StartDocument   RApaLsSession::StartDocument(url, TUid, ...) — explicit app, platform builds
+ *                      the command line.
+ *   3  resolve         RApaLsSession::StartDocument(url, ...) with no UID, letting the platform pick
+ *                      the handler. Expected to fail for a URL, which is not a file and has no
+ *                      recognizer, but it is the one route that would make a scheme registry
+ *                      unnecessary — worth one call to find out.
+ *
+ * The URL arrives as UTF-16 because that is what a Symbian descriptor is and what every other
+ * string in this shim already uses (see shim_file_open). */
+static void DoLaunchDocL(TUint32 aUid3, const TDesC& aDoc, TInt aRoute)
+    {
+    TThreadId tid;
+
+    if (aRoute == 2)
+        {
+        User::LeaveIfError(gLs.StartDocument(const_cast<TDesC&>(aDoc), TUid::Uid(aUid3), tid));
+        return;
+        }
+    if (aRoute == 3)
+        {
+        User::LeaveIfError(gLs.StartDocument(const_cast<TDesC&>(aDoc), tid));
+        return;
+        }
+
+    TApaAppInfo info;
+    User::LeaveIfError(gLs.GetAppInfo(info, TUid::Uid(aUid3)));
+
+    CApaCommandLine* cmd = CApaCommandLine::NewLC();
+    cmd->SetExecutableNameL(info.iFullName);
+    if (aRoute == 1)
+        {
+        /* The tail end is 8-bit and the URL is 16: narrowed a character at a time rather than
+         * through CnvUtfConverter, which would drag charconv in for a string that is ASCII by
+         * definition. A non-ASCII byte would be mangled here — and a non-ASCII URL is
+         * percent-encoded before it ever reaches this point, so there is none to mangle. */
+        HBufC8* tail = HBufC8::NewLC(aDoc.Length() + 2);
+        TPtr8 t = tail->Des();
+        t.Append(_L8("4 "));
+        for (TInt i = 0; i < aDoc.Length(); i++)
+            t.Append(static_cast<TUint8>(aDoc[i] & 0xFF));
+        cmd->SetCommandL(EApaCommandRun);
+        cmd->SetTailEndL(*tail);
+        User::LeaveIfError(gLs.StartApp(*cmd));
+        CleanupStack::PopAndDestroy(tail);
+        }
+    else
+        {
+        cmd->SetDocumentNameL(aDoc);
+        cmd->SetCommandL(EApaCommandOpen);
+        User::LeaveIfError(gLs.StartApp(*cmd));
+        }
+    CleanupStack::PopAndDestroy(cmd);
+    }
+
+/* Hand a running application a message, the way the shell hands the browser a URL.
+ *
+ * The route that matters most and the one missing from the first attempt. `StartApp` and
+ * `StartDocument` both *start* an application; neither does anything useful to one that is already
+ * running, and the browser on this handset usually is. It accepts the launch, brings nothing
+ * forward, and the user sees the page that was already open — which is exactly what happened.
+ *
+ * `TApaTask::SendMessage` is the other half: it delivers a descriptor to a live task's window
+ * group. The browser's own protocol is an 8-bit `"<command> <argument>"`, where 4 is "open this
+ * URL". The message UID is not read by the browser, so it is zero.
+ *
+ * SHIM_ERR_NOT_FOUND when the application is not running, which is not an error — it is the
+ * caller's signal to start it instead. */
+int32_t shim_app_task_message(uint32_t uid3, const uint8_t* msg, int32_t msg_len)
+    {
+    CCoeEnv* env = CCoeEnv::Static();
+    if (!env)
+        return SHIM_ERR_NOT_READY;
+    if (!msg || msg_len <= 0)
+        return SHIM_ERR_ARGUMENT;
+
+    TApaTaskList list(env->WsSession());
+    TApaTask task = list.FindApp(TUid::Uid(uid3));
+    if (!task.Exists())
+        return SHIM_ERR_NOT_FOUND;
+
+    /* Foreground first: a message delivered to a background task changes what it shows without
+     * showing it, which reads as nothing having happened. */
+    task.BringToForeground();
+    TPtrC8 des(reinterpret_cast<const TUint8*>(msg), msg_len);
+    task.SendMessage(TUid::Uid(0), des);
+    return SHIM_OK;
+    }
+
+/* Launch app aUid3 pointed at the document aDoc (a URL), by route aRoute. See DoLaunchDocL for what
+ * the routes are and why there is more than one. SHIM_OK once the platform accepted it — which is
+ * emphatically not the same as the app having opened the URL, and no API here can tell us that. */
+int32_t shim_app_launch_doc(uint32_t uid3, const uint16_t* doc, int32_t doc_len, int32_t route)
+    {
+    TInt rc = EnsureSession();
+    if (rc != KErrNone)
+        return rc;
+    if (!doc || doc_len <= 0)
+        return SHIM_ERR_ARGUMENT;
+
+    TPtrC des(reinterpret_cast<const TUint16*>(doc), doc_len);
+    TRAPD(err, DoLaunchDocL(uid3, des, route));
+    return err == KErrNone ? SHIM_OK : err;
+    }
+
+#else  /* !SHIM_USE_LAUNCH_DOC */
+
+/* The symbol exists in every AppArc build, the implementation only in one. Same discipline as
+ * shim_cpu.cpp: gating the *symbol* would make every caller need a matching cargo feature, and a
+ * missing symbol fails at link with `--no-undefined` before --gc-sections can sweep it. Gating the
+ * body instead keeps the risky calls out of binaries that did not ask for them while leaving the
+ * Rust side a single unconditional declaration. */
+int32_t shim_app_launch_doc(uint32_t, const uint16_t*, int32_t, int32_t)
+    {
+    return SHIM_ERR_NOT_SUPPORTED;
+    }
+
+#endif // SHIM_USE_LAUNCH_DOC
+
 /* Start the installed application with this UID3, the way the native shell would. SHIM_OK once the
  * platform has accepted the launch. The TRAP is the boundary: NewLC and the SetL calls can leave,
  * and a leave crossing extern "C" is undefined, so it stops here and becomes a code. */
@@ -279,12 +432,93 @@ int32_t shim_apps_running(uint32_t* out, int32_t cap)
     return count;
     }
 
-#ifdef SHIM_USE_APPICON
+#if defined(SHIM_USE_APPICON) || defined(SHIM_USE_AKNICON)
 
 /* The widest icon row we buffer, in pixels. S60 app icons top out well under this; a wider bitmap
  * is refused (KErrTooBig) rather than smashing the stack row. Two bytes per pixel for the EColor64K
  * colour row is the larger of the two temp uses. */
 static const TInt KMaxIconRow = 256;
+
+/* The bitmap's REAL size, which is not necessarily the size that was asked for.
+ *
+ * This is the lesson that cost a device round. AknIconUtils::SetSize documents, in as many words,
+ * that "there is no guarantee of its size, except that it is non-negative" — and it does nothing at
+ * all if the bitmap is not a CAknBitmap. Reading a fixed 44x44 out of a bitmap that turned out to be
+ * 22x22 walks off the end of the pixel data: on the E72 one app whose icon happened to be big enough
+ * drew skewed, and every other app closed the probe. Neither symptom pointed at the size, because
+ * both look like the fetch itself failing.
+ *
+ * So the size is asked for, never assumed. SizeInPixels is fbscli ordinal 116 — an ordinal GDesk
+ * does not import, and therefore one more thing that could in principle fail to resolve. It earns
+ * its risk: without it this path cannot be made correct, only lucky. */
+static void ActualSize(CFbsBitmap* aBmp, TInt aCap, TInt& aW, TInt& aH, TInt* aWOut, TInt* aHOut)
+    {
+    const TSize size = aBmp->SizeInPixels();
+    aW = size.iWidth;
+    aH = size.iHeight;
+    /* Report the size to the caller BEFORE refusing it. An icon larger than the buffer is not a
+     * failure, it is a buffer that was too small — and the caller can only allocate the right one
+     * if it is told what "right" is. Leaving without answering is what made an oversized icon
+     * indistinguishable from an app with no icon at all. */
+    if (aWOut)
+        *aWOut = aW;
+    if (aHOut)
+        *aHOut = aH;
+    if (aW <= 0 || aH <= 0)
+        User::Leave(KErrCorrupt);
+    if (aW > KMaxIconRow)
+        User::Leave(KErrTooBig);
+    if (aW * aH > aCap)
+        User::Leave(KErrOverflow);
+    }
+
+/* Copy one bitmap into caller buffers, row by row, the way GDesk does it: GetScanLine (fbscli ord
+ * 109/110) and never GetPixel (ord 131). The server does the display-mode conversion and copies out
+ * bytes — EColor64K is already RGB565, EGray256 is one coverage byte per pixel — so there is no
+ * per-pixel call and no assumption about the bitmap's own mode. Shared by both icon routes.
+ *
+ * aW/aH must be the colour bitmap's real size (see ActualSize). The mask is checked separately and
+ * independently: AknIconUtils sizes bitmap and mask together in theory, but a mask that disagrees is
+ * exactly the sort of thing that reads off the end of a buffer, and an icon with no transparency is
+ * a far better outcome than a closed app. */
+static void ReadPlanes(CFbsBitmap* aColour, CFbsBitmap* aMask, TInt aW, TInt aH,
+                       TUint16* aRgb, TUint8* aMaskOut)
+    {
+    TUint8 line[KMaxIconRow * 2];
+
+    for (TInt y = 0; y < aH; y++)
+        {
+        TPtr8 row(line, sizeof(line));
+        aColour->GetScanLine(row, TPoint(0, y), aW, EColor64K);
+        Mem::Copy(aRgb + y * aW, line, aW * 2);
+        }
+
+    TBool masked = EFalse;
+    if (aMask)
+        {
+        const TSize ms = aMask->SizeInPixels();
+        masked = (ms.iWidth >= aW && ms.iHeight >= aH);
+        }
+
+    if (masked)
+        {
+        for (TInt y = 0; y < aH; y++)
+            {
+            TPtr8 row(line, sizeof(line));
+            aMask->GetScanLine(row, TPoint(0, y), aW, EGray256);
+            Mem::Copy(aMaskOut + y * aW, line, aW);
+            }
+        }
+    else
+        {
+        /* No usable mask plane: opaque, so the icon draws as a solid rectangle rather than not at
+         * all — and, more to the point, rather than reading pixels that are not there. */
+        Mem::Fill(aMaskOut, aW * aH, 255);
+        }
+    }
+#endif
+
+#ifdef SHIM_USE_APPICON
 
 /* Fill aRgb (RGB565) and aMask (8-bit coverage) with this app's icon at aSize pixels, the same icon
  * the native menu draws. GetAppIcon hands back a CApaMaskedBitmap — a colour plane plus a mask
@@ -308,16 +542,38 @@ static void DoIconL(TUint32 aUid3, TInt aSize,
     if (aCap < aSize * aSize)
         User::Leave(KErrOverflow);
 
-    /* Detect non-MBM (MIF/scalable) icons the safe way, BEFORE touching GetAppIcon. The SDK docs
-     * are explicit: GetAppIconSizes returns KErrNotSupported "if the application provides icons in
-     * non-MBM format", and GetAppIcon on such an app *panics the caller* (measured on the E72 —
-     * GDesk, Quickword, Email all closed the probe here) rather than failing cleanly. So ask the
-     * question that answers with an error, not a panic; a non-KErrNone result leaves, and the caller
-     * draws the caption. Only plain-bitmap apps reach GetAppIcon below. */
-    CArrayFixFlat<TSize>* sizes = new (ELeave) CArrayFixFlat<TSize>(4);
-    CleanupStack::PushL(sizes);
-    User::LeaveIfError(gLs.GetAppIconSizes(TUid::Uid(aUid3), *sizes));
-    CleanupStack::PopAndDestroy(sizes);
+    /* Refuse anything this route cannot read, BEFORE touching GetAppIcon, which panics the caller
+     * rather than failing when it cannot cope.
+     *
+     * The guard used to be GetAppIconSizes, on the SDK's word that it "returns KErrNotSupported if
+     * the application provides icons in non-MBM format". On the E72 it does not. Measured: Speeddial
+     * (Z:\Resource\Apps\Speeddial_aif.mif) and File manager (ap_Q0_FileManager_aif.mif) both passed
+     * this guard and then closed the probe inside GetAppIcon. The documented question is simply not
+     * answered truthfully by this firmware.
+     *
+     * So ask a question the platform cannot get wrong: what file is the icon in? Two answers are
+     * refusals, and both are findings rather than failures.
+     *
+     *  - No file at all. Measured on app 10207839: no icon file, yet GetAppIcon still reports
+     *    success and hands back a 38x31 bitmap — the same size it hands back for Adobe Reader,
+     *    which is how "the icon loaded but it is not that app's icon" happens. A default or a
+     *    leftover drawn confidently is worse than a caption, so this route declines it.
+     *  - A .mif. Scalable icons are what this handset actually ships, and this route cannot read
+     *    them; DoIconCL can.
+     *
+     * That leaves plain .mbm files, which is the only thing this route was ever able to do. */
+    HBufC* file = NULL;
+    User::LeaveIfError(gLs.GetAppIcon(TUid::Uid(aUid3), file));
+    if (!file)
+        User::Leave(KErrNotFound);
+    CleanupStack::PushL(file);
+    _LIT(KMbm, ".mbm");
+    /* Right(n) panics if n exceeds the length, so a pathologically short name is checked for first
+     * — this is a guard, and a guard that can panic is not one. */
+    const TBool isMbm = file->Length() >= 4 && file->Right(4).CompareF(KMbm) == 0;
+    CleanupStack::PopAndDestroy(file);
+    if (!isMbm)
+        User::Leave(KErrNotSupported);
 
     /* NewLC() creates a fresh empty masked bitmap. The other overload, NewL(const* aSourceIcon),
      * *copies* its argument — passing NULL there dereferences it (KERN-EXEC 3), which is what closed
@@ -326,36 +582,36 @@ static void DoIconL(TUint32 aUid3, TInt aSize,
      * the clean test of whether ordinal 33 is present. */
     CApaMaskedBitmap* bmp = CApaMaskedBitmap::NewLC();
 
-    /* The TSize overload (apgrfx ord 144, which GDesk uses) scales the icon to exactly this size, so
-     * width and height are known here without CFbsBitmap::SizeInPixels (fbscli ord 116 — another
-     * ordinal GDesk avoids). We asked for a square, we get a square. */
-    const TInt w = aSize;
-    const TInt h = aSize;
-    const TSize want(w, h);
+    /* The TSize overload is apgrfx ord 144, the one GDesk uses. aSize is a REQUEST, not a promise.
+     *
+     * This used to assume the answer came back at exactly the size asked for — "we asked for a
+     * square, we get a square" — and skipped SizeInPixels to keep the import set down to GDesk's.
+     * The handset disagreed. Measured on the E72: Adobe Reader fetched fine but drew skewed, its
+     * rows walking sideways, and every app with a smaller icon closed the probe outright. Both are
+     * one bug. The platform hands back the nearest registered icon, which is usually smaller than
+     * 44; reading 44 pixels across and 44 rows down out of a 24x24 bitmap wraps the rows if the
+     * data happens to extend that far and reads off the end if it does not.
+     *
+     * So the size is read, not assumed, and the caller is told what it actually got — the buffers
+     * were allocated for aSize*aSize, which is the ceiling, and anything at or under it fits. */
+    const TSize want(aSize, aSize);
     User::LeaveIfError(gLs.GetAppIcon(TUid::Uid(aUid3), want, *bmp));
+
+    TInt w = 0;
+    TInt h = 0;
+    ActualSize(bmp, aCap, w, h, aW, aH);
     if (aW)
         *aW = w;
     if (aH)
         *aH = h;
 
-    TUint8 line[KMaxIconRow * 2];
-
-    /* Colour plane, RGB565 straight from the server. EColor64K is 16bpp little-endian RGB565, which
-     * is exactly aRgb's layout, so the row is a flat byte copy. */
-    for (TInt y = 0; y < h; y++)
-        {
-        TPtr8 row(line, sizeof(line));
-        bmp->GetScanLine(row, TPoint(0, y), w, EColor64K);
-        Mem::Copy(aRgb + y * w, line, w * 2);
-        }
-
-    /* Mask plane: fully opaque, on purpose. The natural call is CApaMaskedBitmap::Mask() (apgrfx
-     * ord 183), but that is the one icon symbol the E72 does not carry — a device test bricked the
-     * load with it and loaded without it, and GDesk (which runs here) never imports it either. So
-     * the mask is dropped: icons draw with a solid rectangle rather than a cut-out. Transparency
-     * will come back through AknIconUtils (aknicon.dll, which GDesk does import) rather than the
-     * masked-bitmap accessor — a follow-up, not this load-fix. */
-    Mem::Fill(aMask, w * h, 255);
+    /* NULL mask, on purpose. The natural call is CApaMaskedBitmap::Mask() (apgrfx ord 183), but
+     * that is the one icon symbol the E72 does not carry — a device test bricked the load with it
+     * and loaded without it, and GDesk (which runs here) never imports it either. So the mask is
+     * dropped and ReadPlanes fills it opaque: icons draw with a solid rectangle rather than a
+     * cut-out. Transparency comes back through DoIconCL below, which gets a real mask plane from
+     * AknIconUtils instead of from the masked-bitmap accessor. */
+    ReadPlanes(bmp, NULL, w, h, aRgb, aMask);
     CleanupStack::PopAndDestroy(bmp);
     }
 
@@ -391,6 +647,79 @@ static void DoIconBL(TUint32 aUid3, TInt aSize, TUint16* aRgb, TUint8* aMask, TI
     }
 
 #endif // SHIM_USE_APPICON (icon helper — shim_app_icon itself is always defined)
+
+#ifdef SHIM_USE_AKNICON
+
+/* Variant C: the icon by FILE, through Avkon, instead of by CApaMaskedBitmap. This is the route
+ * that fixes all three known defects of the path above at once, and it is the one the launcher
+ * should end up on.
+ *
+ *   1. It never constructs a CApaMaskedBitmap, so apgrfx ordinal 33 (NewLC) stops mattering — the
+ *      one ordinal in this file whose presence on the E72 has never been confirmed either way.
+ *   2. AknIconUtils hands back a real mask plane, so icons draw as cut-outs instead of the opaque
+ *      rectangles the missing Mask() (ord 183) forces on the route above.
+ *   3. It reads MIF (scalable, SVG-T) icons as happily as MBM ones. Those are exactly the apps —
+ *      GDesk, Quickword, Email measured on this handset — where GetAppIcon *panics the caller*
+ *      instead of failing, and which the route above therefore has to refuse up front.
+ *
+ * The HBufC*& overload of GetAppIcon (apgcli.h) answers with the icon file's full path rather than
+ * its pixels; it is apgrfx, already linked everywhere, and touches no masked bitmap.
+ *
+ * aBitmapId is a parameter rather than a constant because the right value is a measurement we do
+ * not have yet: bitmap and mask sit at consecutive indices within the file, but MBM indices start
+ * at 0 while mifconv-generated MIF indices are conventionally offset. The probe sweeps the
+ * candidates and the answer gets written down; only then does a caller hardcode one. */
+static void DoIconCL(RApaLsSession& aLs, TUint32 aUid3, TInt aSize, TInt aBitmapId,
+                     TUint16* aRgb, TUint8* aMask, TInt aCap, TInt* aW, TInt* aH)
+    {
+    if (aSize <= 0)
+        User::Leave(KErrArgument);
+    if (aSize > KMaxIconRow)
+        User::Leave(KErrTooBig);
+    if (aCap < aSize * aSize)
+        User::Leave(KErrOverflow);
+
+    /* Ownership of the buffer transfers to us. A registered app with no icon file answers with an
+     * error here — an ordinary result, which the caller reads as "draw the caption". */
+    HBufC* file = NULL;
+    User::LeaveIfError(aLs.GetAppIcon(TUid::Uid(aUid3), file));
+    if (!file)
+        User::Leave(KErrNotFound);
+    CleanupStack::PushL(file);
+
+    /* CreateIconL allocates both planes and transfers them to us. They carry no pixels yet: for an
+     * MBM that is the scale step, for a MIF it is the SVG-T rasterisation, and both happen in
+     * SetSize. A mask id is always requested; a file that has none yields a NULL mask, which
+     * ReadPlanes treats as opaque rather than as an error. */
+    CFbsBitmap* bmp = NULL;
+    CFbsBitmap* mask = NULL;
+    AknIconUtils::CreateIconL(bmp, mask, *file, aBitmapId, aBitmapId + 1);
+    CleanupStack::PushL(bmp);
+    CleanupStack::PushL(mask);
+
+    /* EAspectRatioNotPreserved so the result is exactly the size asked for. App icons are square
+     * and the caller asks for a square, so nothing is distorted — and it spares us reading the
+     * size back with CFbsBitmap::SizeInPixels (fbscli ord 116), another ordinal GDesk avoids.
+     * SetSize sizes the bitmap and its mask together, whichever of the two is passed. */
+    User::LeaveIfError(
+        AknIconUtils::SetSize(bmp, TSize(aSize, aSize), EAspectRatioNotPreserved));
+
+    /* Same rule as route A, and here the documentation says it outright: SetSize "does nothing" if
+     * the bitmap is not a CAknBitmap, and even on success gives "no guarantee of its size, except
+     * that it is non-negative". Ask. */
+    TInt w = 0;
+    TInt h = 0;
+    ActualSize(bmp, aCap, w, h, aW, aH);
+    if (aW)
+        *aW = w;
+    if (aH)
+        *aH = h;
+
+    ReadPlanes(bmp, mask, w, h, aRgb, aMask);
+    CleanupStack::PopAndDestroy(3, file);
+    }
+
+#endif // SHIM_USE_AKNICON
 
 /* Fetch app aUid3's icon at aSize into caller buffers. *w/*h are written whenever the bitmap size
  * is known (so a caller can right-size a retry), and SHIM_ERR_OVERFLOW says the buffers were too
@@ -450,6 +779,91 @@ int32_t shim_app_icon_b(uint32_t uid3, int32_t size,
 #else
     (void) uid3;
     (void) size;
+    (void) cap;
+    return SHIM_ERR_NOT_SUPPORTED;
+#endif
+    }
+
+/* The path of the file an app's icon actually comes from.
+ *
+ * Diagnostic, and the one that matters most when a fetch *succeeds* and draws the wrong picture:
+ * pixels alone cannot tell you whether the platform handed you the wrong image out of the right
+ * file or the right image out of the wrong file. The extension answers a second question for free —
+ * `.mbm` is a plain bitmap, `.mif` is scalable, and that is what decides which route can read it.
+ *
+ * Lives behind SHIM_USE_AKNICON because it is the HBufC*& GetAppIcon overload, an apgrfx ordinal
+ * nothing else here imports; the icon file route already depends on it. */
+int32_t shim_app_icon_file(uint32_t uid3, uint16_t* out, int32_t cap, int32_t* len)
+    {
+    if (len)
+        *len = 0;
+    if (!out || cap <= 0)
+        return SHIM_ERR_NOT_SUPPORTED;
+
+#ifdef SHIM_USE_AKNICON
+    TInt rc = EnsureSession();
+    if (rc != KErrNone)
+        return rc;
+
+    HBufC* file = NULL;
+    rc = gLs.GetAppIcon(TUid::Uid(uid3), file);
+    if (rc != KErrNone)
+        return rc;
+    if (!file)
+        return SHIM_ERR_NOT_FOUND;
+
+    /* Ownership transferred to us, so it is deleted here whatever happens next. */
+    const TInt n = file->Length() < cap ? file->Length() : cap;
+    Mem::Copy(out, file->Ptr(), n * 2);
+    if (len)
+        *len = n;
+    delete file;
+    return SHIM_OK;
+#else
+    (void) uid3;
+    return SHIM_ERR_NOT_SUPPORTED;
+#endif
+    }
+
+/* Variant C — the Avkon route; see DoIconCL. Same ABI as shim_app_icon plus `bitmap_id`, the index
+ * of the colour plane within the app's icon file (the mask is taken to be the next one). */
+int32_t shim_app_icon_c(uint32_t uid3, int32_t size, int32_t bitmap_id,
+                        uint16_t* rgb_out, uint8_t* mask_out, int32_t cap,
+                        int32_t* w, int32_t* h)
+    {
+    if (w)
+        *w = 0;
+    if (h)
+        *h = 0;
+    if (!rgb_out || !mask_out || size <= 0)
+        return SHIM_ERR_NOT_SUPPORTED;
+
+#ifdef SHIM_USE_AKNICON
+    /* On the CALLING thread, which for a GUI app is the UI thread. That is not a detail.
+     *
+     * A previous version ran this on a sacrificial worker thread, reasoning that a panic kills only
+     * the thread and the caller could then treat "this app cannot be asked" as an ordinary error.
+     * It is sound reasoning and it does not work here: measured on the E72, the fetch returned an
+     * error for *every* app when run that way, having succeeded for those same apps on the main
+     * thread. AknIconUtils is an Avkon UI utility and wants the UI thread's environment; a bare
+     * thread with its own RFbsSession and RApaLsSession is not enough. It also cost a thread
+     * creation, two server connections and a blocking wait per icon, which made the launcher
+     * unusable long before it made it correct.
+     *
+     * So a panic here is not catchable, and the protection is not in this file: the caller writes
+     * down which app it is about to ask about, and an entry still there at the next start names the
+     * app that killed the process. Remembering beats catching, because catching is not on offer. */
+    TInt rc = EnsureSession();
+    if (rc != KErrNone)
+        return rc;
+    TRAPD(err, DoIconCL(gLs, uid3, size, bitmap_id, rgb_out, mask_out, cap, w, h));
+    if (err == KErrOverflow)
+        return SHIM_ERR_OVERFLOW;
+    return err == KErrNone ? SHIM_OK : err;
+#else
+    (void) uid3;
+    (void) size;
+    (void) bitmap_id;
     (void) cap;
     return SHIM_ERR_NOT_SUPPORTED;
 #endif

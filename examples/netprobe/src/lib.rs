@@ -850,7 +850,8 @@ impl App for NetProbe {
         chrome::clear(c, theme);
 
         chrome::title_bar(c, frame.title, theme, self.test.name(), None);
-        chrome::softkey_bar(c, frame.softkeys, theme, [Some("Run"), None, Some("Exit")]);
+        // Middle is the action, matching the D-pad centre this screen already handles.
+        chrome::softkey_bar(c, frame.softkeys, theme, chrome::Softkeys::action("Run", "Exit"));
 
         let small = theme.fonts.small;
         let mut y = frame.content.y0 + 1;

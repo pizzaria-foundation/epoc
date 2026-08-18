@@ -414,7 +414,7 @@ impl BootScreen {
         let sel = self.list.selected;
         let moving = self.move_mode;
         let p = &theme.palette;
-        self.list.for_visible(&rows, content, |i, row| {
+        self.list.draw_visible(c, &rows, content, |c, i, row| {
             if i == sel {
                 chrome::selection(c, row, theme);
             }
@@ -512,7 +512,7 @@ impl BootScreen {
         // A fresh ListState each draw: this tab is read-only, so there is no selection to keep and
         // nothing to scroll with — the rows either fit or the report is longer than the screen.
         let view = &mut ListState::new();
-        view.for_visible(&rows, content, |i, row| {
+        view.draw_visible(c, &rows, content, |c, i, row| {
             let col = if i == 0 { p.accent } else { p.text };
             let font = if i == 0 { theme.fonts.strong } else { theme.fonts.body };
             c.draw_text_in(row.inset_xy(theme.metrics.pad, 0), &lines[i], font, col, Align::Start);
@@ -586,7 +586,8 @@ impl App for BootScreen {
             3 => Some("Reset"),
             _ => None,
         };
-        chrome::softkey_bar(c, softkeys, theme, [left, None, Some("Back")]);
+        // Left is this screen's mode switch; the action is the D-pad centre, handled in `handle_key`.
+        chrome::softkey_bar(c, softkeys, theme, chrome::Softkeys::new(left, None, Some("Back")));
 
         // Drawn over everything, including the softkey bar's row, because it is a drawer.
         if let Some(p) = self.picker.as_mut() {

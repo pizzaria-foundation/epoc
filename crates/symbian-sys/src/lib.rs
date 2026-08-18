@@ -655,6 +655,19 @@ extern "C" {
     /// End send to background instead of closing. [`SHIM_ERR_NOT_READY`] before the window group
     /// exists. Needs SwEvent, granted at load on a ROM-patched handset.
     pub fn shim_set_resident(on: i32) -> i32;
+    /// Drop this app behind the others without closing it.
+    pub fn shim_app_to_background() -> i32;
+    /// Bring this app back to the front, focus included.
+    pub fn shim_app_to_foreground() -> i32;
+    /// Sum the CPU microseconds of every thread matching `pattern` (UTF-16).
+    pub fn shim_cpu_time(
+        pattern: *const u16,
+        pattern_len: i32,
+        total_us: *mut i64,
+        threads: *mut i32,
+    ) -> i32;
+    /// The full name of the nth running process.
+    pub fn shim_process_at(index: i32, out: *mut u16, cap: i32, len: *mut i32) -> i32;
 
     // installed-app enumeration and launch (USE_APPARC)
     /// Re-scan installed applications into the shim's cache. Returns the count (>= 0) or a
@@ -676,6 +689,25 @@ extern "C" {
     /// Start the installed app with this UID3, the way the shell would. [`SHIM_OK`] on
     /// acceptance; the launched app runs with its own capabilities, not the caller's.
     pub fn shim_app_launch(uid3: u32) -> i32;
+    /// Launch app `uid3` pointed at `doc` (a URL, UTF-16, `doc_len` units) by `route`.
+    ///
+    /// Only linked when the app is built with `USE_LAUNCH_DOC=1`; every other binary must not
+    /// reference this or it imports a symbol it does not need. There is no `OpenUrl` on S60 — a
+    /// browser is asked by convention, and `route` selects which convention: 0 document name, 1 the
+    /// browser's `4 <url>` tail end, 2 `StartDocument` at an explicit app, 3 `StartDocument` letting
+    /// the platform resolve. [`SHIM_OK`] means the platform accepted the launch, **not** that the
+    /// URL opened; nothing in AppArc reports that.
+    pub fn shim_app_launch_doc(uid3: u32, doc: *const u16, doc_len: i32, route: i32) -> i32;
+    /// Deliver a message to a running application, bringing it forward. The way the shell hands a
+    /// URL to a browser that is already open. [`SHIM_ERR_NOT_FOUND`] when it is not running.
+    pub fn shim_app_task_message(uid3: u32, msg: *const u8, msg_len: i32) -> i32;
+    /// Put UTF-16 `text` on the system clipboard as plain text, in the format Avkon's Paste reads.
+    /// [`SHIM_ERR_NOT_SUPPORTED`] unless the app was built with `USE_CLIPBOARD=1`.
+    pub fn shim_clip_set_text(text: *const u16, len: i32) -> i32;
+    /// Read the clipboard's plain text into `out` (at most `cap` UTF-16 units); `len` gets the
+    /// count. [`SHIM_ERR_NOT_FOUND`] when there is nothing to paste, [`SHIM_ERR_NOT_SUPPORTED`]
+    /// unless the app was built with `USE_CLIPBOARD=1`.
+    pub fn shim_clip_get_text(out: *mut u16, cap: i32, len: *mut i32) -> i32;
     /// Kill the installed app with this UID3 through the window server — the way to stop an app
     /// that will not close itself, like a resident launcher. [`SHIM_OK`] if killed,
     /// [`SHIM_ERR_NOT_FOUND`] if it has no running task.
@@ -710,6 +742,21 @@ extern "C" {
         w: *mut i32,
         h: *mut i32,
     ) -> i32;
+    /// Variant C of [`shim_app_icon`] (USE_AKNICON): reads the app's registered icon *file* through
+    /// Avkon's `AknIconUtils`, so MIF (scalable) icons work as well as MBM ones and the mask plane
+    /// is real. `bitmap_id` indexes the colour plane within that file; the mask is the next index.
+    pub fn shim_app_icon_c(
+        uid3: u32,
+        size: i32,
+        bitmap_id: i32,
+        rgb_out: *mut u16,
+        mask_out: *mut u8,
+        cap: i32,
+        w: *mut i32,
+        h: *mut i32,
+    ) -> i32;
+    /// The path of the file an app's icon comes from (USE_AKNICON), as UTF-16 units.
+    pub fn shim_app_icon_file(uid3: u32, out: *mut u16, cap: i32, len: *mut i32) -> i32;
 
     // device inventory (USE_HAL)
     /// `HAL::Get`. `attr` is a `HALData::TAttribute`; see `symbian::hal` for the table.
@@ -1092,6 +1139,26 @@ mod host_stubs {
     pub unsafe fn shim_set_resident(_on: i32) -> i32 {
         SHIM_ERR_NOT_READY
     }
+    pub unsafe fn shim_cpu_time(
+        _pattern: *const u16,
+        _pattern_len: i32,
+        total_us: *mut i64,
+        threads: *mut i32,
+    ) -> i32 {
+        if !total_us.is_null() {
+            core::ptr::write(total_us, 0);
+        }
+        if !threads.is_null() {
+            core::ptr::write(threads, 0);
+        }
+        SHIM_ERR_NOT_READY
+    }
+    pub unsafe fn shim_process_at(_index: i32, _out: *mut u16, _cap: i32, len: *mut i32) -> i32 {
+        if !len.is_null() {
+            core::ptr::write(len, 0);
+        }
+        SHIM_ERR_NOT_READY
+    }
     pub unsafe fn shim_apps_refresh() -> i32 {
         SHIM_ERR_NOT_READY
     }
@@ -1112,6 +1179,29 @@ mod host_stubs {
         SHIM_ERR_NOT_READY
     }
     pub unsafe fn shim_app_launch(_uid3: u32) -> i32 {
+        SHIM_ERR_NOT_READY
+    }
+    pub unsafe fn shim_app_task_message(_uid3: u32, _msg: *const u8, _len: i32) -> i32 {
+        SHIM_ERR_NOT_READY
+    }
+    pub unsafe fn shim_app_to_background() -> i32 {
+        SHIM_ERR_NOT_READY
+    }
+    pub unsafe fn shim_app_to_foreground() -> i32 {
+        SHIM_ERR_NOT_READY
+    }
+    pub unsafe fn shim_clip_set_text(_text: *const u16, _len: i32) -> i32 {
+        SHIM_ERR_NOT_READY
+    }
+    pub unsafe fn shim_clip_get_text(_out: *mut u16, _cap: i32, _len: *mut i32) -> i32 {
+        SHIM_ERR_NOT_READY
+    }
+    pub unsafe fn shim_app_launch_doc(
+        _uid3: u32,
+        _doc: *const u16,
+        _doc_len: i32,
+        _route: i32,
+    ) -> i32 {
         SHIM_ERR_NOT_READY
     }
     pub unsafe fn shim_app_kill(_uid3: u32) -> i32 {
@@ -1166,6 +1256,35 @@ mod host_stubs {
         }
         if !h.is_null() {
             core::ptr::write(h, 0);
+        }
+        SHIM_ERR_NOT_READY
+    }
+    pub unsafe fn shim_app_icon_c(
+        _uid3: u32,
+        _size: i32,
+        _bitmap_id: i32,
+        _rgb_out: *mut u16,
+        _mask_out: *mut u8,
+        _cap: i32,
+        w: *mut i32,
+        h: *mut i32,
+    ) -> i32 {
+        if !w.is_null() {
+            core::ptr::write(w, 0);
+        }
+        if !h.is_null() {
+            core::ptr::write(h, 0);
+        }
+        SHIM_ERR_NOT_READY
+    }
+    pub unsafe fn shim_app_icon_file(
+        _uid3: u32,
+        _out: *mut u16,
+        _cap: i32,
+        len: *mut i32,
+    ) -> i32 {
+        if !len.is_null() {
+            core::ptr::write(len, 0);
         }
         SHIM_ERR_NOT_READY
     }

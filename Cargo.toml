@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/symbian-gfx",
     "crates/symbian-ui",
+    "crates/symbian-decl-ui",
     "crates/symbian-keys",
     "crates/symbian-sys",
     "crates/opus",
@@ -22,17 +23,20 @@ members = [
     "examples/imgprobe",
     "examples/audioprobe",
     "examples/sqlprobe",
+    "apps/cpuprobe",
     "apps/devdump",
     "apps/bootd",
     "apps/bootctl",
+    "apps/urlprobe",
     "tools/preview",
 ]
 # Every app's device crate is deliberately absent: a no_std staticlib carrying a
 # #[panic_handler] collides with std's when cargo builds the test harness, so each one is its
 # own workspace root, built only for the ARM target. See any device/Cargo.toml.
-exclude = [
+exclude = ["apps/urlprobe/device", 
     "examples/selftest/device",
     "examples/netprobe/device",
+    "apps/cpuprobe/device",
     "apps/devdump/device",
     "apps/devdump/probes/system/device",
     "apps/devdump/probes/libsweep/device",
@@ -55,6 +59,7 @@ rust-version = "1.85"
 [workspace.dependencies]
 symbian-gfx = { path = "crates/symbian-gfx", default-features = false }
 symbian-ui = { path = "crates/symbian-ui", default-features = false }
+symbian-decl-ui = { path = "crates/symbian-decl-ui", default-features = false }
 symbian-keys = { path = "crates/symbian-keys" }
 symbian-sys = { path = "crates/symbian-sys" }
 symbian = { path = "crates/symbian" }

@@ -21,6 +21,32 @@
 //! `handle_key` and `draw` are called from the shim, which is exactly the shape
 //! this design assumes.
 //!
+//! # The key convention
+//!
+//! Every screen in this SDK uses the same three keys for the same three jobs. It is the native S60
+//! arrangement, and that is the argument for it: the phone has trained its user for a decade, and a
+//! screen that disagrees is the one that feels broken.
+//!
+//! ```text
+//!   ┌──────────────────────────────────────────────┐
+//!   │  Options            Open            Back     │
+//!   └──────────────────────────────────────────────┘
+//!      left softkey    D-pad centre   right softkey
+//!      secondary       THE ACTION     way out
+//! ```
+//!
+//! - **Centre of the D-pad is the action.** Open, send, confirm — whatever this screen is for.
+//!   It arrives as [`Key::Select`]. It is *not* a softkey: S60 wires the middle slot of the bar to
+//!   the selection key, so `Softkey::Middle` never arrives and a screen that waits for it waits for
+//!   ever. Label the middle slot; handle `Select`.
+//! - **Left softkey is options** — the secondary offer: refresh, a mode switch, a menu. Blank when
+//!   there is nothing, which is common.
+//! - **Right softkey is back**, and only ever back or exit. It is the one key a user presses
+//!   without reading, so it must never become a second action.
+//!
+//! [`chrome::Softkeys`] builds the bar in that order, by name, so the three cannot be transposed
+//! silently — `[a, b, c]` reads the same whichever meaning the author had in mind.
+//!
 //! # Sketch
 //!
 //! ```ignore
@@ -29,7 +55,9 @@
 //! chrome::title_bar(&mut canvas, frame.title, &theme, "Chats", Some("online"));
 //!
 //! let rows = Uniform { count: chats.len(), height: theme.metrics.row_h };
-//! state.for_visible(&rows, frame.content, |i, r| draw_chat_row(&mut canvas, r, &chats[i]));
+//! // `draw_visible`, not `for_visible`: it clips to the band, so the partially-visible top row
+//! // is cut at the edge instead of painting on the title bar. See `ListState::for_visible`.
+//! state.draw_visible(&mut canvas, &rows, frame.content, |c, i, r| draw_chat_row(c, r, &chats[i]));
 //! chrome::scrollbar(&mut canvas, frame.content, &theme,
 //!                   state.scrollbar(&rows, frame.content.height()));
 //!
@@ -45,11 +73,15 @@ extern crate alloc;
 pub mod app;
 pub mod app_picker;
 pub mod chrome;
+pub mod clip;
+pub mod device_screen;
 pub mod edit;
 pub mod icon;
 pub mod input;
 pub mod list;
 pub mod paint;
+pub mod modal;
+pub mod prompt;
 pub mod select;
 pub mod stepper;
 pub mod tabs;
@@ -62,11 +94,15 @@ pub mod testing;
 pub mod tokens;
 
 pub use app::{App, RawEvent};
-pub use app_picker::{AppPicker, Item as PickerItem, PickerAction};
-pub use chrome::Frame;
+pub use app_picker::{AppPicker, IconRef, Item as PickerItem, PickerAction};
+pub use chrome::{Frame, Softkeys};
+pub use clip::{Clipboard, MemClipboard, NoClipboard};
+pub use device_screen::{DeviceScreen, Entry as DeviceEntry};
 pub use edit::TextField;
 pub use input::{Handled, Key, KeyEvent, Modifiers, Softkey};
 pub use list::{ListState, Rows, Uniform};
+pub use modal::{Answer, Modal};
+pub use prompt::{Prompt, PromptAction};
 pub use select::{Select, SelectAction};
 pub use stepper::Stepper;
 pub use tabs::Tabs;
