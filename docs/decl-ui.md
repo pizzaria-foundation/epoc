@@ -207,7 +207,7 @@ keystroke to produce an identical one. This is also why an app reads a field thr
 `TextField::buffer()` rather than waiting for the next `view`: no view runs.
 
 **A widget answers only when it is focused**, and focus comes from the model. `TextField::focused`,
-`Button::focused` and `ScrollList::focused` all veto otherwise, so the broadcast walk behaves like
+`Button::focused`, `ScrollList::focused` and `Grid::focused` all veto otherwise, so the broadcast walk behaves like
 focused dispatch without a focus registry. `ScrollList` defaults to **off**: an app that maps Up and
 Down in `update` would otherwise have its selection moved twice by one press, once by the message
 and once by the list, and the two would part company the first time one of them clamped.
@@ -302,6 +302,42 @@ rows are built during `draw`, so the only identity available to key their slots 
 position*. State keyed that way slides one row up the list every time the list scrolls — the same
 defect keyed groups exist to cure, arriving through a different door. Per-row state belongs in the
 model, keyed by whatever the row itself is keyed by.
+
+## The grid, and when a widget earns its place in this crate
+
+`Grid` is `ScrollList` with a second axis: `cols` cells across, a cursor that moves in four
+directions, and `on_edge` reporting *which* side it ran out of rather than only that it did.
+
+It is worth reading as the worked example of when something belongs here rather than in the app
+that wanted it. The rule this crate follows is that an abstraction needs **two callers that already
+disagree**, and this one had them: the launcher's home draws a `cols`×`rows` block of shortcuts with
+its own `grid_cells` helper and its own four arrow arms, and a calendar's month view is six rows of
+seven days with the same cursor and the same edges. Both had to answer the same four questions —
+where cell `i` lands, what `Right` does in the last column, what `Down` does out of a full row into
+a half-filled one, and how a cursor stays on screen — and the second was about to answer them
+differently. One caller would have been an app's widget; two that were already drifting is the
+signal.
+
+The split follows `ScrollList`'s exactly, and that is the other half of the lesson. The arithmetic
+went to **`symbian_ui::grid`** — pure, `no_std`, thirteen tests — beside `list.rs`, where it is
+reachable from a hand-written screen that never touches this crate. What lives here is only *where
+the state lives* and *when the cells are built*. A widget that grew its own `i32` calculations would
+be a second implementation of the same bugs, arriving later and diverging quietly.
+
+Two things it does that a list does not, both forced by the calendar:
+
+**`Grid::fitted(slots, cols, count, rows)` divides the band by the row count** instead of taking a
+cell height. A month view with a constant cell height leaves a strip of background at the bottom of
+a 176-pixel band — and, worse, a grid one pixel too tall silently starts scrolling, so the top row
+creeps under the title bar as the cursor moves down. Six rows always, whatever February does, because
+a grid that changed shape between months makes the whole screen twitch when the user pages.
+
+**Its edges have four names.** A list's `Edge` is `Top | Bottom`, which is enough to ask a server for
+another page. `Left` on the first column of a month means "the previous month" and `Right` on the
+last means "the next", and a cursor that merely clamped could report neither — nor tell either apart
+from a key that did nothing. It is exported as `GridEdge` rather than `Edge` because `widgets::Edge`
+is already the list's, and two enums sharing a name in one module is how a caller matches on the
+wrong one.
 
 ## What is deliberately not here
 
