@@ -25,6 +25,7 @@ pub extern crate alloc;
 #[doc(hidden)]
 pub use alloc as __alloc;
 
+pub mod agenda;
 pub mod apps;
 pub mod backoff;
 pub mod cenrep;
