@@ -308,12 +308,25 @@ impl ScrollList {
     /// after messages are deleted, which otherwise shows up much later as a list with no visible
     /// highlight and no obvious cause.
     fn sync(&self, viewport_h: i32) -> ListState {
+        let st = self.synced(viewport_h);
+        self.state.set(st);
+        st
+    }
+
+    /// [`sync`](Self::sync) without keeping the answer.
+    ///
+    /// For a reader that needs to know where the cursor *would* be without that being a thing that
+    /// happened. Merely looking at a list — which is what forwarding a key to its row is — must
+    /// leave no trace, or an unfocused list quietly adopts the model's cursor as a side effect of a
+    /// keypress it did not answer. That is what
+    /// `an_unfocused_list_reports_nothing_because_it_never_sees_the_key` is checking, and it caught
+    /// exactly this.
+    fn synced(&self, viewport_h: i32) -> ListState {
         let mut st = self.state.get();
         match self.selected {
             Some(i) => st.select(i, &self.rows, viewport_h),
             None => st.clamp(&self.rows, viewport_h),
         }
-        self.state.set(st);
         st
     }
 
@@ -336,6 +349,48 @@ impl ScrollList {
             // something else.
             MainAlign::SpaceBetween => 0,
         }
+    }
+
+    /// Offer a key to the selected row's own widgets.
+    ///
+    /// The row is rebuilt and placed exactly as [`Widget::draw`] places it, and dispatched into
+    /// against this list's cache — which still holds the rects the last frame laid out, the same
+    /// thing the bridge's own walk relies on.
+    ///
+    /// Only the selected row. The others are on screen but nothing is pointing at them: this device
+    /// has no pointer, so "the widget the key is for" and "the row the cursor is on" are the same
+    /// sentence. Offering it to every visible row would let the third one answer a key meant for
+    /// the first.
+    fn dispatch_to_row(&self, ev: KeyEvent, rect: Rect, cx: &mut KeyCtx<'_>) -> Handled {
+        if self.rows.len() == 0 {
+            return Handled::Ignored;
+        }
+        let band = self.content(rect, cx.theme);
+        let st = self.synced(band.height());
+        let rows_at = Rect { y0: band.y0 + self.slack_offset(band.height()), ..band };
+
+        // Walked rather than remembered: the slot a row occupies depends on which rows are visible
+        // and on how wide each one's subtree is, and a number stashed during `draw` would be stale
+        // for exactly one frame after anything changed — which is the frame a key arrives in.
+        let mut slot = 0usize;
+        let mut base = None;
+        st.for_visible(&self.rows, rows_at, |i, _| {
+            let node = (self.row)(i, i == st.selected);
+            if i == st.selected {
+                base = Some(slot);
+            }
+            slot += node.slot_count();
+        });
+        let Some(base) = base else {
+            // The selected row is scrolled out of view. Nothing was drawn for it, so there are no
+            // rects to dispatch against — and a key answered by an invisible widget would be a key
+            // that vanished.
+            return Handled::Ignored;
+        };
+
+        let node = (self.row)(st.selected, true);
+        let cache = self.cache.borrow();
+        layout::dispatch_key_node(&node, base, ev, &cache, cx)
     }
 
     /// The band rows are drawn into, with the scrollbar gutter taken off the right.
@@ -419,7 +474,21 @@ impl Widget for ScrollList {
         }
     }
 
-    fn handle_key(&self, ev: KeyEvent, rect: Rect, _cx: &mut KeyCtx<'_>) -> Handled {
+    fn handle_key(&self, ev: KeyEvent, rect: Rect, cx: &mut KeyCtx<'_>) -> Handled {
+        // The selected row's own widgets get the key first, and this has to come before the
+        // `focused` check below.
+        //
+        // Rows are built inside `draw`, against this list's private cache; to the screen's tree the
+        // whole list is one opaque leaf, so the bridge's key walk stops here and cannot descend.
+        // Without this, a `TextField` in a row can never be typed into — reported from a handset as
+        // "I press Escrever, I type, and nothing happens", with no error anywhere.
+        //
+        // Before the `focused` check because the case that needs it is exactly a list that is *not*
+        // focused: a field taking the keys wants Up and Down left alone, or the cursor leaves the
+        // row mid-word.
+        if self.dispatch_to_row(ev, rect, cx) == Handled::Consumed {
+            return Handled::Consumed;
+        }
         // Only when the list was told it owns its cursor. The default is that the model does, and
         // moving the selection here as well would give one list two drivers — see
         // [`ScrollList::focused`].
@@ -578,6 +647,120 @@ mod tests {
         });
         assert!(moves.borrow().is_empty());
         assert!(edges.borrow().is_empty(), "Select is the action key, not an end of the list");
+    }
+
+    // ---- keys reaching the widgets inside a row ---------------------------------------------------
+
+    /// A list whose selected row holds a focused text field, and the buffer behind it.
+    ///
+    /// Drawn once before returning, because the key walk answers against the rects the last frame
+    /// laid out — a tree that has never been drawn takes no keys, here exactly as in the bridge.
+    fn with_field(
+        slots: &mut SlotTable,
+        selected: usize,
+        field_focused: bool,
+    ) -> (ScrollList, Rc<RefCell<symbian_ui::edit::TextField>>) {
+        let buf = Rc::new(RefCell::new(symbian_ui::edit::TextField::new()));
+        let shared = buf.clone();
+        let list = ScrollList::new(slots, 4, ROW).selected(selected).row(move |i, sel| {
+            if i == selected {
+                Node::leaf(
+                    crate::widgets::TextField::with_buffer(shared.clone())
+                        .focused(sel && field_focused),
+                )
+            } else {
+                Node::leaf(crate::widgets::text::Text::new("outra"))
+            }
+        });
+        testing::with_canvas(GSize::new(W, H), |c| {
+            testing::with_theme(Palette::DARK, |t| list.draw(c, viewport(), t));
+        });
+        (list, buf)
+    }
+
+    #[test]
+    fn a_key_reaches_a_widget_inside_the_selected_row() {
+        // Reported from a handset: an editor whose fields are rows of a list took the "write" key,
+        // said it was writing, and swallowed every character after it.
+        //
+        // Rows are built inside `draw` against this list's own cache, so to the screen's tree the
+        // whole list is one opaque leaf and the bridge's walk stops here. Nothing below this widget
+        // could ever be typed into.
+        let mut slots = SlotTable::new();
+        slots.begin_frame();
+        let (list, buf) = with_field(&mut slots, 1, true);
+        crate::widget::with_key_ctx(|cx| {
+            assert_eq!(list.handle_key(press(Key::Char('o')), viewport(), cx), Handled::Consumed);
+            assert_eq!(list.handle_key(press(Key::Char('i')), viewport(), cx), Handled::Consumed);
+        });
+        assert_eq!(buf.borrow().text(), "oi");
+    }
+
+    #[test]
+    fn a_row_is_offered_the_key_even_when_the_list_itself_is_unfocused() {
+        // The case that forced the fix, and the reason it runs *before* the focused check: a field
+        // taking the keys wants Up and Down left alone, or the cursor walks out of the row
+        // mid-word. So the list is deliberately unfocused exactly when its row needs the keys most.
+        let mut slots = SlotTable::new();
+        slots.begin_frame();
+        let (list, buf) = with_field(&mut slots, 0, true);
+        assert!(!list.focused);
+        crate::widget::with_key_ctx(|cx| {
+            list.handle_key(press(Key::Char('a')), viewport(), cx);
+        });
+        assert_eq!(buf.borrow().text(), "a");
+    }
+
+    #[test]
+    fn a_row_that_wants_nothing_leaves_the_list_navigating() {
+        // The other half: forwarding must not cost a list its arrows. An unfocused field ignores
+        // everything, so the key falls through to the cursor as it always did.
+        let mut slots = SlotTable::new();
+        slots.begin_frame();
+        let (list, buf) = with_field(&mut slots, 0, false);
+        let list = list.focused(true);
+        crate::widget::with_key_ctx(|cx| {
+            assert_eq!(list.handle_key(press(Key::Down), viewport(), cx), Handled::Consumed);
+        });
+        assert_eq!(list.selection(), 1, "the arrow did not reach the cursor");
+        assert!(buf.borrow().is_empty());
+    }
+
+    #[test]
+    fn only_the_selected_row_is_offered_the_key() {
+        // With no pointer, "the widget this key is for" and "the row the cursor is on" are the same
+        // sentence. Offering it to every visible row would let the third one answer a key meant for
+        // the first, and nothing on screen would say which had.
+        let mut slots = SlotTable::new();
+        slots.begin_frame();
+        let (list, buf) = with_field(&mut slots, 2, true);
+        // The field is on row 2 and the cursor is on row 2, so it types.
+        crate::widget::with_key_ctx(|cx| {
+            list.handle_key(press(Key::Char('x')), viewport(), cx);
+        });
+        assert_eq!(buf.borrow().text(), "x");
+
+        // Same tree, cursor elsewhere: the field is still on screen and is now nobody's business.
+        slots.end_frame();
+        slots.begin_frame();
+        let (list, buf) = with_field(&mut slots, 0, true);
+        let stray = Rc::new(RefCell::new(symbian_ui::edit::TextField::new()));
+        let shared = stray.clone();
+        let list = ScrollList::new(&mut slots, 4, ROW).selected(0).row(move |i, _| {
+            if i == 2 {
+                Node::leaf(crate::widgets::TextField::with_buffer(shared.clone()).focused(true))
+            } else {
+                Node::leaf(crate::widgets::text::Text::new("outra"))
+            }
+        });
+        testing::with_canvas(GSize::new(W, H), |c| {
+            testing::with_theme(Palette::DARK, |t| list.draw(c, viewport(), t));
+        });
+        crate::widget::with_key_ctx(|cx| {
+            list.handle_key(press(Key::Char('z')), viewport(), cx);
+        });
+        assert!(stray.borrow().is_empty(), "a row nobody is pointing at answered the key");
+        let _ = buf;
     }
 
     #[test]
