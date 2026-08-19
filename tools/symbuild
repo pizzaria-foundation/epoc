@@ -1185,7 +1185,24 @@ if [ "${AUTOSTART:-0}" = 1 ] && [ -f "$BUILD/${NAME}_startup.rsc" ]; then
   echo "--> autostart: [$SUID].rsc → \\private\\101f875a\\import\\"
 fi
 
-( cd "$BUILD" && "$HOST/makesis" "$NAME.pkg" "$NAME.sis" )
+# The destination is spelled absolutely, and it has to be.
+#
+# makesis 4.0 validates it with
+#
+#     if (wcslen(pszTarget) < (wcslen(DESTFILE) + sizeof(WCHAR))) throw ErrBadTargetFile;
+#
+# (gnupoc's tools/makesis-4/src/parsecmd.cpp, SetTarget). `DESTFILE` is L".sis", and the
+# author meant "at least one character before the extension" — but wrote `sizeof(WCHAR)`
+# where they meant `1`. On Windows that is 2 and the threshold is 6; on Linux `wchar_t` is
+# four bytes, so anything shorter than **eight characters** is refused as an "invalid
+# destination file".
+#
+# So `makesis cal.pkg cal.sis` fails and `makesis cal.pkg calx.sis` succeeds — an app whose
+# name is three characters or fewer could not be packaged at all, and the error names the
+# destination without saying what is wrong with it. An absolute path is always long enough,
+# and is clearer than a bare name anyway. Patching the tool would work too; this does not
+# need every checkout to rebuild it.
+( cd "$BUILD" && "$HOST/makesis" "$NAME.pkg" "$BUILD/$NAME.sis" )
 OUT="$BUILD/$NAME.sis"
 
 if [ "$SIGN" = 1 ]; then
