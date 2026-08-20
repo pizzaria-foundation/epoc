@@ -1,0 +1,30 @@
+// ECom registration for recoglaunch — read by ECom from \resource\plugins\recoglaunch.rsc.
+//
+// dll_uid / implementation_uid are recoglaunch's UID3 (0xE0DD00F4), kept in step with app.conf.
+// interface_uid 0x101F7D87 is the AppArc data-recogniser ECom interface (from the SDK's own
+// example, sdk/examples/appframework/recogniser/e8000002.rss). opaque_data is empty: we do no
+// data-driven MIME matching (DoRecognizeL never matches), we only want the factory to run.
+#include <ecom/registryinfo.rh>
+
+RESOURCE REGISTRY_INFO r_registry
+    {
+    dll_uid = 0xE0DD00F4;
+    interfaces =
+        {
+        INTERFACE_INFO
+            {
+            interface_uid = 0x101F7D87;
+            implementations =
+                {
+                IMPLEMENTATION_INFO
+                    {
+                    implementation_uid = 0xE0DD00F4;
+                    version_no = 1;
+                    display_name = "recoglaunch";
+                    default_data = "";
+                    opaque_data = "";
+                    }
+                };
+            }
+        };
+    }

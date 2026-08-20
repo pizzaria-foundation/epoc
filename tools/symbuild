@@ -141,6 +141,31 @@ if [ "${USE_MTM:-0}" = 1 ]; then
   echo "--> mtm base: $(( ${#MTM_SRCS[@]} )) sources from shim/mtm/src"
 fi
 
+# USE_RECOG=1 adds shim/recog — the AppArc data-recogniser base class — to the sources.
+#
+# Same shape and same reasoning as USE_MTM above: a recogniser is a polymorphic DLL loaded into
+# the AppArc server's process, so it may hold no writable static data, and the shim (which does)
+# must never be linked into it. shim/recog/src rather than shim/src/recog for the same reason —
+# the shim loop below globs shim/src/*.cpp wholesale. The recogniser exports exactly one symbol
+# (CreateRecognizer at ordinal 1), so it lists no MTM registration machinery: EXPORTS names the
+# one factory and the DLL build exits before any resource stage, which is what a legacy
+# recogniser wants — apparc discovers it by scanning \sys\bin, with no registration resource.
+RECOG_SRCS=()
+RECOG_INC=""
+if [ "${USE_RECOG:-0}" = 1 ]; then
+  if [ "${USE_SHIM:-0}" = 1 ] || [ "${USE_SHIM_DAEMON:-0}" = 1 ]; then
+    echo "USE_RECOG cannot be combined with USE_SHIM or USE_SHIM_DAEMON." >&2
+    echo "The shim has file-scope mutable state; a Symbian DLL may have none, and the" >&2
+    echo "loader refuses the image. A recogniser DLL links shim/recog only." >&2
+    exit 1
+  fi
+  [ "${USE_MTM:-0}" = 1 ] && { echo "USE_RECOG and USE_MTM are two different plugin bases; pick one" >&2; exit 1; }
+  [ "$TARGETTYPE" = DLL ] || { echo "USE_RECOG needs TARGETTYPE=DLL" >&2; exit 1; }
+  for src in "$SDK"/shim/recog/src/*.cpp; do RECOG_SRCS+=("$src"); done
+  RECOG_INC="-I$SDK/shim/recog/inc"
+  echo "--> recog base: $(( ${#RECOG_SRCS[@]} )) sources from shim/recog/src"
+fi
+
 if [ "${USE_SHIM:-0}" = 1 ]; then
   NET_LIBS=""
   if [ "${USE_NET:-0}" = 1 ]; then
@@ -229,6 +254,53 @@ fi
 # sweep could tell us whether ncnnotification.dll is present. Failure is a return code.
 if [ "${USE_NCN:-0}" = 1 ]; then
   SYMBIAN_LIBS="${SYMBIAN_LIBS:-euser} ecom"
+fi
+
+# The Central Repository client. Appended here rather than in the USE_SHIM branch above for the
+# same reason USE_MSG is: the first thing to read a CenRep key was a headless daemon, and a
+# daemon names its own library list — so a rule that only fired for a GUI app would have added
+# nothing in the one place the flag was meant to be used.
+#
+# This was a real gap: shim_cenrep.cpp has existed since the network daemon needed the Bluetooth
+# power key, but nothing here put centralrepository on the link line, so USE_CENREP=1 on its own
+# failed at the link with an undefined CRepository::NewL and no hint that the flag was the cause.
+# apps/netd worked only because it also named the library by hand.
+if [ "${USE_CENREP:-0}" = 1 ]; then
+  SYMBIAN_LIBS="${SYMBIAN_LIBS:-euser} centralrepository"
+fi
+
+# Bluetooth. Six libraries, and the heaviest import set any flag in this file adds:
+#
+#   btmanclient     RBTRegServ, RBTRegistry, RBTLocalDevice, TBTRegistrySearch
+#   btdevice        CBTDevice, TBTLocalDevice, TBTDeviceSecurity, the name converter
+#   bluetooth       the ESock Bluetooth protocol module — KBTAddrFamily, TInquirySockAddr
+#   btextnotifiers  the BT notifier plugins reached through RNotifier
+#   esock           RSocketServ and RHostResolver, which is how an inquiry is run
+#   centralrepository  the power key
+#
+# All six DLLs loaded in the device sweep (docs/device-dump.txt:208-239). That proves they open;
+# it does not prove the ordinals this shim calls are exported by a 2009 Nokia build. So the rule
+# is the same one USE_MSG carries: set this in a binary that has nothing else to lose until
+# apps/devdump/probes/bt has reported, and never in a resident app before then.
+#
+# NAMING A LIBRARY HERE DOES NOT NECESSARILY MAKE IT AN IMPORT, and this list is where that got
+# measured. The bt probe names ten libraries and its E32 image imports nine: `estor`, `hal` and
+# `btextnotifiers` are absent from the import table, because elf2e32 builds that table from the
+# symbols actually referenced rather than from the link line. So `btextnotifiers` stays in the
+# list for the app that will want the native device-selection notifier, and costs the probe that
+# does not call it nothing at all. Check with `python3 tools/e32dump.py <exe>` — it reports the
+# DLL count — and `strings -a <exe> | grep .dll` for the names.
+if [ "${USE_BT:-0}" = 1 ]; then
+  SYMBIAN_LIBS="${SYMBIAN_LIBS:-euser} btmanclient btdevice bluetooth btextnotifiers esock centralrepository"
+fi
+
+# RFCOMM data sockets + SDP service registration, for the remote-shell agent. Deliberately
+# NOT folded into USE_BT: it adds sdpdatabase (RSdp/RSdpDatabase), an import neither the bt
+# probe nor anything else here has linked, so it belongs in its own isolated binary until
+# that binary has reported. esock and bluetooth carry the RFCOMM socket; the registry
+# libraries USE_BT adds are not needed here, so an agent takes this gate and not that one.
+if [ "${USE_BTSOCK:-0}" = 1 ]; then
+  SYMBIAN_LIBS="${SYMBIAN_LIBS:-euser} esock bluetooth sdpdatabase"
 fi
 
 BUILD="$APP/build"
@@ -382,6 +454,9 @@ for src in $CXX_SOURCES; do SRCS+=("$APP/$src"); done
 # The MTM base library, if USE_MTM. Added here rather than to CXX_SOURCES so an app.conf names
 # only its own files.
 for src in "${MTM_SRCS[@]+"${MTM_SRCS[@]}"}"; do SRCS+=("$src"); done
+# The recogniser base, if USE_RECOG. Same rationale as MTM_SRCS: added here, not to
+# CXX_SOURCES, so an app.conf names only its own files.
+for src in "${RECOG_SRCS[@]+"${RECOG_SRCS[@]}"}"; do SRCS+=("$src"); done
 # fepbase carries the default implementations of MCoeFepAwareTextEditor's own virtuals.
 # They are IMPORT_C, so a class deriving from it puts their addresses in its vtable and the
 # link fails without them -- and cone.dso, which exports TCoeInputCapabilities including the
@@ -464,6 +539,19 @@ if [ "${USE_SHIM:-0}" = 1 ] || [ "${USE_SHIM_DAEMON:-0}" = 1 ]; then
       # not opt in.
       shim_cenrep.cpp)
         [ "${USE_CENREP:-0}" = 1 ] || continue
+        ;;
+      # Bluetooth: the registry, the local-device record, the power key and an inquiry. The
+      # heaviest gate in this file — six imports at once, and the device sweep proved only that
+      # the DLLs open, not that these ordinals exist. Belongs in an isolated probe until that
+      # probe has reported. See the header of shim_bt.cpp.
+      shim_bt.cpp)
+        [ "${USE_BT:-0}" = 1 ] || continue
+        ;;
+      # RFCOMM data sockets and SDP service registration for the remote-shell agent. Its own
+      # gate, not USE_BT: it adds sdpdatabase, an import nothing here has linked before, so it
+      # rides in an isolated probe first. See the header of shim_btsock.cpp.
+      shim_btsock.cpp)
+        [ "${USE_BTSOCK:-0}" = 1 ] || continue
         ;;
       # Same reason, and the one that caught us: the file was compiled
       # unconditionally while imageconversion stayed behind USE_IMAGE, so every
@@ -573,6 +661,8 @@ if [ ${#SRCS[@]} -gt 0 ]; then
       ${USE_CLIPBOARD:+$([ "$USE_CLIPBOARD" = 1 ] && echo -DSHIM_USE_CLIPBOARD)} \
       ${USE_TELEPHONY:+$([ "$USE_TELEPHONY" = 1 ] && echo -DSHIM_USE_TELEPHONY)} \
       ${USE_CENREP:+$([ "$USE_CENREP" = 1 ] && echo -DSHIM_USE_CENREP)} \
+      ${USE_BT:+$([ "$USE_BT" = 1 ] && echo -DSHIM_USE_BT)} \
+      ${USE_BTSOCK:+$([ "$USE_BTSOCK" = 1 ] && echo -DSHIM_USE_BTSOCK)} \
       ${USE_PROP:+$([ "$USE_PROP" = 1 ] && echo -DSHIM_USE_PROP)} \
       ${USE_MEM:+$([ "$USE_MEM" = 1 ] && echo -DSHIM_USE_MEM)} \
       ${USE_HAL:+$([ "$USE_HAL" = 1 ] && echo -DSHIM_USE_HAL)} \
@@ -585,7 +675,7 @@ if [ ${#SRCS[@]} -gt 0 ]; then
       -Wall -Wno-narrowing -Wno-ctor-dtor-privacy -Wno-unknown-pragmas \
       -Wno-attributes \
       ${MTM_TRACE:+$([ "$MTM_TRACE" = 1 ] && echo -DMTM_TRACE)} \
-      -I"$APP/inc" -I"$APP/data" -I"$SDK/shim/inc" ${MTM_INC:-} ${CXX_FLAGS:-} \
+      -I"$APP/inc" -I"$APP/data" -I"$SDK/shim/inc" ${MTM_INC:-} ${RECOG_INC:-} ${CXX_FLAGS:-} \
       "$src" -o "$obj"
     OBJS+=("$obj")
   done
@@ -925,6 +1015,32 @@ if [ -n "${MTM_ICONS:-}" ]; then
   echo "    $NAME.mbm  $(stat -c%s "$BUILD/$NAME.mbm") bytes"
 fi
 
+# ------------------------------------------- 4d. ECom plugin registration resource
+# An ECom plugin (UID2 0x10009D8D, one export ImplementationGroupProxy) is discovered not by a
+# \sys\bin scan but by a REGISTRY_INFO resource in \resource\plugins\, which ECom reads to learn
+# the DLL's implementations and their interface UIDs. Compile it here, on the DLL path and ahead
+# of the exit below, for the same three reasons the MTM stages are here: it must run for a DLL
+# (which stops before the general resource stage), it must run under HEADLESS, and it goes to a
+# directory the general packaging loop does not route to.
+#
+# ECOM_RESOURCE names a hand-written .rss in the app (the REGISTRY_INFO block is short and its
+# UIDs are fixed, so unlike the MTM registration there is nothing to substitute — no template).
+# Emitted as .ecomrsc, not .rsc, so the packaging glob ("$BUILD"/*.rsc) cannot sweep it into
+# \resource\apps\; the extension is restored to .rsc at the install path (see EXTRA_ECOM_RESOURCES).
+if [ -n "${ECOM_RESOURCE:-}" ]; then
+  [ "$TARGETTYPE" = DLL ] || { echo "ECOM_RESOURCE needs TARGETTYPE=DLL" >&2; exit 1; }
+  ecomsrc="$APP/$ECOM_RESOURCE"
+  [ -f "$ecomsrc" ] || { echo "ECOM_RESOURCE: $ecomsrc not found" >&2; exit 1; }
+  ecombase="$(basename "$ecomsrc" .rss)"
+  echo "--> ecom registration: $ecombase.rsc"
+  "$CROSS/$TC-g++" -E -P -x c++ -nostdinc \
+    -I"$EPOCROOT/epoc32/include" -I"$EPOCROOT/epoc32/include/variant" \
+    -I"$APP/data" -D_UNICODE -DLANGUAGE_SC "$ecomsrc" -o "$BUILD/$ecombase.rpp"
+  ( cd "$(dirname "$ecomsrc")" && "$HOST/rcomp" -u -o"$BUILD/$ecombase.ecomrsc" \
+      -h"$ecombase.rsg" -s"$BUILD/$ecombase.rpp" )
+  echo "    $ecombase.ecomrsc  $(stat -c%s "$BUILD/$ecombase.ecomrsc") bytes"
+fi
+
 if [ "$TARGETTYPE" = DLL ]; then
   # A DLL is not installable on its own: it is bundled by the app that loads it,
   # through that app's EXTRA_DLLS. Stop here rather than emitting a .sis nobody
@@ -1086,6 +1202,31 @@ for extra in ${EXTRA_DLLS:-}; do
   echo "\"$dpath\"-\"!:\\sys\\bin\\$dbase\"" >> "$BUILD/$NAME.pkg"
   echo "--> bundling $dbase"
 done
+# Arbitrary data files, each written as `<source>:<device path>`.
+#
+# The general case the EXTRA_* routes above do not cover: they all know where their kind of file
+# belongs, and this one is for a file whose destination is the caller's business. The `!:` drive
+# prefix is honoured, so `!:\\Data\\x` follows the install drive while `C:\\Data\\x` pins it.
+#
+# What it is for here: apps/bootctl ships a copy of its compiled start-up resource as plain data,
+# so apps/bootd can put it into the Software Installer's import directory itself. The installer is
+# supposed to do that at install time and on this handset it does not — see docs/bootmanager.md.
+for extra in ${EXTRA_DATA_FILES:-}; do
+  dsrc="${extra%%:*}"
+  ddst="${extra#*:}"
+  if [ "$dsrc" = "$extra" ] || [ -z "$ddst" ]; then
+    echo "EXTRA_DATA_FILES: '$extra' is not <source>:<device path>" >&2
+    exit 1
+  fi
+  case "$dsrc" in /*) ;; *) dsrc="$APP/$dsrc" ;; esac
+  if [ ! -f "$dsrc" ]; then
+    echo "EXTRA_DATA_FILES: $dsrc not found" >&2
+    exit 1
+  fi
+  echo "\"$dsrc\"-\"$ddst\"" >> "$BUILD/$NAME.pkg"
+  echo "--> bundling data: $(basename "$dsrc") -> $ddst"
+done
+
 # Registration and caption resources belonging to a bundled helper app — the companion to
 # EXTRA_EXES. EXTRA_EXES copies the executable and nothing else, so a helper app bundled that way
 # installs but never appears in the menu (the same silent failure the MTM note below describes).
@@ -1177,6 +1318,21 @@ for extra in ${EXTRA_MTM_RESOURCES:-}; do
   mbase="$(basename "$mpath" .mtmrsc)"
   echo "\"$mpath\"-\"!:\\resource\\messaging\\mtm\\$mbase.rsc\"" >> "$BUILD/$NAME.pkg"
   echo "--> bundling mtm registration $mbase.rsc"
+done
+
+# An ECom plugin's registration resource, bundled into this package. Same shape as
+# EXTRA_MTM_RESOURCES: the plugin DLL is shipped through EXTRA_DLLS, and its REGISTRY_INFO
+# resource (built as .ecomrsc by stage 4d in the plugin's own build) is copied here to
+# \resource\plugins\, renamed back to .rsc, where ECom reads it.
+for extra in ${EXTRA_ECOM_RESOURCES:-}; do
+  case "$extra" in /*) epath="$extra" ;; *) epath="$APP/$extra" ;; esac
+  if [ ! -f "$epath" ]; then
+    echo "EXTRA_ECOM_RESOURCES: $epath not found — build that plugin first" >&2
+    exit 1
+  fi
+  ebase="$(basename "$epath" .ecomrsc)"
+  echo "\"$epath\"-\"!:\\resource\\plugins\\$ebase.rsc\"" >> "$BUILD/$NAME.pkg"
+  echo "--> bundling ecom registration $ebase.rsc"
 done
 
 if [ "${AUTOSTART:-0}" = 1 ] && [ -f "$BUILD/${NAME}_startup.rsc" ]; then
