@@ -269,6 +269,14 @@ if [ "${USE_CENREP:-0}" = 1 ]; then
   SYMBIAN_LIBS="${SYMBIAN_LIBS:-euser} centralrepository"
 fi
 
+# TLS via the platform secure socket (CSecureSocket). The device's ssl.dll is patched by the
+# nnproject mbedTLS port to negotiate TLS 1.2 under the native API, so we link ssl + securesocket
+# (NOT mbedtls, which is that patch's internal component and faults if called directly). Adds the
+# socket libraries too, since shim_tls opens its own RSocket/RConnection.
+if [ "${USE_TLS:-0}" = 1 ]; then
+  SYMBIAN_LIBS="${SYMBIAN_LIBS:-euser} ssl securesocket esock insock commdb netmeta"
+fi
+
 # Bluetooth. Six libraries, and the heaviest import set any flag in this file adds:
 #
 #   btmanclient     RBTRegServ, RBTRegistry, RBTLocalDevice, TBTRegistrySearch
@@ -603,6 +611,10 @@ if [ "${USE_SHIM:-0}" = 1 ] || [ "${USE_SHIM_DAEMON:-0}" = 1 ]; then
       shim_ncn.cpp)
         [ "${USE_NCN:-0}" = 1 ] || continue
         ;;
+      # HTTPS via the vendored mbedTLS port. Blocking (WaitForRequest) — headless helpers only.
+      shim_tls.cpp)
+        [ "${USE_TLS:-0}" = 1 ] || continue
+        ;;
     esac
     SRCS+=("$src")
   done
@@ -671,6 +683,7 @@ if [ ${#SRCS[@]} -gt 0 ]; then
       ${USE_MSG:+$([ "$USE_MSG" = 1 ] && echo -DSHIM_USE_MSG)} \
       ${USE_DLL_PROBE:+$([ "$USE_DLL_PROBE" = 1 ] && echo -DSHIM_USE_DLL_PROBE)} \
       ${USE_NCN:+$([ "$USE_NCN" = 1 ] && echo -DSHIM_USE_NCN)} \
+      ${USE_TLS:+$([ "$USE_TLS" = 1 ] && echo -DSHIM_USE_TLS)} \
       -fexceptions -fno-rtti \
       -Wall -Wno-narrowing -Wno-ctor-dtor-privacy -Wno-unknown-pragmas \
       -Wno-attributes \

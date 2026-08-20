@@ -1,0 +1,22 @@
+# Its own workspace root: a no_std staticlib with a #[panic_handler] cannot build for the host.
+[workspace]
+
+[package]
+name = "tlsprobe-device"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["staticlib"]
+
+[dependencies]
+symbian = { path = "../../../crates/symbian" }
+symbian-app = { path = "../../../crates/symbian-app" }
+symbian-sys = { path = "../../../crates/symbian-sys" }
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"

@@ -515,6 +515,16 @@ extern "C" {
     pub fn shim_net_connection_iap(index: i32, iap: *mut i32) -> i32;
     pub fn shim_net_start(iap: i32, handle: *mut i32) -> i32;
     pub fn shim_net_stop(handle: i32);
+    // tls — one-shot blocking HTTPS GET (headless helpers only; see shim_tls.cpp)
+    pub fn shim_https_get(
+        host: *const u16,
+        host_len: i32,
+        port: i32,
+        path: *const u16,
+        path_len: i32,
+        out: *mut u8,
+        out_cap: i32,
+    ) -> i32;
     pub fn shim_dns_resolve(conn: i32, host: *const u16, len: i32, handle: *mut i32) -> i32;
     pub fn shim_dns_close(handle: i32);
     pub fn shim_tcp_open(conn: i32, handle: *mut i32) -> i32;
@@ -982,6 +992,17 @@ mod host_stubs {
         SHIM_ERR_NOT_READY
     }
     pub unsafe fn shim_net_stop(_h: i32) {}
+    pub unsafe fn shim_https_get(
+        _host: *const u16,
+        _host_len: i32,
+        _port: i32,
+        _path: *const u16,
+        _path_len: i32,
+        _out: *mut u8,
+        _out_cap: i32,
+    ) -> i32 {
+        SHIM_ERR_NOT_READY
+    }
     pub unsafe fn shim_dns_resolve(
         _c: i32,
         _host: *const u16,
