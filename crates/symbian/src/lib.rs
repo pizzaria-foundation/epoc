@@ -28,6 +28,7 @@ pub use alloc as __alloc;
 pub mod agenda;
 pub mod apps;
 pub mod backoff;
+pub mod bt;
 pub mod cenrep;
 pub mod cache;
 pub mod caps;
@@ -223,6 +224,6 @@ mod applog_tests {
 pub mod work;
 
 pub use error::{Error, Result};
-pub use fs::{File, Fs, MemFs, OpenMode, ShimFs};
+pub use fs::{File, Fs, MemFs, OpenMode, ShimFs, Stat};
 pub use image::{Decoder, Image, Images, MemImages, ShimImages};
 pub use net::{Bearer, Iap, Ipv4, Lookup, Net, Progress, RawEvent, ShimNet, TcpStream, UdpSocket};

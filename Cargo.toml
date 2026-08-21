@@ -25,15 +25,14 @@ members = [
     "examples/sqlprobe",
     "apps/cpuprobe",
     "apps/devdump",
-    "apps/bootd",
-    "apps/bootctl",
     "apps/urlprobe",
+    "apps/cenrepdump",
     "tools/preview",
 ]
 # Every app's device crate is deliberately absent: a no_std staticlib carrying a
 # #[panic_handler] collides with std's when cargo builds the test harness, so each one is its
 # own workspace root, built only for the ARM target. See any device/Cargo.toml.
-exclude = ["apps/urlprobe/device", 
+exclude = ["apps/tlsprobe/device", "apps/cenrepdump/device", "apps/urlprobe/device", 
     "examples/selftest/device",
     "examples/netprobe/device",
     "apps/cpuprobe/device",
@@ -43,6 +42,7 @@ exclude = ["apps/urlprobe/device",
     "apps/devdump/probes/caps/device",
     "apps/devdump/probes/dll/device",
     "apps/devdump/probes/net/device",
+    "apps/devdump/probes/bt/device",
     "apps/devdump/probes/fs/device",
     "apps/devdump/probes/msg/device",
     "apps/devdump/probes/mtm/device",

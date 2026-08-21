@@ -155,6 +155,20 @@ void ShimAudioCleanup();
 void ShimSqlCleanup();
 #endif
 
+/* Close the Bluetooth registry session and drop the cached device views. Guarded like the
+ * others: an app that does not manage Bluetooth should not import btmanclient, and six
+ * unsatisfied imports stop the image loading with no error and no report file. */
+#ifdef SHIM_USE_BT
+void ShimBtCleanup();
+#endif
+
+/* Close the RFCOMM listener, deregister its SDP record, and close every accepted socket.
+ * Guarded like the others: sdpdatabase is an import an app that is not an RFCOMM server has
+ * no reason to carry. */
+#ifdef SHIM_USE_BTSOCK
+void ShimBtsockCleanup();
+#endif
+
 /* The FEP-aware editor, or NULL when the scan-code path is selected.
  *
  * Returned from CShimControl::InputCapabilities, which the framework calls during its own

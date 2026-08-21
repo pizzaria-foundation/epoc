@@ -83,6 +83,18 @@ pub const PROBES: &[Probe] = &[
       "IAPs and bearers, and which networking DLLs the handset has"),
     p(80, "fs", "ddfs.exe", 0xE0DD0080, 30_000,
       "data cage, path limits, file attributes, atomic save"),
+    // Six imports in one image — the heaviest set any binary here carries — so it is isolated
+    // for the same reason `msg` is, and it runs after everything that cannot fail. The deadline
+    // is 60 s because the last step is a real Bluetooth inquiry, bounded at 15 s inside the
+    // probe with the rest left for the six steps above it.
+    p(70, "bt", "ddbt.exe", 0xE0DD0070, 60_000,
+      "Bluetooth: the power key, the P&S settings, the registry, and one inquiry"),
+    // RFCOMM as a *server* — the remote-shell agent's transport. Alone in its image because it
+    // adds sdpdatabase, an import neither `bt` nor anything else here has linked, so failing to
+    // load costs only its own section. Fast: the bring-up is synchronous, no inquiry, so a
+    // short deadline is enough.
+    p(71, "btsock", "ddbtsk.exe", 0xE0DD0071, 15_000,
+      "can an unsigned app open RFCOMM, claim a channel, register an SDP record and listen?"),
     // The only probe that imports a library the handset may not satisfy. Alone in its
     // image precisely so that failing to load costs its own section and nothing else.
     p(60, "msg", "ddmsg.exe", 0xE0DD0060, 45_000,
@@ -112,9 +124,12 @@ pub const PROBES: &[Probe] = &[
 
 // NOT IN THE TABLE, AND DELIBERATELY SO
 //
-// ETel, the sensor framework, Bluetooth, the location framework, central repository and
-// DBMS each want a probe of their own, on the same isolation argument as `msg`. None is
-// listed here because none has been built: there is no shim for any of them yet.
+// ETel, the sensor framework, the location framework and DBMS each want a probe of their own,
+// on the same isolation argument as `msg`. None is listed here because none has been built:
+// there is no shim for any of them yet.
+//
+// Bluetooth and central repository have left this list — `bt` above is that probe, and it
+// carries the CenRep power key with it because reading one key was never worth its own image.
 //
 // Listing them anyway would be worse than leaving them out. The launcher would fail to
 // start a binary that does not exist and record `REFUSED`, which in this report means "the

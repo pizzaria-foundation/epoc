@@ -29,6 +29,7 @@ PARTS=(
   "apps/devdump/probes/dll"
   "apps/devdump/probes/net"
   "apps/devdump/probes/fs"
+  "apps/devdump/probes/bt"
   "apps/devdump/probes/msg"
   "apps/devdump/probes/mtm"
   "apps/devdump/probes/ncn"

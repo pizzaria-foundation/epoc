@@ -52,5 +52,8 @@ probe-msvev = []
 probe-etel = []
 probe-sensors = []
 probe-bt = []
+# RFCOMM server socket + SDP registration — the transport the remote-shell agent runs on.
+# Alone in its image because it adds sdpdatabase, an import nothing here has linked before.
+probe-btsock = []
 probe-location = []
 probe-repo = []

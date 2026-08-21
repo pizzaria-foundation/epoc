@@ -87,6 +87,16 @@ enum ShimEventKind {
      * persisting: passing it back to shim_net_start next time connects with no
      * prompt. */
     SHIM_EV_NET_READY = 25,
+    /* An RFCOMM listener accepted a client. `handle` is the new accepted-socket handle
+     * (>= 0) when `status` is SHIM_OK; on failure `status` is the error. Distinct from the
+     * TCP events (20..24) so a daemon running both can branch without ambiguity. */
+    SHIM_EV_BT_ACCEPTED = 26,
+    /* Bytes arrived on an RFCOMM socket. `handle` the socket, `a` the count. */
+    SHIM_EV_BT_RECV = 27,
+    /* An RFCOMM send completed. `handle` the socket, `a` the count written on SHIM_OK. */
+    SHIM_EV_BT_SENT = 28,
+    /* An RFCOMM socket closed or its link dropped. `handle` the socket, `status` the reason. */
+    SHIM_EV_BT_CLOSED = 29,
     /* A worker-thread job finished. `status` is what rust_work returned. */
     SHIM_EV_WORK_DONE = 30,
     /* An image decode finished. `a` and `b` are the decoded width and height,
@@ -581,6 +591,31 @@ int32_t shim_mkdir(const uint16_t* path, int32_t path_len);
  * like the rest of the file API. */
 int32_t shim_dir_list(const uint16_t* path, int32_t path_len, uint16_t* buf, int32_t cap, int32_t* count);
 
+/* Like shim_dir_list, but includes subdirectories, each written with a trailing '\' so a
+ * caller can tell a directory from a file out of the NUL-separated buffer alone. For a shell
+ * that has to navigate rather than only read a known directory's files. */
+int32_t shim_dir_list_all(const uint16_t* path, int32_t path_len, uint16_t* buf, int32_t cap, int32_t* count);
+
+/* One entry's metadata. Size is split because the ABI is 32-bit and a file can exceed it;
+ * the date is fields rather than an epoch because Symbian's epoch is year 0 and no caller
+ * wants to rediscover that. `month` and `day` are 1-based (TDateTime's are not). */
+typedef struct ShimFileStat {
+    uint32_t size_lo;
+    uint32_t size_hi;
+    int32_t year;
+    int32_t month;      /* 1-12 */
+    int32_t day;        /* 1-31 */
+    int32_t hour;
+    int32_t minute;
+    int32_t second;
+    int32_t attributes; /* KEntryAtt* bits, as the file server reports them */
+    int32_t is_dir;
+} ShimFileStat;
+
+/* Size, modification time and attributes of one file or directory — RFs::Entry. A directory
+ * path may carry its trailing '\' or not; both are accepted. */
+int32_t shim_file_stat(const uint16_t* path, int32_t path_len, ShimFileStat* out);
+
 /* ------------------------------------------------------------------- alloc --
  * None of these can leave, so none of them TRAP. That is the point: the shim
  * calls User::Alloc and User::ReAlloc, never the AllocL/ReAllocL variants, so an
@@ -609,6 +644,12 @@ void shim_debug(const uint16_t* text, int32_t len);
  * and wait for its RProcess::Rendezvous. SHIM_OK once the child has signalled it is up;
  * the child's own capabilities, not the caller's, govern what it may then do. */
 int32_t shim_process_start(const uint16_t* path, int32_t path_len);
+/* SHIM_USE_PROC. Start a process without waiting for its rendezvous — the only one of the
+ * three that is safe to call from a thread running an active scheduler (every GUI app).
+ * The waiting variants use User::WaitForRequest, which on such a thread consumes another
+ * request's completion and kills the process with a stray-signal panic. See the note above
+ * the definition. */
+int32_t shim_process_spawn(const uint16_t* path, int32_t path_len);
 /* Whether a process built from UID3 is running now: 1 yes, 0 no, negative on error. */
 int32_t shim_process_running(uint32_t uid3);
 /* Kill every live process with this UID3 — the escape hatch for a resident launcher. SHIM_OK if
@@ -1256,6 +1297,217 @@ int32_t shim_dll_has_ordinal(const uint16_t* name, int32_t len, int32_t ordinal)
  *
  * Returns SHIM_ERR_TIMED_OUT and kills the child if the deadline passes first. */
 int32_t shim_process_start_timeout(const uint16_t* path, int32_t path_len, int32_t timeout_ms);
+
+/* ------------------------------------------------------------------ Bluetooth --
+ * SHIM_USE_BT. Imports btmanclient, btdevice, bluetooth, btextnotifiers, esock and
+ * centralrepository — six at once, which is why the first binary to carry them is a probe
+ * of its own and not an app anybody stands on.
+ *
+ * # What is ours and what is the platform's
+ *
+ * The Bluetooth *server* is in ROM and every other consumer depends on it: the native OBEX
+ * push, the headset profiles, the host's own btpush.py. Nothing here replaces it. These
+ * calls read and write the state that server keeps — the device registry, the power CenRep
+ * key, the local-device record — so a change made through them is a change the native
+ * Bluetooth screen sees too, and vice versa.
+ *
+ * # What is deliberately NOT here
+ *
+ * The settings that live in Publish & Subscribe: visibility (scanning), the local name, the
+ * device class, accept-paired-only, and the "registry table changed" bell. Those are
+ * ordinary P&S keys under KUidSystemCategory (0x101f75b6) with the key numbers in
+ * bt_subscribe.h, and shim_prop already reads, writes and subscribes to any category — so
+ * putting them here would be a second way to do something that already works. Rust names
+ * the constants; see crates/symbian/src/bt.rs.
+ *
+ * The exception is visibility, which is *also* reachable through the registry's local-device
+ * record, and is offered below because the probe needs to learn which of the two the handset
+ * honours. */
+
+/* Flags in ShimBtDevice::flags. Symbian has no "trusted" bit: S60's trusted means "needs no
+ * authorisation before a connection", which is TBTDeviceSecurity::NoAuthorise. */
+#define SHIM_BT_PAIRED    0x01
+#define SHIM_BT_TRUSTED   0x02   /* NoAuthorise — connects without asking the user */
+#define SHIM_BT_BLOCKED   0x04   /* Banned */
+#define SHIM_BT_ENCRYPT   0x08
+#define SHIM_BT_FRIENDLY  0x10   /* `name` came from FriendlyName, not the device's own name */
+
+/* One remote device, from the registry or from an inquiry.
+ *
+ * `name_len` is the FULL length; the array holds the first min(len, 32) units. 32 because the
+ * Bluetooth name maximum is 248 *bytes* of UTF-8 and no list on a 320x240 screen shows more
+ * than a couple of dozen characters — a caller that needs the rest has the length to know it
+ * was cut. */
+typedef struct ShimBtDevice {
+    uint8_t  addr[6];
+    uint8_t  pad[2];
+    uint32_t device_class;
+    int32_t  flags;          /* SHIM_BT_* */
+    int32_t  name_len;
+    uint16_t name[32];
+} ShimBtDevice;
+
+/* This handset's own Bluetooth record. Every `int32_t` is -1 when the registry says the field
+ * was never set, which is a different thing from zero: an unset scan-enable is not
+ * "invisible", it is "the record does not say". */
+typedef struct ShimBtLocal {
+    uint8_t  addr[6];
+    uint8_t  pad[2];
+    uint32_t device_class;
+    int32_t  scan_enable;    /* THCIScanEnable: 0 none, 1 inquiry, 2 page, 3 both */
+    int32_t  limited;        /* limited-discoverable flag */
+    int32_t  power_setting;
+    int32_t  paired_only;
+    int32_t  name_len;
+    uint16_t name[32];       /* the local Bluetooth name, widened from UTF-8 */
+} ShimBtLocal;
+
+/* Is the radio on? Reads KCRUidBluetoothPowerState (0x10204DA9) key KBTPowerState — the key
+ * apps/netd already publishes for the launcher's status bar. SHIM_OK with *out 0 or 1. */
+int32_t shim_bt_power_get(int32_t* out_on);
+
+/* Turn the radio on or off, and say how.
+ *
+ * Two routes, tried in order, because which one this handset honours is a measured fact and
+ * not a documented one:
+ *
+ *   1. RNotifier + KPowerModeSettingNotifierUid (0x100059E2) — the documented S60 route.
+ *      It raises the platform's own "Activate Bluetooth?" query, so it can only turn the
+ *      radio ON, and it needs a user. Skipped entirely when `on` is 0.
+ *   2. A CenRep write to the power key. Silent, no dialog, and undocumented as a *write*:
+ *      btserversdkcrkeys.h describes the key as one the BT server updates.
+ *
+ * `*out_via` reports which route answered: SHIM_BT_VIA_NOTIFIER, SHIM_BT_VIA_CENREP, or 0 if
+ * neither did. The return code is the last error seen when nothing worked. */
+#define SHIM_BT_VIA_NOTIFIER 1
+#define SHIM_BT_VIA_CENREP   2
+int32_t shim_bt_power_set(int32_t on, int32_t* out_via);
+
+/* This handset's own record — RBTRegServ + RBTLocalDevice::Get. */
+int32_t shim_bt_local_get(ShimBtLocal* out);
+
+/* Set the scan-enable through the registry's local-device record (THCIScanEnable 0..3).
+ * The P&S set-scanning key is the other route; see the header note above. */
+int32_t shim_bt_visibility_set(int32_t scan_enable);
+
+/* Re-read the paired-device view and report how many there are — RBTRegistry::CreateView
+ * with TBTRegistrySearch::FindBonded, then CBTRegistryResponse.
+ *
+ * The results are cached inside the shim until the next refresh, because a
+ * CBTRegistryResponse owns its array and a caller holding an index into one it does not own
+ * is exactly the lifetime problem handles exist to prevent. Read them out with
+ * shim_bt_paired_get. */
+int32_t shim_bt_paired_refresh(int32_t* out_count);
+
+/* One device from the last refresh. SHIM_ERR_NOT_FOUND past the end. */
+int32_t shim_bt_paired_get(int32_t index, ShimBtDevice* out);
+
+/* Trust or untrust — read the nameless record, flip NoAuthorise, ModifyDevice.
+ *
+ * Read-modify-write inside the shim rather than taking a whole record from the caller, for
+ * the same reason shim_msv_set_flags does: writing back a record read a moment ago undoes
+ * every field the server has changed since. */
+int32_t shim_bt_set_trusted(const uint8_t* addr6, int32_t trusted);
+
+/* Forget a device — RBTRegistry::UnpairDevice. The link key goes; the record may remain as
+ * a seen-but-unpaired device, which is the platform's behaviour and not ours. */
+int32_t shim_bt_unpair(const uint8_t* addr6);
+
+/* Rename — ModifyFriendlyDeviceNameL. The friendly name is ours to set; the device's own
+ * Bluetooth name belongs to the device. */
+int32_t shim_bt_rename(const uint8_t* addr6, const uint16_t* name, int32_t len);
+
+/* Close the registry session and drop the cached view. Called from teardown; safe to call
+ * when nothing was ever opened. */
+int32_t shim_bt_close(void);
+
+/* An inquiry, run to completion before returning — RHostResolver over KBTLinkManager.
+ *
+ * DAEMON ONLY, AND THE ABI SAYS SO IN ITS NAME. An inquiry takes on the order of ten
+ * seconds. Called from rust_step on the GUI thread it would starve the window server, which
+ * freezes the whole phone and not just the caller (docs/architecture.md, "rust_step must
+ * return promptly"). A GUI app gets the CActive version, which arrives with the app that
+ * needs it; this one exists so a headless probe can answer "does an inquiry work at all"
+ * without first building the asynchronous machinery to ask.
+ *
+ * Bounded twice over: `budget_ms` against an RTimer, `max_devices` against the cache. Both
+ * bounds are reported rather than silently applied — `*out_found` is what was collected, and
+ * the return code is SHIM_ERR_TIMED_OUT when the budget ended it. Read results out with
+ * shim_bt_found_get. */
+int32_t shim_bt_inquiry_sync(int32_t budget_ms, int32_t max_devices, int32_t* out_found);
+
+/* One device from the last inquiry. SHIM_ERR_NOT_FOUND past the end. */
+int32_t shim_bt_found_get(int32_t index, ShimBtDevice* out);
+
+/* ------------------------------------------------------------ RFCOMM sockets -- */
+
+/* The result of shim_bt_rfcomm_probe: one Symbian error code per step of bringing an RFCOMM
+ * server socket up, so a single call answers "does the remote-shell agent's transport work
+ * on this handset at all" without building the asynchronous accept/read/write machinery
+ * first. KErrNone (0) is success for each step; a step not reached is left as
+ * SHIM_BT_PROBE_SKIPPED so "failed" and "never attempted" cannot be confused.
+ *
+ * Guarded by SHIM_USE_BTSOCK, which adds sdpdatabase — an import neither the bt probe nor
+ * anything else here has linked — so it rides in an isolated probe until that probe reports.
+ * See the header of shim_btsock.cpp. */
+#define SHIM_BT_PROBE_SKIPPED (-0x7fffffff)
+typedef struct ShimBtRfcommProbe {
+    int32_t serv_err;     /* RSocketServ::Connect */
+    int32_t open_err;     /* RSocket::Open over KRFCOMM */
+    int32_t channel_err;  /* GetOpt(KRFCOMMGetAvailableServerChannel) */
+    int32_t channel;      /* the server channel it handed back, -1 if unknown */
+    int32_t bind_err;     /* Bind(TBTSockAddr) on that channel */
+    int32_t sdp_open_err; /* RSdp::Connect + RSdpDatabase::Open */
+    int32_t sdp_reg_err;  /* CreateServiceRecord + protocol-descriptor/name attributes */
+    int32_t listen_err;   /* Listen() */
+} ShimBtRfcommProbe;
+
+/* Run the RFCOMM/SDP bring-up sequence once, synchronously, tearing everything down before
+ * returning, and report each step into *out. Returns SHIM_OK when the sequence ran (even if a
+ * step failed — read the struct), or an error if it could not run at all (e.g. out is null,
+ * or a leave escaped the TRAP). DAEMON ONLY: opening the socket server and SDP is fast, but
+ * this belongs to the headless probe, alongside the daemon that will use the real
+ * asynchronous version. */
+int32_t shim_bt_rfcomm_probe(ShimBtRfcommProbe* out);
+
+/* ---- RFCOMM server, asynchronous ---- */
+/*
+ * The transport for the remote-shell agent. Mirrors the TCP socket API in shim_net.cpp: a
+ * listener plus per-connection reader/writer active objects, each completion pushing a
+ * SHIM_EV_BT_* event into the ring. The phone is the *server* — the shim has no Connect for
+ * RFCOMM, because the laptop dials in. One listener per process (the shell serves one client
+ * at a time); accepted sockets live in a small handle table.
+ *
+ * DAEMON ONLY in spirit — every call is non-blocking and returns at once, and the completions
+ * arrive as events, so this is safe under the daemon pump. All are SHIM_ERR_NOT_SUPPORTED in a
+ * build without USE_BTSOCK.
+ */
+
+/* Open the RFCOMM listener: claim a server channel, bind, register a persistent SPP SDP record
+ * for `aServiceName`, and Listen with `backlog`. Synchronous; on success sets *out_channel to
+ * the channel advertised. The record stays until shim_btrf_listen_stop or teardown. */
+int32_t shim_btrf_listen_start(int32_t backlog, const uint16_t* name, int32_t name_len,
+                               int32_t* out_channel);
+
+/* Start one asynchronous Accept into a fresh accepted-socket slot. Completion arrives as
+ * SHIM_EV_BT_ACCEPTED, whose `handle` is the new socket on success. Only one accept may be
+ * outstanding at a time; a second call while one is pending is SHIM_ERR_IN_USE. */
+int32_t shim_btrf_accept(void);
+
+/* Start an asynchronous receive of up to `cap` bytes. `buf` must stay valid and untouched
+ * until SHIM_EV_BT_RECV arrives for this handle. `a` on that event is the byte count. */
+int32_t shim_btrf_recv(int32_t handle, uint8_t* buf, int32_t cap);
+
+/* Start an asynchronous send. `buf` must stay valid and untouched until SHIM_EV_BT_SENT.
+ * RFCOMM Write is all-or-nothing, so success means the whole buffer went. */
+int32_t shim_btrf_send(int32_t handle, const uint8_t* buf, int32_t len);
+
+/* Close one accepted socket, cancelling any outstanding recv/send first. */
+int32_t shim_btrf_close(int32_t handle);
+
+/* Deregister the SDP record and close the listener. Accepted sockets are left alone — close
+ * them with shim_btrf_close. Safe to call when nothing is open. */
+int32_t shim_btrf_listen_stop(void);
 
 #ifdef __cplusplus
 }

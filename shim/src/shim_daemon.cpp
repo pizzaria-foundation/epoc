@@ -89,6 +89,12 @@ void MainL()
 #ifdef SHIM_USE_SQL
     ShimSqlCleanup();
 #endif
+#ifdef SHIM_USE_BT
+    ShimBtCleanup();
+#endif
+#ifdef SHIM_USE_BTSOCK
+    ShimBtsockCleanup();
+#endif
     ShimFilesCleanup();
 #ifdef SHIM_USE_NET
     ShimNetCleanup();

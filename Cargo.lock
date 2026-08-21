@@ -32,27 +32,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b588b76d00fde79687d7646a9b5bdf3cc0f655e0bbd080335a95d7e96f3587da"
 
 [[package]]
-name = "bootctl"
-version = "0.1.0"
-dependencies = [
- "symbian",
- "symbian-app",
- "symbian-bootcfg",
- "symbian-bootctl",
- "symbian-ui",
-]
-
-[[package]]
-name = "bootd"
-version = "0.1.0"
-dependencies = [
- "symbian",
- "symbian-app",
- "symbian-bootcfg",
- "symbian-sys",
-]
-
-[[package]]
 name = "bumpalo"
 version = "3.20.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -66,6 +45,16 @@ checksum = "5add81bb678e6cb321aff7fa0dc7689ad82b112dbc032cea19f91d6b8e3582b9"
 dependencies = [
  "find-msvc-tools",
  "shlex",
+]
+
+[[package]]
+name = "cenrepdump"
+version = "0.1.0"
+dependencies = [
+ "symbian",
+ "symbian-gfx",
+ "symbian-sim",
+ "symbian-ui",
 ]
 
 [[package]]

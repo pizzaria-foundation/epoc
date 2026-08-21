@@ -67,6 +67,18 @@ pub const SHIM_EV_RESOLVED: i32 = 24;
 /// `RConnection` is up. `a` is the IAP the OS chose — persist it and pass it back to
 /// [`shim_net_start`] next time to connect without prompting.
 pub const SHIM_EV_NET_READY: i32 = 25;
+/// An RFCOMM listener accepted a client. `handle` is the new accepted-socket handle (`>= 0`)
+/// when `status` is `SHIM_OK`; on failure `status` is the error and no socket was opened.
+/// Distinct from the TCP events so a daemon that runs both can branch without ambiguity.
+pub const SHIM_EV_BT_ACCEPTED: i32 = 26;
+/// Bytes arrived on an RFCOMM socket. `handle` is the socket, `a` the count (`0` with a
+/// `SHIM_OK` status is a clean peer close on some stacks — treat per protocol).
+pub const SHIM_EV_BT_RECV: i32 = 27;
+/// An RFCOMM send completed. `handle` is the socket, `a` the count written when `status` is
+/// `SHIM_OK` (RFCOMM `Write` is all-or-nothing, like TCP).
+pub const SHIM_EV_BT_SENT: i32 = 28;
+/// An RFCOMM socket closed or its link dropped. `handle` is the socket, `status` the reason.
+pub const SHIM_EV_BT_CLOSED: i32 = 29;
 /// A worker-thread job finished; `status` is what `rust_work` returned.
 pub const SHIM_EV_WORK_DONE: i32 = 30;
 /// An image decode finished. `a` and `b` are the decoded width and height — what the
@@ -466,6 +478,148 @@ pub const SHIM_MSV_EV_MTM_REMOVED: i32 = 6;
 pub const SHIM_MSV_EV_SERVER_READY: i32 = 7;
 pub const SHIM_MSV_EV_SERVER_GONE: i32 = 8;
 
+// ------------------------------------------------------------------ Bluetooth --
+
+/// Flags in [`ShimBtDevice::flags`].
+///
+/// Symbian has no "trusted" bit. S60's trusted means "connects without asking the user to
+/// authorise it", which is `TBTDeviceSecurity::NoAuthorise` — so that is what
+/// [`SHIM_BT_TRUSTED`] reads and what [`shim_bt_set_trusted`] writes.
+pub const SHIM_BT_PAIRED: i32 = 0x01;
+pub const SHIM_BT_TRUSTED: i32 = 0x02;
+pub const SHIM_BT_BLOCKED: i32 = 0x04;
+pub const SHIM_BT_ENCRYPT: i32 = 0x08;
+/// The name came from the user-chosen friendly name rather than the device's own.
+pub const SHIM_BT_FRIENDLY: i32 = 0x10;
+
+/// Which route [`shim_bt_power_set`] got its answer from.
+pub const SHIM_BT_VIA_NOTIFIER: i32 = 1;
+pub const SHIM_BT_VIA_CENREP: i32 = 2;
+
+/// One remote Bluetooth device, from the registry or from an inquiry.
+///
+/// `name_len` is the **full** length; `name` holds the first `min(len, 32)` units. A caller
+/// that cares compares them, the way `symbian::msg` turns the same comparison into a
+/// `truncated` flag rather than losing it.
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct ShimBtDevice {
+    pub addr: [u8; 6],
+    pub pad: [u8; 2],
+    pub device_class: u32,
+    pub flags: i32,
+    pub name_len: i32,
+    pub name: [u16; 32],
+}
+
+impl Default for ShimBtDevice {
+    fn default() -> Self {
+        Self { addr: [0; 6], pad: [0; 2], device_class: 0, flags: 0, name_len: 0, name: [0; 32] }
+    }
+}
+
+/// This handset's own Bluetooth record.
+///
+/// Every `i32` is `-1` when the registry says the field was never set, which is not the same
+/// as zero: an unset scan-enable is "the record does not say", not "invisible".
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct ShimBtLocal {
+    pub addr: [u8; 6],
+    pub pad: [u8; 2],
+    pub device_class: u32,
+    /// `THCIScanEnable`: 0 none, 1 inquiry, 2 page, 3 both.
+    pub scan_enable: i32,
+    pub limited: i32,
+    pub power_setting: i32,
+    pub paired_only: i32,
+    pub name_len: i32,
+    pub name: [u16; 32],
+}
+
+impl Default for ShimBtLocal {
+    fn default() -> Self {
+        Self {
+            addr: [0; 6],
+            pad: [0; 2],
+            device_class: 0,
+            scan_enable: -1,
+            limited: -1,
+            power_setting: -1,
+            paired_only: -1,
+            name_len: 0,
+            name: [0; 32],
+        }
+    }
+}
+
+/// Sentinel for a [`ShimBtRfcommProbe`] step that was never reached, so "failed" and "not
+/// attempted" cannot be confused. Matches `SHIM_BT_PROBE_SKIPPED` in the header.
+pub const SHIM_BT_PROBE_SKIPPED: i32 = -0x7fff_ffff;
+
+/// One Symbian error code per step of bringing an RFCOMM server socket up, filled by
+/// [`shim_bt_rfcomm_probe`]. `0` (`KErrNone`) is success for each step.
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct ShimBtRfcommProbe {
+    /// `RSocketServ::Connect`.
+    pub serv_err: i32,
+    /// `RSocket::Open` over `KRFCOMM`.
+    pub open_err: i32,
+    /// `GetOpt(KRFCOMMGetAvailableServerChannel)`.
+    pub channel_err: i32,
+    /// The server channel it handed back, `-1` if unknown.
+    pub channel: i32,
+    /// `Bind(TBTSockAddr)` on that channel.
+    pub bind_err: i32,
+    /// `RSdp::Connect` + `RSdpDatabase::Open`.
+    pub sdp_open_err: i32,
+    /// `CreateServiceRecord` + protocol-descriptor/name attributes.
+    pub sdp_reg_err: i32,
+    /// `Listen()`.
+    pub listen_err: i32,
+}
+
+impl Default for ShimBtRfcommProbe {
+    fn default() -> Self {
+        Self {
+            serv_err: SHIM_BT_PROBE_SKIPPED,
+            open_err: SHIM_BT_PROBE_SKIPPED,
+            channel_err: SHIM_BT_PROBE_SKIPPED,
+            channel: -1,
+            bind_err: SHIM_BT_PROBE_SKIPPED,
+            sdp_open_err: SHIM_BT_PROBE_SKIPPED,
+            sdp_reg_err: SHIM_BT_PROBE_SKIPPED,
+            listen_err: SHIM_BT_PROBE_SKIPPED,
+        }
+    }
+}
+
+/// One filesystem entry's metadata, from [`shim_file_stat`]. Size is split because the ABI is
+/// 32-bit; the date is fields because Symbian's epoch is year 0. `month`/`day` are 1-based.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Default)]
+pub struct ShimFileStat {
+    pub size_lo: u32,
+    pub size_hi: u32,
+    pub year: i32,
+    pub month: i32,
+    pub day: i32,
+    pub hour: i32,
+    pub minute: i32,
+    pub second: i32,
+    /// `KEntryAtt*` bits, as the file server reports them.
+    pub attributes: i32,
+    pub is_dir: i32,
+}
+
+impl ShimFileStat {
+    /// The entry's size, reassembled from the two halves.
+    pub fn size(&self) -> u64 {
+        ((self.size_hi as u64) << 32) | self.size_lo as u64
+    }
+}
+
 // ---------------------------------------------------------------- the shim --
 
 #[cfg(target_vendor = "symbian")]
@@ -640,9 +794,17 @@ extern "C" {
     // directory create + listing
     pub fn shim_mkdir(path: *const u16, path_len: i32) -> i32;
     pub fn shim_dir_list(path: *const u16, path_len: i32, buf: *mut u16, cap: i32, count: *mut i32) -> i32;
+    pub fn shim_dir_list_all(path: *const u16, path_len: i32, buf: *mut u16, cap: i32, count: *mut i32) -> i32;
+    /// Size, modification time and attributes of one entry (`RFs::Entry`).
+    pub fn shim_file_stat(path: *const u16, path_len: i32, out: *mut ShimFileStat) -> i32;
 
     // app-lifecycle monitor (USE_APPMON) — window-group + focus changes
     pub fn shim_process_start(path: *const u16, path_len: i32) -> i32;
+    /// Start a process without waiting for its rendezvous. The only one of the three that a
+    /// GUI thread may call: the waiting variants block in `User::WaitForRequest`, which on a
+    /// thread with a running active scheduler steals another request's completion and kills
+    /// the process with a stray-signal panic.
+    pub fn shim_process_spawn(path: *const u16, path_len: i32) -> i32;
     /// As [`shim_process_start`], but abandons the wait after `timeout_ms` and kills the
     /// child, returning [`SHIM_ERR_TIMED_OUT`].
     ///
@@ -743,6 +905,59 @@ extern "C" {
     pub fn shim_tele_signal(bars: *mut i32, dbm: *mut i32) -> i32;
     /// Read an integer Central Repository key. `SHIM_OK` and `*out` set, or the platform error.
     pub fn shim_cenrep_get(repo: u32, key: u32, out: *mut i32) -> i32;
+    pub fn shim_cenrep_get_string(repo: u32, key: u32, buf: *mut u16, cap: i32, len: *mut i32) -> i32;
+    pub fn shim_cenrep_set(repo: u32, key: u32, value: i32) -> i32;
+    pub fn shim_cenrep_set_string(repo: u32, key: u32, text: *const u16, len: i32) -> i32;
+
+    /// Is the Bluetooth radio on? Reads the same CenRep key `apps/netd` publishes.
+    pub fn shim_bt_power_get(out_on: *mut i32) -> i32;
+    /// Turn the radio on or off. `*out_via` gets [`SHIM_BT_VIA_NOTIFIER`] or
+    /// [`SHIM_BT_VIA_CENREP`] to say which route answered, or 0 if neither did.
+    pub fn shim_bt_power_set(on: i32, out_via: *mut i32) -> i32;
+    /// This handset's own Bluetooth record — name, address, scan-enable, class.
+    pub fn shim_bt_local_get(out: *mut ShimBtLocal) -> i32;
+    /// Set the scan-enable (0..3) through the registry's local-device record.
+    pub fn shim_bt_visibility_set(scan_enable: i32) -> i32;
+    /// Re-read the paired-device view; `*out_count` is the full count, of which at most 32 are
+    /// readable with [`shim_bt_paired_get`].
+    pub fn shim_bt_paired_refresh(out_count: *mut i32) -> i32;
+    /// One device from the last refresh. `SHIM_ERR_NOT_FOUND` past the end.
+    pub fn shim_bt_paired_get(index: i32, out: *mut ShimBtDevice) -> i32;
+    /// Trust or untrust: read the record, flip `NoAuthorise`, write it back.
+    pub fn shim_bt_set_trusted(addr6: *const u8, trusted: i32) -> i32;
+    /// Forget a device — the link key goes.
+    pub fn shim_bt_unpair(addr6: *const u8) -> i32;
+    /// Set the user-chosen friendly name. An empty name clears it.
+    pub fn shim_bt_rename(addr6: *const u8, name: *const u16, len: i32) -> i32;
+    /// Close the registry session and drop both caches.
+    pub fn shim_bt_close() -> i32;
+    /// One inquiry, **run to completion before returning**. Daemon only: ten seconds on the GUI
+    /// thread freezes the whole phone. `SHIM_ERR_TIMED_OUT` when `budget_ms` ended it.
+    pub fn shim_bt_inquiry_sync(budget_ms: i32, max_devices: i32, out_found: *mut i32) -> i32;
+    /// One device from the last inquiry. `SHIM_ERR_NOT_FOUND` past the end.
+    pub fn shim_bt_found_get(index: i32, out: *mut ShimBtDevice) -> i32;
+    /// Bring an RFCOMM server socket up once, synchronously, tear it all down, and report each
+    /// step into `*out`. Daemon only. `SHIM_OK` when the sequence ran (read the struct for
+    /// per-step results); an error if it could not run at all.
+    pub fn shim_bt_rfcomm_probe(out: *mut ShimBtRfcommProbe) -> i32;
+    /// Open the RFCOMM listener: claim a channel, bind, register a persistent SPP SDP record
+    /// named by `name`/`name_len` (ASCII), and `Listen(backlog)`. Sets `*out_channel`.
+    pub fn shim_btrf_listen_start(
+        backlog: i32,
+        name: *const u16,
+        name_len: i32,
+        out_channel: *mut i32,
+    ) -> i32;
+    /// Start one async Accept. Completion is `SHIM_EV_BT_ACCEPTED` (`handle` = new socket).
+    pub fn shim_btrf_accept() -> i32;
+    /// Start an async receive. `buf` must stay valid until `SHIM_EV_BT_RECV` for this handle.
+    pub fn shim_btrf_recv(handle: i32, buf: *mut u8, cap: i32) -> i32;
+    /// Start an async send. `buf` must stay valid until `SHIM_EV_BT_SENT` for this handle.
+    pub fn shim_btrf_send(handle: i32, buf: *const u8, len: i32) -> i32;
+    /// Close one accepted socket, cancelling any outstanding recv/send.
+    pub fn shim_btrf_close(handle: i32) -> i32;
+    /// Deregister the SDP record and close the listener.
+    pub fn shim_btrf_listen_stop() -> i32;
     /// Diagnostic variant of [`shim_app_icon`] using the `TInt` GetAppIcon overload, colour green.
     pub fn shim_app_icon_b(
         uid3: u32,
@@ -1147,6 +1362,21 @@ mod host_stubs {
         }
         SHIM_ERR_NOT_READY
     }
+    pub unsafe fn shim_dir_list_all(_p: *const u16, _pl: i32, _b: *mut u16, _c: i32, count: *mut i32) -> i32 {
+        if !count.is_null() {
+            core::ptr::write(count, 0);
+        }
+        SHIM_ERR_NOT_READY
+    }
+    pub unsafe fn shim_file_stat(_p: *const u16, _pl: i32, out: *mut ShimFileStat) -> i32 {
+        if !out.is_null() {
+            core::ptr::write(out, ShimFileStat::default());
+        }
+        SHIM_ERR_NOT_READY
+    }
+    pub unsafe fn shim_process_spawn(_p: *const u16, _pl: i32) -> i32 {
+        SHIM_ERR_NOT_READY
+    }
     pub unsafe fn shim_process_start(_p: *const u16, _pl: i32) -> i32 {
         SHIM_ERR_NOT_READY
     }
@@ -1259,11 +1489,122 @@ mod host_stubs {
         }
         SHIM_ERR_NOT_READY
     }
+    pub unsafe fn shim_cenrep_get_string(
+        _repo: u32,
+        _key: u32,
+        _buf: *mut u16,
+        _cap: i32,
+        len: *mut i32,
+    ) -> i32 {
+        if !len.is_null() {
+            *len = 0;
+        }
+        SHIM_ERR_NOT_READY
+    }
+    pub unsafe fn shim_cenrep_set(_repo: u32, _key: u32, _value: i32) -> i32 {
+        SHIM_ERR_NOT_READY
+    }
+    pub unsafe fn shim_cenrep_set_string(_repo: u32, _key: u32, _t: *const u16, _l: i32) -> i32 {
+        SHIM_ERR_NOT_READY
+    }
     pub unsafe fn shim_cenrep_get(_repo: u32, _key: u32, out: *mut i32) -> i32 {
         if !out.is_null() {
             core::ptr::write(out, 0);
         }
         SHIM_ERR_NOT_READY
+    }
+    pub unsafe fn shim_bt_power_get(out_on: *mut i32) -> i32 {
+        if !out_on.is_null() {
+            core::ptr::write(out_on, 0);
+        }
+        SHIM_ERR_NOT_READY
+    }
+    pub unsafe fn shim_bt_power_set(_on: i32, out_via: *mut i32) -> i32 {
+        if !out_via.is_null() {
+            core::ptr::write(out_via, 0);
+        }
+        SHIM_ERR_NOT_READY
+    }
+    pub unsafe fn shim_bt_local_get(out: *mut ShimBtLocal) -> i32 {
+        if !out.is_null() {
+            core::ptr::write(out, ShimBtLocal::default());
+        }
+        SHIM_ERR_NOT_READY
+    }
+    pub unsafe fn shim_bt_visibility_set(_scan_enable: i32) -> i32 {
+        SHIM_ERR_NOT_READY
+    }
+    pub unsafe fn shim_bt_paired_refresh(out_count: *mut i32) -> i32 {
+        if !out_count.is_null() {
+            core::ptr::write(out_count, 0);
+        }
+        SHIM_ERR_NOT_READY
+    }
+    pub unsafe fn shim_bt_paired_get(_index: i32, out: *mut ShimBtDevice) -> i32 {
+        if !out.is_null() {
+            core::ptr::write(out, ShimBtDevice::default());
+        }
+        SHIM_ERR_NOT_FOUND
+    }
+    pub unsafe fn shim_bt_set_trusted(_addr6: *const u8, _trusted: i32) -> i32 {
+        SHIM_ERR_NOT_READY
+    }
+    pub unsafe fn shim_bt_unpair(_addr6: *const u8) -> i32 {
+        SHIM_ERR_NOT_READY
+    }
+    pub unsafe fn shim_bt_rename(_addr6: *const u8, _name: *const u16, _len: i32) -> i32 {
+        SHIM_ERR_NOT_READY
+    }
+    pub unsafe fn shim_bt_close() -> i32 {
+        SHIM_ERR_NOT_READY
+    }
+    pub unsafe fn shim_bt_inquiry_sync(
+        _budget_ms: i32,
+        _max_devices: i32,
+        out_found: *mut i32,
+    ) -> i32 {
+        if !out_found.is_null() {
+            core::ptr::write(out_found, 0);
+        }
+        SHIM_ERR_NOT_READY
+    }
+    pub unsafe fn shim_bt_found_get(_index: i32, out: *mut ShimBtDevice) -> i32 {
+        if !out.is_null() {
+            core::ptr::write(out, ShimBtDevice::default());
+        }
+        SHIM_ERR_NOT_FOUND
+    }
+    pub unsafe fn shim_bt_rfcomm_probe(out: *mut ShimBtRfcommProbe) -> i32 {
+        if !out.is_null() {
+            core::ptr::write(out, ShimBtRfcommProbe::default());
+        }
+        SHIM_ERR_NOT_SUPPORTED
+    }
+    pub unsafe fn shim_btrf_listen_start(
+        _backlog: i32,
+        _name: *const u16,
+        _name_len: i32,
+        out_channel: *mut i32,
+    ) -> i32 {
+        if !out_channel.is_null() {
+            core::ptr::write(out_channel, 0);
+        }
+        SHIM_ERR_NOT_SUPPORTED
+    }
+    pub unsafe fn shim_btrf_accept() -> i32 {
+        SHIM_ERR_NOT_SUPPORTED
+    }
+    pub unsafe fn shim_btrf_recv(_handle: i32, _buf: *mut u8, _cap: i32) -> i32 {
+        SHIM_ERR_NOT_SUPPORTED
+    }
+    pub unsafe fn shim_btrf_send(_handle: i32, _buf: *const u8, _len: i32) -> i32 {
+        SHIM_ERR_NOT_SUPPORTED
+    }
+    pub unsafe fn shim_btrf_close(_handle: i32) -> i32 {
+        SHIM_ERR_NOT_SUPPORTED
+    }
+    pub unsafe fn shim_btrf_listen_stop() -> i32 {
+        SHIM_ERR_NOT_SUPPORTED
     }
     pub unsafe fn shim_app_icon_b(
         _uid3: u32,

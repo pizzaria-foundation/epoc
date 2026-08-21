@@ -115,3 +115,9 @@ pub mod ncn;
 
 #[cfg(feature = "probe-msvev")]
 pub mod msvev;
+
+#[cfg(feature = "probe-bt")]
+pub mod bt;
+
+#[cfg(feature = "probe-btsock")]
+pub mod btsock;
