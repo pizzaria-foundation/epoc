@@ -296,8 +296,8 @@ press happened to take.
 2. **`examples/keydump`.** Install, launch, read the screen. `err 0` with a non-zero `dead
    br` count and a `'+' binding` means the dump is good. `dead br 0`, or `br == en`, means
    the engine did not switch language and the dump describes the wrong keyboard — the app
-   says so on its own bottom line. Fetch `keymap.txt` from `C:\private\E123456C\` over
-   `epocadb` or `tools/btrecv.py`, then:
+   says so on its own bottom line. Fetch `keymap.txt` from `C:\private\E123456C\` with
+   `epoc sh --pull` (or `tools/btrecv.py`), then:
 
        tools/mkkeymap.py --check keymap.txt          # read it before trusting it
        tools/mkkeymap.py keymap.txt -o crates/symbian-keys/src/layout_abnt2.rs
@@ -1565,7 +1565,7 @@ no way to report otherwise, and an application that starts and ignores its comma
 indistinguishable, from the caller, from one that honoured it.
 
 So the launcher tries the running-task path first and falls through to the starting paths. Each
-attempt is logged with its route and result (`C:\Data\logs_launcher.txt`), which makes the handset
+attempt is logged with its route and result (`C:\Data\_logs\launcher.txt`), which makes the handset
 its own instrument: the log names the route that worked without anyone re-running a probe.
 
 `apps/urlprobe` is the isolated probe that established the symbols link and run. It can stay as the

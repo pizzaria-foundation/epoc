@@ -8,7 +8,6 @@ members = [
     "crates/symbian-sys",
     "crates/opus",
     "crates/symbian",
-    "crates/epocadb",
     "crates/symbian-sim",
     "crates/symbian-app",
     "crates/symbian-audio",
@@ -74,7 +73,6 @@ symbian-bootcfg = { path = "crates/symbian-bootcfg" }
 symbian-bootctl = { path = "crates/symbian-bootctl" }
 devdump = { path = "apps/devdump" }
 opus = { path = "crates/opus" }
-epocadb = { path = "crates/epocadb" }
 selftest = { path = "examples/selftest" }
 netprobe = { path = "examples/netprobe" }
 

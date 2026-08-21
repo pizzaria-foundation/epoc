@@ -23,7 +23,7 @@
 //! kept crashing the home screen. This is the safe place to find it: an ordinary, non-resident app.
 //! You walk the installed-app list with Up/Down and press Select to fetch the icon for the app
 //! under the cursor. A success shows its size and draws it; a failure shows the error. If the fetch
-//! *panics* the app simply closes — reopen it, and the last line in `C:\Data\logs_iconprobe.txt`
+//! *panics* the app simply closes — reopen it, and the last line in `C:\Data\_logs\iconprobe.txt`
 //! (written before every fetch) names the app that did it. So the culprit UID is found by which app
 //! makes the probe vanish, with no risk to anything else — the exact opposite of bisecting in the
 //! home.

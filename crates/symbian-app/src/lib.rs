@@ -519,7 +519,7 @@ static mut PRESENT_FRAMES: u64 = 0;
 ///
 /// `pixels_presented / pixels_if_full` is the fraction of the blit cost the dirty-rect
 /// present actually paid — well under 1 means it is working, 1.0 means every frame went
-/// full (all content changing, or `force_full` every time). A diagnostic or the dev-bridge
+/// full (all content changing, or `force_full` every time). A diagnostic
 /// log reads this to measure the win rather than assume it.
 pub fn present_stats() -> (u64, u64, u64) {
     // SAFETY: single-threaded; every caller is the GUI thread, as for the paint flag.
@@ -539,8 +539,6 @@ pub fn now_us() -> u64 {
     // SAFETY: no arguments; reads the nanokernel tick.
     unsafe { sys::shim_now_us() }
 }
-
-pub mod devbridge;
 
 static mut GFX_LAST_PUBLISH_US: u64 = 0;
 static mut GFX_DEFINED: bool = false;

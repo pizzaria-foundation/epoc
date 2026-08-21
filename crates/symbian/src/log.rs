@@ -18,7 +18,14 @@
 //! bearer failures that had been indistinguishable — which is why it is now in the SDK
 //! rather than in one app.
 //!
-//! # The switch
+//! # Two switches
+//!
+//! `DEBUG=` decides what is *in the binary*; the flag file at `C:\Data\_logs\<app>.on` decides
+//! whether a build that carries logging is writing it right now. See [`flag_path`] and
+//! [`set_enabled`] — the second one is what a Settings screen calls, and it takes effect without
+//! a restart.
+//!
+//! # The build switch
 //!
 //! `DEBUG=1` in the app's `app.conf`. `tools/symbuild` turns that into `SYMBIAN_DEBUG` in
 //! the environment of the cargo invocation, and [`ENABLED`] is a `const bool` read from it.
@@ -33,7 +40,7 @@
 //!
 //! # Where the lines go
 //!
-//! `C:\Data\logs_<app>.txt`, the directory this SDK's apps already write everything else to:
+//! `C:\Data\_logs\<app>.txt` — under the directory this SDK's apps already write everything to:
 //! no capability, always present (unlike flogger's `C:\logs\`), and reachable over USB and
 //! Bluetooth, so the log comes off the phone with no host and no network in the picture.
 //! [`path_label`] reports which candidate actually won, because a hardcoded label here once
@@ -89,29 +96,114 @@ static mut LABEL: &str = "(not opened yet)";
 /// Uptime at the first line, so every stamp is relative to launch rather than to 1970.
 static mut START_US: u64 = 0;
 static mut RESOLVED: bool = false;
-/// A second destination for every line, registered by whoever has one. See [`set_sink`].
-static mut SINK: Option<fn(&str)> = None;
-
-/// Send every line to `sink` as well as to the file.
+/// The run-time switch, read once from the flag file. `None` until then.
+static mut RUNTIME: Option<bool> = None;
+/// The run-time switch: `C:\Data\_logs\<name>.on`, one byte, `1` or `0`.
 ///
-/// This is how the dev bridge gets the log without this crate knowing the bridge exists:
-/// `symbian-app` sits above `symbian` and registers a function that streams to the host, so
-/// the dependency points the way it already does. Called again, it replaces the previous
-/// sink; there is one log per process and no reason for two.
+/// # Why a second switch at all
 ///
-/// The sink receives the line already stamped, and must not itself log — it would recurse.
-pub fn set_sink(sink: fn(&str)) {
-    // SAFETY: single-threaded, and a function pointer write.
-    unsafe { SINK = Some(sink) };
+/// `DEBUG=` in `app.conf` is a *build* decision and has to stay one: off means the call sites
+/// and their format strings are not in the binary. But "is this build allowed to log" and "do I
+/// want it logging right now" are different questions, and only the second one can be answered
+/// by the person holding the phone. A shipped build with `DEBUG=1` that always writes is a
+/// build that spends flash on every user; one that never writes cannot be diagnosed.
+///
+/// So the file. Absent means **on**, which keeps a `DEBUG=1` build behaving exactly as it did
+/// before this existed — the switch can only ever turn something off that was already compiled
+/// in.
+///
+/// It is a file in a public directory rather than a private-cage setting on purpose: a headless
+/// daemon has no screen to put a toggle on, and this way its log can be turned on from the host
+/// without a rebuild —
+///
+/// ```text
+/// epoc sh --push /dev/null 'C:\Data\_logs\connd.on'    # (a 0-byte file reads as on)
+/// ```
+///
+/// — or from another application on the phone, which is how one Settings screen turns the log
+/// on for a whole family of processes.
+pub fn flag_path(name: &str) -> crate::Result<Utf16Path> {
+    let mut path = String::from(crate::DATA_LOG_DIR);
+    path.push_str(name);
+    path.push_str(".on");
+    Utf16Path::new(&path)
 }
 
-/// The conventional path for an app's log: `C:\Data\logs_<name>.txt`.
+/// How a flag file's contents read. `None` for "no opinion", so a truncated or corrupt file
+/// leaves the default rather than silently turning logging off.
+///
+/// Separate from the I/O so the decision is host-testable: `0`, `n` and `f` (any case) are off,
+/// anything else — including an empty file — is on.
+pub fn decode_flag(bytes: &[u8]) -> Option<bool> {
+    match bytes.first() {
+        None => Some(true),
+        Some(b'0') | Some(b'n') | Some(b'N') | Some(b'f') | Some(b'F') => Some(false),
+        Some(_) => Some(true),
+    }
+}
+
+/// Whether a line written now would be kept: this build carries logging *and* the run-time
+/// switch is on.
+///
+/// The file is read once per process, on the first call. A toggle made through
+/// [`set_enabled`] takes effect immediately regardless, because it sets the same flag it
+/// persists — so a Settings screen does not have to restart anything to be believed.
+pub fn enabled() -> bool {
+    ENABLED && runtime_on()
+}
+
+fn runtime_on() -> bool {
+    // SAFETY: single-threaded, as everything else in this module.
+    if let Some(on) = unsafe { core::ptr::read(core::ptr::addr_of!(RUNTIME)) } {
+        return on;
+    }
+    let mut fs = ShimFs;
+    let on = flag_path(APP)
+        .ok()
+        .and_then(|p| fs::read(&mut fs, &p).ok().flatten())
+        .and_then(|b| decode_flag(&b))
+        .unwrap_or(true);
+    // SAFETY: as above.
+    unsafe { RUNTIME = Some(on) };
+    on
+}
+
+/// Turn the log on or off, now and for every later launch.
+///
+/// Immediate: the next `log!` obeys it without a restart. Persisted best-effort — if the flag
+/// file cannot be written the setting still holds for this run, which is the half the user is
+/// looking at.
+///
+/// Writes nothing else and reads nothing else, so it is safe to call from a settings screen on
+/// the GUI thread.
+pub fn set_enabled(on: bool) {
+    set_enabled_for(APP, on);
+    // SAFETY: single-threaded.
+    unsafe { RUNTIME = Some(on) };
+}
+
+/// [`set_enabled`], but for *another* process's log — how an app with a screen turns logging on
+/// for the headless daemons it starts.
+///
+/// Only the file is written: the other process reads it on its next line (or its next launch,
+/// if it has already read it). That is the honest limit of a flag in a file, and it is why this
+/// is a separate call rather than something [`set_enabled`] does silently for a list of names.
+pub fn set_enabled_for(name: &str, on: bool) {
+    crate::ensure_log_dir();
+    let mut fs = ShimFs;
+    if let Ok(p) = flag_path(name) {
+        let _ = fs::write_atomic(&mut fs, &p, if on { b"1" } else { b"0" });
+    }
+}
+
+/// The conventional path for an app's log: `C:\Data\_logs\<name>.txt`.
 ///
 /// Exposed because [`crate::applog`] is not the only writer — an app keeping its own
-/// formatted log (its own layout, its own cap) still wants it where the tooling looks.
+/// formatted log (its own layout, its own cap) still wants it where the tooling looks. The
+/// caller is responsible for the directory existing; [`crate::ensure_log_dir`] is the call,
+/// and both [`crate::applog`] and [`line`] make it before they open anything.
 pub fn data_path(name: &str) -> crate::Result<Utf16Path> {
-    let mut path = String::from(crate::DATA_DIR);
-    path.push_str(crate::DATA_LOG_PREFIX);
+    let mut path = String::from(crate::DATA_LOG_DIR);
     path.push_str(name);
     path.push_str(".txt");
     Utf16Path::new(&path)
@@ -121,12 +213,13 @@ pub fn data_path(name: &str) -> crate::Result<Utf16Path> {
 ///
 /// The ladder, in order, and each rung is there because of a way the one above it fails:
 ///
-/// 1. `C:\Data\logs_<app>.txt` — where this SDK's apps already write, proven writable with
-///    no capability and readable over USB and Bluetooth.
+/// 1. `C:\Data\_logs\<app>.txt` — where this SDK's apps write, proven writable with no
+///    capability and readable over USB and Bluetooth. Created by
+///    [`crate::ensure_log_dir`], since a directory that is not there fails the open.
 /// 2. `C:\logs\<app>.log` — flogger's directory, for a handset where `C:\Data\` is not
-///    writable. Not tried first because it need not exist: on a phone where flogger has
-///    never run it has to be created, which is what [`crate::ensure_log_dir`] is for.
-/// 3. `C:\logs_<app>.txt` — the drive root, when neither directory can be opened.
+///    writable.
+/// 3. `C:\logs_<app>.txt` — the drive root, when neither directory can be opened. Still the
+///    flat name: the point of this rung is that no directory had to exist.
 /// 4. the app's private cage — always works and cannot be read from outside, which makes it
 ///    useless for the one job this has, but better than losing the log.
 ///
@@ -152,7 +245,7 @@ fn resolve() {
     };
 
     let mut candidates: [(Option<Utf16Path>, &'static str); 3] = [
-        (data, "C:\\Data\\logs_<app>.txt"),
+        (data, "C:\\Data\\_logs\\<app>.txt"),
         (build(crate::LOG_DIR, APP, ".log"), "C:\\logs\\<app>.log"),
         (build("C:\\", "logs_", APP), "C:\\logs_<app>.txt"),
     ];
@@ -202,17 +295,10 @@ pub fn path_label() -> &'static str {
 /// Called by [`log!`](crate::log). The [`ENABLED`] guard is repeated here so a direct caller
 /// cannot write to a `DEBUG=0` build's log either.
 pub fn line(text: &str) {
-    if !ENABLED {
+    if !enabled() {
         return;
     }
     resolve();
-
-    // The stamped line goes to the file below; the sink gets the text as written, because a
-    // host-side stream timestamps on arrival and a second stamp only adds noise.
-    // SAFETY: single-threaded; read through `addr_of!` rather than by naming the static.
-    if let Some(sink) = unsafe { core::ptr::read(core::ptr::addr_of!(SINK)) } {
-        sink(text);
-    }
 
     // SAFETY: single-threaded. Reached through `addr_of!` rather than by naming the static,
     // because a `&` on a `static mut` is a warning today and an error in edition 2024 — the
@@ -304,7 +390,10 @@ fn push_i64(s: &mut String, mut v: i64) {
 #[macro_export]
 macro_rules! log {
     ($($arg:tt)*) => {{
-        if $crate::log::ENABLED {
+        // `ENABLED` first and by name, so a DEBUG=0 build resolves this to `if false` and the
+        // format string never reaches the binary. The run-time switch is checked before the
+        // format runs, so a log turned off costs a static read rather than an allocation.
+        if $crate::log::ENABLED && $crate::log::enabled() {
             $crate::log::line(&$crate::__alloc::format!($($arg)*));
         }
     }};
@@ -319,6 +408,36 @@ mod tests {
     fn the_macro_expands_without_alloc_in_scope() {
         crate::log!("value={}", 1 + 1);
         crate::log!("no arguments");
+    }
+
+    /// The flag file decides, and an unreadable or truncated one decides nothing.
+    ///
+    /// The empty case is the one worth pinning: `epoc sh --push /dev/null …` is the documented
+    /// way to turn a daemon's log on from the host, and it writes zero bytes.
+    #[test]
+    fn a_flag_file_reads_as_a_switch() {
+        assert_eq!(crate::log::decode_flag(b""), Some(true), "an empty file is on");
+        assert_eq!(crate::log::decode_flag(b"1"), Some(true));
+        assert_eq!(crate::log::decode_flag(b"1\n"), Some(true));
+        assert_eq!(crate::log::decode_flag(b"0"), Some(false));
+        assert_eq!(crate::log::decode_flag(b"0\r\n"), Some(false));
+        assert_eq!(crate::log::decode_flag(b"no"), Some(false));
+        assert_eq!(crate::log::decode_flag(b"false"), Some(false));
+        // Anything else is on: the switch may only turn off what was compiled in, so an
+        // unrecognised byte must not be the thing that silences a build.
+        assert_eq!(crate::log::decode_flag(b"yes"), Some(true));
+        assert_eq!(crate::log::decode_flag(&[0xff]), Some(true));
+    }
+
+    /// The flag file sits beside the log it switches, so one directory holds both and
+    /// `ls C:\Data\_logs` says which apps log and which of them are on.
+    #[test]
+    fn the_flag_sits_next_to_the_log() {
+        let text = |p: crate::fs::Utf16Path| -> alloc::string::String {
+            char::decode_utf16(p.as_units().iter().copied()).map(|c| c.unwrap()).collect()
+        };
+        assert_eq!(text(crate::log::data_path("connd").unwrap()), "C:\\Data\\_logs\\connd.txt");
+        assert_eq!(text(crate::log::flag_path("connd").unwrap()), "C:\\Data\\_logs\\connd.on");
     }
 
     /// The switch is the environment and nothing else — asserted against the variable rather
@@ -340,7 +459,7 @@ mod tests {
         let p = crate::log::data_path("myapp").unwrap();
         let got: alloc::string::String =
             char::decode_utf16(p.as_units().iter().copied()).map(|c| c.unwrap()).collect();
-        assert_eq!(got, "C:\\Data\\logs_myapp.txt");
+        assert_eq!(got, "C:\\Data\\_logs\\myapp.txt");
     }
 
     #[test]

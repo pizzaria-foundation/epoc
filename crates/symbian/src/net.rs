@@ -437,8 +437,10 @@ impl TcpStream {
         })
     }
 
-    /// Open a socket on a specific bearer, by handle. Used by [`crate::epocadb::Bridge`]
-    /// to open sockets without borrowing the bearer directly.
+    /// Open a socket on a specific bearer, by handle.
+    ///
+    /// For a caller that keeps its bearer somewhere this cannot borrow from — a long-lived
+    /// connection held by one part of an app while another opens sockets on it.
     pub fn open_handle<N: Net>(net: &mut N, bearer_handle: i32, rx_cap: usize, tx_cap: usize) -> Result<Self> {
         let handle = net.tcp_open(bearer_handle)?;
         Ok(TcpStream {

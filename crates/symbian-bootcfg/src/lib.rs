@@ -41,7 +41,7 @@ pub const BOOTD_UID: u32 = 0xE0AA_0011;
 
 /// Where the two files live. `C:\Data` is outside `\sys`, `\resource` and `\private`, so both
 /// binaries reach it with no capability at all — the same reason `symbian::log` already writes
-/// `C:\Data\logs_<app>.txt` from apps declaring `CAPABILITIES=none`. A private cage would force
+/// `C:\Data\_logs\<app>.txt` from apps declaring `CAPABILITIES=none`. A private cage would force
 /// `AllFiles` on the editor, and a protected capability has broken an install in this repo before.
 pub const CONFIG_PATH: &str = "C:\\Data\\bootd\\boot.cfg";
 pub const STATUS_PATH: &str = "C:\\Data\\bootd\\boot.status";

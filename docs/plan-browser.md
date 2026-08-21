@@ -44,7 +44,7 @@ Inventário medido neste repo, não lembrado:
 | Decode de imagem assíncrono pelos codecs do aparelho | `crates/symbian/src/image.rs` |
 | Cache em disco no data cage | `crates/symbian/src/cache.rs` |
 | Trabalho em thread de fundo (`SHIM_EV_WORK_DONE`) | `shim_work.cpp` |
-| Log/trace ao vivo | epocadb |
+| Log/trace ao vivo | `symbian::log!` -> `C:\Data\_logs\<app>.txt`, lido com `epoc logs -f` |
 | Toolchain que cruza C e C++ para `armv5te-symbian-eabi` | `docs/build-flow.md` |
 
 Esse último item é o que torna o plano possível: **já compilamos C para o aparelho**. Nem
@@ -137,9 +137,9 @@ com destino. Duas razões:
 | # | Entrega | Risco que mata | Sai com |
 |---|---|---|---|
 | **F1** | Probes isolados: `mbedtls.dll` carrega? Open C `libc` carrega? Handshake TLS 1.2 real, cronometrado no ARM11 | R1, R2 | um relatório do aparelho |
-| **F2** | `symbian-tls` + `shim_tls.cpp`. BIO sobre `net.rs`, orientado a evento | | `GET https://…` imprime bytes no epocadb |
+| **F2** | `symbian-tls` + `shim_tls.cpp`. BIO sobre `net.rs`, orientado a evento | | `GET https://…` imprime bytes no log |
 | **F3** | `symbian-http`: 1.1, chunked, gzip, redirect, cookies mínimos, sobre `cache.rs` | | baixa e cacheia uma página |
-| **F4** | Cross-compile de libwapcaplet/libparserutils/libhubbub/libdom/libcss para armv5 | R1 | dump da árvore DOM+estilos no epocadb |
+| **F4** | Cross-compile de libwapcaplet/libparserutils/libhubbub/libdom/libcss para armv5 | R1 | dump da árvore DOM+estilos no log |
 | **F5** | `symbian-layout`: cascade → caixas → Page IR, fit-to-width | R3 | páginas renderizadas **no preview**, sem aparelho |
 | **F6** | `apps/browser`: chrome, URL, scroll, links, histórico, imagens via ICL | R3, R5 | o navegador |
 | **F7** | TLS 1.3: troca do alvo de build + `cacert.pem` | | nada acima do trait `Tls` muda |

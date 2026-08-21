@@ -8,7 +8,7 @@
 //!
 //! It samples twice a second and shows, live: the whole phone's load, the busiest processes, and —
 //! most importantly — the raw return code, because `KErrNotSupported` is the finding that matters
-//! most. Everything is journalled to `C:\Data\logs_cpuprobe.txt` so the answer survives the app
+//! most. Everything is journalled to `C:\Data\_logs\cpuprobe.txt` so the answer survives the app
 //! being closed, or panicking.
 //!
 //! Isolated and non-resident, like `iconprobe`: it links `USE_CPUTIME`, which is a facility no

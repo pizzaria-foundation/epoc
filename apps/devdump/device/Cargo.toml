@@ -15,9 +15,6 @@ crate-type = ["staticlib"]
 devdump = { path = ".." }
 symbian-app = { path = "../../../crates/symbian-app" }
 
-[features]
-# Named by app.conf's DEV_BRIDGE_FEATURE; symbuild enables it only when EPOCADB_HOST is set.
-dev-bridge = ["devdump/dev-bridge"]
 
 [profile.release]
 opt-level = "z"

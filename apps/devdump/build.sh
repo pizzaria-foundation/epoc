@@ -48,6 +48,6 @@ if [ "$ACTION" = build ]; then
   echo "==> $HERE/build/devdump.sis"
   echo
   echo "Install it, open Device dump, press Select, and wait. Then:"
-  echo "    epoc db pull \"C:\\Data\\dump\\99-merged.txt\" ./dump.txt"
-  echo "or take the whole C:\\Data\\dump\\ directory off over USB or Bluetooth."
+  echo "    epoc sh --pull \"C:\\Data\\dump\\99-merged.txt\" ."
+  echo "or take the whole C:\\Data\\dump\\ directory off over USB."
 fi

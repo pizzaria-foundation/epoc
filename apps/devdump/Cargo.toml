@@ -24,9 +24,6 @@ symbian-ui = { workspace = true, features = ["testing"] }
 
 [features]
 default = []
-# Forwards to symbian-app's. tools/symbuild turns this on when EPOCADB_HOST is set, via
-# DEV_BRIDGE_FEATURE in app.conf — so a build with no host to talk to compiles no bridge.
-dev-bridge = ["symbian-app/dev-bridge"]
 # One feature per probe, and each probe binary enables exactly one.
 #
 # Not a runtime switch, because the choice is a *link-time* one: a probe that talks to the

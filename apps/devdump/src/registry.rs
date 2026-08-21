@@ -166,7 +166,7 @@ pub const MERGED_NAME: &str = "merged";
 pub const DIR: &str = "";
 
 /// Prefix on every section file, so the run's output is identifiable among the user's own
-/// files in `C:\Data\` — the same reason `symbian::log` writes `logs_<app>.txt` there.
+/// files in `C:\Data\` — the same reason `symbian::log` writes `logs\<app>.txt` there.
 pub const PREFIX: &str = "dump-";
 
 /// `"<order:02>-<name>.txt"`, e.g. `"10-system.txt"`.

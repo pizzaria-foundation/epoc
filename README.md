@@ -129,8 +129,8 @@ and 283 of the 292 libraries asked about load, Open C among them.
                                             the E72 carries the DLL is what examples/sqlprobe
                                             is for. Until that report exists, treat it as
                                             unproven
-    Device logging                  done    symbian::log!, switched by DEBUG= in app.conf
-    Dev bridge                      done    epocadb: live logs, file push/pull, over Wi-Fi
+    Device logging                  done    symbian::log!, switched by DEBUG= in app.conf;
+                                            one file per app, read back with `epoc logs`
     Host simulator                  done    symbian-sim: the real app in a window
     Contact sheets                  done    symbian-preview: any screen to a PNG
     Project scaffolding             done    epoc new
@@ -186,12 +186,12 @@ One front door for everything:
 
     epoc new <name> [uid3]        scaffold
     epoc build <app-dir> [clean]  sources -> .sis
-    epoc db <args...>             the dev bridge: serve, logcat, push, pull, install
     epoc preview                  render the SDK's contact sheets to preview-out/
     epoc serve                    serve out/ over the LAN so the phone can fetch a .sis
 
-`epoc db` fronts `tools/epocadb`; `new` and `build` front `tools/symnew` and
-`tools/symbuild`. All three still work when called directly.
+`new` and `build` front `tools/symnew` and `tools/symbuild`, which still work when called
+directly. `sideload`, `sh`, `rshell`, `logs` and `pull` front ADBian, the remote shell that
+runs on the phone — a sibling checkout, not part of this SDK.
 
 ### From your own project
 
@@ -268,17 +268,16 @@ Every one of these exists because a question could not be answered from a docume
       symbian-keys     physical keyboard layouts and dead-key composition
       symbian-sys      the raw FFI boundary, mirroring shim/inc/symbian_shim.h
       symbian          safe wrappers: files, sockets, images, SQL, the disk cache, the log
-      symbian-app      the device entry points as one macro, and the dev bridge
+      symbian-app      the device entry points as one macro
       symbian-audio    Ogg/Opus in, playable RIFF/WAVE out - codecs the handset lacks
       symbian-crypto   hashes and ciphers the platform does not ship
       symbian-preview  host-side contact sheets: any screen to a PNG
       symbian-sim      the host simulator, generic over any App
-      epocadb          the device side of the dev bridge
       opus             the vendored libopus, and the only unsafe in the audio path
 
     shim/              the C++ side: everything that can Leave, and the event pump
-    tools/             epoc (new, build, db, preview, sideload, serve), and the pieces behind
-                       it: symbuild, symnew, epocadb, mkfont, mkkeymap, e32dump, e32prep,
+    tools/             epoc (new, build, preview, sideload, logs, serve), and the pieces
+                       behind it: symbuild, symnew, mkfont, mkkeymap, e32dump, e32prep,
                        sisdump, sisextract, btrecv
     apps/              what ships with the SDK: devdump, mtmdemo, bootctl/bootd, and probes
     examples/          device diagnostics and the C++ comparison — see "What is in here"
@@ -295,7 +294,6 @@ Each crate has its own README with the decisions behind it.
 | [architecture.md](docs/architecture.md) | why there is a C++ shim, and what crosses the boundary |
 | [device-notes.md](docs/device-notes.md) | everything the hardware taught us that no document says |
 | [build-flow.md](docs/build-flow.md) | the pipeline, stage by stage |
-| [epocadb.md](docs/epocadb.md) | the dev bridge: live logs, file push/pull, the wire protocol |
 | [launcher.md](docs/launcher.md) | the platform side of a home screen: startup resource, resident mode |
 | [device-dump.txt](docs/device-dump.txt) | the raw report one install of `apps/devdump` brought back |
 

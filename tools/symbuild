@@ -58,12 +58,7 @@ source "$APP/app.conf"
 : "${STACK:=0x8000}"
 : "${EPOCROOT:=$SDK/sdk}"
 : "${RUST_CRATE:=}"
-# Dev bridge: the cargo feature that pulls in crates/epocadb, if this app has one.
-# Only ever enabled alongside EPOCADB_HOST, so a build with no host to talk to also
-# has no bridge compiled into it.
-: "${DEV_BRIDGE_FEATURE:=}"
-: "${EPOCADB_HOST:=}"
-# Debug logging: DEBUG=1 in app.conf makes `symbian::log!` write to C:\Data\logs_$NAME.txt.
+# Debug logging: DEBUG=1 in app.conf makes `symbian::log!` write to C:\Data\_logs\$NAME.txt.
 # Off by default, and off means *absent*: symbian::log::ENABLED is a const read from
 # SYMBIAN_DEBUG, so with DEBUG=0 the macro expands to a branch on `false` and neither the
 # call nor its format string survives the optimiser. An environment variable rather than a
@@ -364,20 +359,14 @@ echo "==> $NAME  (uid3 $UID3, caps: $CAPABILITIES)"
 if [ -f "$APP/api.conf" ]; then
   # shellcheck disable=SC1090
   . "$APP/api.conf"
-  # Defaulted before export because an api.conf need not carry credentials at all — most
-  # hold only EPOCADB_HOST — and under `set -u` exporting an unset var aborted the build with
-  # "TG_API_ID: unbound variable", a Telegram error message on an app that has nothing to do
-  # with Telegram.
+  # Defaulted before export because an api.conf need not carry credentials at all, and under
+  # `set -u` exporting an unset var aborted the build with "TG_API_ID: unbound variable" — a
+  # Telegram error message on an app that has nothing to do with Telegram.
   : "${TG_API_ID:=}"
   : "${TG_API_HASH:=}"
   export TG_API_ID TG_API_HASH
   if [ -n "$TG_API_ID" ]; then
     echo "--> api credentials: id $TG_API_ID"
-  fi
-  # Dev bridge: optional host IP for log streaming. Unset → bridge disabled.
-  export EPOCADB_HOST="${EPOCADB_HOST:-}"
-  if [ -n "$EPOCADB_HOST" ]; then
-    echo "--> epocadb host: $EPOCADB_HOST"
   fi
 fi
 
@@ -403,7 +392,7 @@ if [ -n "$RUST_CRATE" ]; then
   export SYMBIAN_APP_NAME="$NAME"
   if [ "$DEBUG" = 1 ]; then
     export SYMBIAN_DEBUG=1
-    echo "    debug log: on  → C:\\Data\\logs_$NAME.txt"
+    echo "    debug log: on  → C:\\Data\\_logs\\$NAME.txt"
   else
     unset SYMBIAN_DEBUG
     echo "    debug log: off"
@@ -411,10 +400,6 @@ if [ -n "$RUST_CRATE" ]; then
   # Collect cargo features from every source that contributes one, comma-joined so a
   # single --features carries them all.
   FEATS=""
-  if [ -n "$EPOCADB_HOST" ] && [ -n "$DEV_BRIDGE_FEATURE" ]; then
-    FEATS="$DEV_BRIDGE_FEATURE"
-    echo "    dev bridge: on ($DEV_BRIDGE_FEATURE)"
-  fi
   if [ "$HIGHCAP" = 1 ] && [ -n "${HIGHCAP_CARGO_FEATURE:-}" ]; then
     FEATS="${FEATS:+$FEATS,}$HIGHCAP_CARGO_FEATURE"
     echo "    high-cap cargo feature: $HIGHCAP_CARGO_FEATURE"

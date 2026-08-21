@@ -359,7 +359,7 @@ fresh tree for it. `examples/preview.rs` can, because it presses keys and *then*
    build rather than waiting to be asked.
 2. `cargo test -p <app> --example <screen>_parity` green, with the scene count asserted.
 3. Device build (`../SDK/tools/epoc build .`) and the migrated screen exercised by hand — keyboard,
-   softkeys, paste into a field. `epoc logcat` for what it reports.
+   softkeys, paste into a field. `epoc logs <app> -f` for what it reports.
 4. Per stage, one measurement: binary size and allocations per frame. `tests/screen.rs` already
    counts allocations with its own global allocator; "≤ 5% bigger" was the original acceptance
    criterion and the first stage came in at **+5.2%** — see the measurement note above for what is in
@@ -387,6 +387,6 @@ conversation, a batch of keys, typing and pasting into the number field. None of
 the list under a thumb. Step 3 of the verification above is owed on both migrated screens: install it,
 hold Down through the end of the list, open a chat with the green key, type a number, paste one, reveal
 a password with the left softkey, walk a transcript onto a link and press Select, type a message and
-send it, and read `epoc logcat`. What to watch for is timing rather than
+send it, and read `epoc logs <app>`. What to watch for is timing rather than
 layout, because timing is the thing the host cannot show — every path that changes the model now drops
 and rebuilds the screen description, and the adapter rebuilds it after every key it consumes.

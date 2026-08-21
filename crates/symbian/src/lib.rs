@@ -134,44 +134,66 @@ pub fn timer_after(ms: i32) -> Result<i32> {
     Ok(handle)
 }
 
-/// flogger's log directory. Not where this SDK's logs go — see [`DATA_DIR`] — but the second
-/// rung of `log`'s ladder, for a handset where `C:\Data\` is not writable.
+/// flogger's log directory. Not where this SDK's logs go — see [`DATA_LOG_DIR`] — but the
+/// second rung of `log`'s ladder, for a handset where `C:\Data\` is not writable.
 pub const LOG_DIR: &str = "C:\\logs\\";
 
-/// Create `C:\logs\` if it is not there, so a file can be opened inside it.
+/// Create the log directories if they are not there, so a file can be opened inside one.
 ///
 /// Symbian has no "create parents on open": `RFile::Replace` on a path whose directory is
-/// missing fails with `KErrPathNotFound`, and on a fresh handset that directory only exists
-/// if flogger has been enabled. So anything writing a log there has to ask first.
+/// missing fails with `KErrPathNotFound`, and neither [`DATA_LOG_DIR`] nor [`LOG_DIR`] exists
+/// on a handset that has never run one of these apps (or has never enabled flogger). So
+/// anything writing a log has to ask first.
+///
+/// Both, in one call, because the caller does not choose: `log`'s ladder walks them in order
+/// and takes the first that opens, so asking for only the one it *expected* to win is how a
+/// fallback stops being a fallback.
 ///
 /// Best-effort and silent — on the host it does nothing, and an existing directory is
 /// success. Exposed because [`applog`] is not the only writer: an app keeping its own
 /// formatted log file (a size cap, redaction, its own layout) still wants it in the one
-/// place the monitor looks.
+/// place the tooling looks.
 pub fn ensure_log_dir() {
-    if let Ok(dir) = fs::Utf16Path::new(LOG_DIR) {
-        let units = dir.as_units();
-        // SAFETY: `units` is valid for `units.len()` u16 and only read. An already-existing
-        // directory returns success, so the result carries nothing worth branching on.
-        let _ = unsafe { symbian_sys::shim_mkdir(units.as_ptr(), units.len() as i32) };
+    for dir in [DATA_LOG_DIR, LOG_DIR] {
+        if let Ok(dir) = fs::Utf16Path::new(dir) {
+            let units = dir.as_units();
+            // SAFETY: `units` is valid for `units.len()` u16 and only read. An
+            // already-existing directory returns success, so the result carries nothing
+            // worth branching on.
+            let _ = unsafe { symbian_sys::shim_mkdir(units.as_ptr(), units.len() as i32) };
+        }
     }
 }
 
-/// Where app logs go: `C:\Data\`, with the `logs_` prefix that marks a file there as one.
-///
-/// Not `C:\logs\`, which is flogger's and need not exist on a handset where flogger has
-/// never run. `C:\Data\` always exists, is writable with no capability, is reachable over
-/// USB and Bluetooth, and is where this SDK's apps already write everything else — one
-/// directory to look in beats two. The prefix is required because that directory also holds
-/// the user's own files.
+/// Where an app's own data goes: `C:\Data\`. Always exists, writable with no capability, and
+/// reachable over USB and Bluetooth.
 pub const DATA_DIR: &str = "C:\\Data\\";
-/// The prefix on a log file in [`DATA_DIR`]. See [`applog`].
-pub const DATA_LOG_PREFIX: &str = "logs_";
+
+/// Where app logs go: `C:\Data\_logs\`, one file per app, `<app>.txt`.
+///
+/// Not `C:\logs\`, which is flogger's and need not exist on a handset where flogger has never
+/// run. Under `C:\Data\` because that always exists and needs no capability — but in a
+/// directory of its own rather than beside the user's files.
+///
+/// **The leading underscore is load-bearing.** `C:\Data\` is where the phone keeps the user's
+/// own things, and the file browser sorts by name: `_logs` lands at the top, next to
+/// `_app_install`, which is the difference between "it is right there" and scrolling past
+/// somebody's photos to find it. Same trick, same reason, and now the two places this project
+/// asks a person to open on the handset sit together.
+///
+/// It used to be `C:\Data\logs_<app>.txt`: the same directory as everything else, with a prefix
+/// doing the work a directory does better. A directory sorts, it can be pulled in one go, and it
+/// can be emptied without a pattern match over somebody's documents. `logs_*.txt` files from
+/// earlier builds are simply left where they are — they are diagnostics, and nothing reads them
+/// once the tooling looks here.
+///
+/// [`ensure_log_dir`] creates it; a log path is useless if opening it fails on a fresh phone.
+pub const DATA_LOG_DIR: &str = "C:\\Data\\_logs\\";
 
 /// Size at which a log file starts over. See [`fs::append_capped`].
 pub const LOG_MAX: u64 = 64 * 1024;
 
-/// Append a line to `C:\Data\logs_<name>.txt`, the SDK's device-log convention.
+/// Append a line to `C:\Data\_logs\<name>.txt`, the SDK's device-log convention.
 ///
 /// This is what `symbian::log!` writes through, and it is deliberately the same path an app
 /// keeping its own richer log would choose: one location, one naming rule, so whatever
@@ -181,6 +203,10 @@ pub const LOG_MAX: u64 = 64 * 1024;
 /// A diagnostic aid, never a data path. A trailing newline is added if absent, and the file
 /// starts over once it passes 64 KB.
 pub fn applog(name: &str, line: &str) {
+    // The directory has to exist before the append can open anything in it, and this is the
+    // entry point an app using `applog` directly comes through — `log::line`'s own resolve
+    // asks separately.
+    ensure_log_dir();
     let _ = applog_to(&mut ShimFs, name, line);
 }
 
@@ -204,7 +230,7 @@ mod applog_tests {
         let mut fs = MemFs::new();
         applog_to(&mut fs, "myapp", "first").unwrap();
         applog_to(&mut fs, "myapp", "second\n").unwrap();
-        let got = fs.contents("C:\\Data\\logs_myapp.txt").expect("the path is the contract");
+        let got = fs.contents("C:\\Data\\_logs\\myapp.txt").expect("the path is the contract");
         // The newline is added when absent and not doubled when present.
         assert_eq!(core::str::from_utf8(got).unwrap(), "first\nsecond\n");
     }
@@ -216,7 +242,7 @@ mod applog_tests {
         for _ in 0..70 {
             applog_to(&mut fs, "myapp", &long).unwrap();
         }
-        let got = fs.contents("C:\\Data\\logs_myapp.txt").unwrap();
+        let got = fs.contents("C:\\Data\\_logs\\myapp.txt").unwrap();
         // Past 64 KB it restarted, so what is left is the newest lines, not the oldest.
         assert!((got.len() as u64) < LOG_MAX, "still {} bytes", got.len());
         assert!(!got.is_empty(), "the line that tripped the cap must still be there");

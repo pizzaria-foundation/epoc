@@ -27,10 +27,8 @@
 //!
 //! # Getting it back
 //!
-//! `epoc db pull "C:\Data\dump\99-merged.txt" ./dump.txt`, if the dev bridge came up.
-//! Otherwise USB or Bluetooth — and "the bridge did not come up" is itself the run's first
-//! finding, since it has never been confirmed against a real handset
-//! (`docs/spec-epocadb.md`).
+//! `epoc sh --pull "C:\Data\dump\99-merged.txt" .` over the phone's remote shell, or the
+//! whole `C:\Data\dump\` directory off over USB.
 
 #![cfg_attr(not(test), no_std)]
 
@@ -49,41 +47,6 @@ pub mod probes;
 pub mod registry;
 
 pub use launcher::{Launcher, Outcome, Phase, TICK_MS};
-
-/// Set by the `CTL rerun` verb, read by [`DevDump::tick`].
-///
-/// A static rather than a field because the bridge's control handler is a plain `fn` that
-/// runs from inside the socket poll — it has no path to the app's data, and giving it one
-/// would mean the app could be mutated halfway through a frame. A flag it can set and the
-/// tick can clear is the whole of the coupling.
-static mut RERUN_REQUESTED: bool = false;
-
-/// The `CTL` verbs this app answers. Registered with the dev bridge at startup.
-///
-/// # Why this exists
-///
-/// A run costs an install, an open and a wait. Most of what makes a second run necessary is
-/// not a code change — it is wanting the numbers again after moving the phone, inserting a
-/// card, or turning something on. `CTL rerun` turns "build, transfer, install, open, wait,
-/// pull" into "rerun, pull", and it is the first `CTL` verb defined anywhere in this
-/// repository: until now `symbian-app` answered every one with `ERR no control verbs`.
-///
-/// It deliberately does **not** take a probe name. Running one probe out of sequence would
-/// leave the other sections on disk from the previous run, with nothing in the merged file
-/// saying which lines came from when — a report whose parts are from different moments,
-/// presented as one observation.
-pub fn control(line: &str) -> Option<alloc::string::String> {
-    match line.trim() {
-        "rerun" => {
-            // SAFETY: single-threaded; set from the bridge poll, cleared in `tick`, both on
-            // the app thread.
-            unsafe { RERUN_REQUESTED = true };
-            Some(alloc::string::String::from("OK rerun queued"))
-        }
-        "status" => Some(alloc::string::String::from("OK devdump")),
-        _ => None,
-    }
-}
 
 /// The launcher's screen.
 ///
@@ -106,182 +69,10 @@ pub struct DevDump {
     /// this the launcher sat in `Phase::Start` forever, drew "running: starting", and
     /// looked exactly like a network problem.
     ticker: Option<i32>,
-    #[cfg(feature = "dev-bridge")]
-    bridge: bridge::Bridge,
-}
-
-/// The dev bridge: the connection ladder that actually gets online on this handset.
-///
-/// # The technique, and why not a shortcut
-///
-/// `docs/device-notes.md` records three device runs in which every other program on the
-/// phone reached the network and this SDK's did not. The cause was a strategy chosen to
-/// avoid the access-point dialog: open a socket with no `RConnection` at all, on the
-/// reasoning that the stack would use whatever route existed. It had no dialog, no
-/// negotiation and nothing that could time out — and it also could not find or create a
-/// route, so it reported success unconditionally while three phases timed out beneath it.
-/// **The absence of a mechanism is not a mechanism. It cannot fail, which reads as
-/// working.**
-///
-/// So this uses the full ladder, which is the one confirmed on hardware and the one the
-/// Telegram client uses:
-///
-/// 1. **`RConnection::Attach`** to a route that is already up — synchronous, no dialog,
-///    `KErrNotFound` when there is nothing to join.
-/// 2. **A saved IAP**, if a previous run recorded one. `ECommDbDialogPrefDoNotPrompt`, so
-///    this is silent too.
-/// 3. **The dialog**, once. Every other program on the handset offers it; refusing to is
-///    what left this SDK offline for three rounds.
-///
-/// and then **persists whatever the OS settled on**, which is what makes every run after
-/// the first silent. That last step is the difference between a ladder that works once and
-/// one that stops being noticed.
-///
-/// # Why the dialog is safe here
-///
-/// It does not stall the probe run. `net_start` is asynchronous and the launcher's tick
-/// loop is independent of it: the bearer progresses through events while probes are being
-/// launched and polled. Nothing on the report's critical path waits for the network, so the
-/// worst case of a dialog nobody answers is a run with no bridge — exactly the run we would
-/// have had anyway.
-///
-/// The shim also sends the app to the background before prompting, because on S60 3rd
-/// Edition the CommsDat dialog otherwise opens *behind* the application window. That is
-/// Nokia's own fix, and it means the launcher briefly loses foreground mid-run.
-#[cfg(feature = "dev-bridge")]
-mod bridge {
-    use symbian::fs::{self, ShimFs, Utf16Path};
-    use symbian::net::{Bearer, RawEvent, ShimNet};
-
-    /// Where the chosen access point is remembered between runs.
-    ///
-    /// The app's own private directory: it needs no capability, and it is removed with the
-    /// package so an uninstall does not leave a stale id behind for the next install to
-    /// trust.
-    const IAP_FILE: &str = "iap.txt";
-
-    #[derive(Copy, Clone, Debug, PartialEq, Eq)]
-    pub enum State {
-        Idle,
-        /// A bearer request is outstanding — attach, a saved id, or the dialog.
-        Connecting,
-        Up,
-        /// The ladder ran out. Recorded, not retried: a second pass would raise a second
-        /// dialog for a channel that is optional by design.
-        Unavailable,
-    }
-
-    pub struct Bridge {
-        pub state: State,
-        net: ShimNet,
-        fs: ShimFs,
-        bearer: Option<Bearer>,
-        /// Read at startup, written once the OS says which IAP it settled on.
-        saved: Option<u32>,
-    }
-
-    impl Bridge {
-        pub fn new() -> Self {
-            let mut fs = ShimFs;
-            let saved = load_iap(&mut fs);
-            Bridge { state: State::Idle, net: ShimNet, fs, bearer: None, saved }
-        }
-
-        /// Start the ladder. Called when the run starts.
-        pub fn connect(&mut self) {
-            if self.state != State::Idle {
-                return;
-            }
-            // Attach first, always. It is synchronous and free, and on a phone that is
-            // already online it is the whole of the work — no dialog, nothing to wait for.
-            //
-            // `Bearer::attach` does *not* give up if there is nothing to join: it falls
-            // through to the dialog on the first failed event, which is the behaviour that
-            // got this SDK online.
-            //
-            // The saved id is not consulted here on purpose. Attach is cheaper and quieter
-            // than starting a named IAP, so it is worth trying even when an id is known —
-            // and if it finds nothing, `Bearer` prompts once and we record the answer.
-            // Reading `self.saved` before attaching would trade a free success for a
-            // guaranteed connection attempt.
-            match Bearer::attach(&mut self.net) {
-                Ok(b) => {
-                    self.bearer = Some(b);
-                    self.state = State::Connecting;
-                }
-                Err(_) => self.state = State::Unavailable,
-            }
-        }
-
-        /// Feed a platform event. Returns true if the host asked the app to exit.
-        pub fn on_event(&mut self, ev: &RawEvent) -> bool {
-            if let Some(b) = &mut self.bearer {
-                match b.on_event(&mut self.net, ev) {
-                    Ok(true) => {
-                        // The ordering that matters: a socket opened on a connection that
-                        // has not started panics esock rather than failing, so the bridge
-                        // connects only once the bearer says it is up.
-                        symbian_app::devbridge::connect(Some(b.handle()));
-                        self.state = State::Up;
-                        // Persist what the OS actually settled on, which may differ from
-                        // what was asked for. This is the step that makes the *next* run
-                        // silent, and the one whose absence would leave a dialog in front
-                        // of every future run.
-                        if let Some(iap) = b.iap() {
-                            if self.saved != Some(iap) {
-                                save_iap(&mut self.fs, iap);
-                                self.saved = Some(iap);
-                            }
-                        }
-                    }
-                    Ok(false) => {}
-                    Err(_) => self.state = State::Unavailable,
-                }
-            }
-            symbian_app::devbridge::on_event(ev)
-        }
-
-        pub fn label(&self) -> &'static str {
-            match self.state {
-                State::Idle => "bridge: not tried",
-                State::Connecting => "bridge: connecting",
-                State::Up => "bridge: up",
-                State::Unavailable => "bridge: offline (report is in C:\\Data\\dump)",
-            }
-        }
-    }
-
-    fn iap_path(fs: &mut ShimFs) -> Option<Utf16Path> {
-        let dir = fs::private_path(fs).ok()?;
-        Utf16Path::join(dir.as_units(), IAP_FILE).ok()
-    }
-
-    fn load_iap(fs: &mut ShimFs) -> Option<u32> {
-        let p = iap_path(fs)?;
-        let bytes = fs::read(fs, &p).ok()??;
-        let text = core::str::from_utf8(&bytes).ok()?;
-        // A zero id is not worth trusting: the shim writes zero when it could not read the
-        // IAP back, and passing it to net_start would ask for access point number nothing.
-        text.trim().parse::<u32>().ok().filter(|v| *v > 0)
-    }
-
-    fn save_iap(fs: &mut ShimFs, iap: u32) {
-        let Some(p) = iap_path(fs) else { return };
-        let mut s = alloc::string::String::new();
-        symbian_report::push_i64(&mut s, iap as i64);
-        // Best-effort: a bridge that came up and could not record the fact is still a
-        // bridge that came up, and the only cost is one more dialog next time.
-        let _ = fs::write_atomic(fs, &p, s.as_bytes());
-        let _ = fs;
-    }
 }
 
 impl DevDump {
     pub fn new() -> Self {
-        // Registered here rather than in the entry point so the simulator gets it too, and
-        // so there is one place that knows this app answers CTL at all.
-        #[cfg(feature = "dev-bridge")]
-        symbian_app::devbridge::set_control_handler(control);
         DevDump {
             inner: Launcher::new(),
             fs: ShimFs,
@@ -289,21 +80,11 @@ impl DevDump {
             exit: false,
             started: false,
             ticker: None,
-            #[cfg(feature = "dev-bridge")]
-            bridge: bridge::Bridge::new(),
         }
     }
 
     /// Advance the run. The device host calls this from its timer every [`TICK_MS`].
     pub fn tick(&mut self) {
-        // SAFETY: single-threaded; see RERUN_REQUESTED.
-        if unsafe { core::mem::replace(&mut *core::ptr::addr_of_mut!(RERUN_REQUESTED), false) } {
-            // A fresh launcher, not a reset one: the previous run's outcomes and its
-            // manifest belong to the previous run, and carrying either forward would
-            // produce a report whose lines came from two different moments.
-            self.inner = Launcher::new();
-            self.started = true;
-        }
         if !self.started || self.inner.is_done() {
             return;
         }
@@ -334,8 +115,6 @@ impl DevDump {
         if let Some(h) = self.ticker.take() {
             symbian::timer_cancel(h);
         }
-        #[cfg(feature = "dev-bridge")]
-        self.bridge.connect();
     }
 }
 
@@ -379,13 +158,6 @@ impl App for DevDump {
     /// this forwards unconditionally and ignores the result for key translation — a
     /// diagnostic channel must not be able to swallow a keypress.
     fn handle_raw(&mut self, ev: &symbian_ui::RawEvent) -> Handled {
-        #[cfg(feature = "dev-bridge")]
-        if self.bridge.on_event(ev) {
-            // The host asked us to quit. Honoured, because a run nobody is watching is a
-            // run whose report is already on disk.
-            self.exit = true;
-        }
-
         // The tick. Matched on our own handle, so another timer in the process cannot drive
         // the state machine and ours cannot be mistaken for one.
         if ev.kind == symbian_sys::SHIM_EV_TIMER && Some(ev.handle) == self.ticker {
@@ -469,17 +241,6 @@ impl App for DevDump {
             row.push_str("  ");
             row.push_str(outcome.label());
             c.draw_text(Point::new(6, y + small.ascent()), &row, small, colour);
-            y += small.line_height();
-        }
-
-        #[cfg(feature = "dev-bridge")]
-        if y + small.line_height() <= frame.content.y1 {
-            c.draw_text(
-                Point::new(6, y + small.ascent()),
-                self.bridge.label(),
-                small,
-                theme.palette.dim,
-            );
             y += small.line_height();
         }
 
@@ -590,78 +351,8 @@ mod tests {
     /// or opening the app would start the run by accident.
     #[test]
     fn ticking_before_start_does_nothing() {
-        let _g = control_tests::LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        // SAFETY: single-threaded under LOCK.
-        unsafe { RERUN_REQUESTED = false };
         let mut app = DevDump::new();
         app.tick();
         assert_eq!(app.inner.phase(), Phase::Start);
-    }
-}
-
-#[cfg(test)]
-mod control_tests {
-    use super::*;
-
-    /// `RERUN_REQUESTED` is a process-wide static — deliberately, because on the device the
-    /// bridge handler is a plain `fn` with no path to the app. Under `cargo test` that makes
-    /// every test touching it share one flag, and they run in parallel by default: without
-    /// this lock, `ticking_before_start_does_nothing` occasionally saw a `rerun` queued by a
-    /// test in another thread and failed for a reason that had nothing to do with it.
-    ///
-    /// Serialising them is the honest fix. Clearing the flag per test would hide the sharing
-    /// rather than account for it, and a test that passes because of timing is worse than
-    /// one that fails.
-    pub(super) static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    fn clear() {
-        // SAFETY: single-threaded under LOCK.
-        unsafe { RERUN_REQUESTED = false };
-    }
-
-    #[test]
-    fn rerun_is_acknowledged_and_queues_a_run() {
-        let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        clear();
-        assert!(control("rerun").is_some());
-        let mut app = DevDump::new();
-        assert!(!app.started);
-        app.tick();
-        // A run that was never started is started by the verb, which is the point: the
-        // phone need not be touched between one report and the next.
-        assert!(app.started);
-    }
-
-    /// A finished run must start over rather than resume, or the merged report would carry
-    /// sections from two different moments as if they were one observation.
-    #[test]
-    fn rerun_after_a_finished_run_starts_a_new_one() {
-        let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        clear();
-        control("rerun");
-        let mut app = DevDump::new();
-        app.tick();
-        let before = app.inner.phase();
-        control("rerun");
-        app.tick();
-        assert_eq!(app.inner.phase(), before, "the second run did not begin from the start");
-    }
-
-    /// An unknown verb must be refused, not swallowed: the bridge turns `None` into an
-    /// error reply, and a host waiting on a dropped line cannot tell a slow device from a
-    /// wrong verb.
-    #[test]
-    fn an_unknown_verb_is_refused() {
-        let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        clear();
-        assert_eq!(control("wat"), None);
-        assert_eq!(control(""), None);
-    }
-
-    #[test]
-    fn whitespace_around_a_verb_is_tolerated() {
-        let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        clear();
-        assert!(control("  rerun \n").is_some());
     }
 }

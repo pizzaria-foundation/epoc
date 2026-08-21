@@ -21,7 +21,7 @@
 //!
 //! ## The journal
 //!
-//! Each attempt is written to `C:\Data\logs_urlprobe.txt` **before** the call and again after it.
+//! Each attempt is written to `C:\Data\_logs\urlprobe.txt` **before** the call and again after it.
 //! A line that has a `PEND` with no outcome is a route that took the process down — the one failure
 //! mode a screen cannot show you, because the screen goes with it. Append-only: a rewrite could
 //! itself be interrupted, and this is the file that has to survive.
