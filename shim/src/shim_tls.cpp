@@ -8,7 +8,7 @@
  * (mbedtls_sha256) faults on the first instruction into the DLL. So we do NOT touch mbedtls; we use
  * the native CSecureSocket API, which the patch has already upgraded to negotiate TLS 1.2.
  *
- * This file is one blocking call — shim_https_get — that brings up a bearer, resolves, connects a
+ * This file is two blocking calls — shim_https_get and shim_http_get — that bring up a bearer, resolve, connect a
  * TCP socket, wraps it in a CSecureSocket, does the handshake, sends an HTTP/1.1 GET and reads the
  * whole response into the caller's buffer.
  *
@@ -194,7 +194,33 @@ struct TlsArgs
     const uint16_t* host; int32_t hostLen; int32_t port;
     const uint16_t* path; int32_t pathLen;
     uint8_t* out; int32_t outCap;
+    /* ETrue for HTTPS, EFalse for cleartext HTTP. See shim_http_get for why the second exists. */
+    TBool tls;
     int32_t result;
+    };
+
+/* Send and receive over whichever of the two sockets this request is using.
+ *
+ * The rest of the worker does not care which: the request bytes, the read loop and the error bases
+ * are identical, and the only difference is two method calls. A wrapper rather than a copy of the
+ * function, because the copy is where the two would drift. */
+class Xfer
+    {
+public:
+    Xfer(RSocket& aSock, CSecureSocket* aSec) : iSock(aSock), iSec(aSec) {}
+    void Send(const TDesC8& aData, TRequestStatus& aStatus, TSockXfrLength& aLen)
+        {
+        if (iSec) iSec->Send(aData, aStatus, aLen);
+        else      iSock.Send(aData, 0, aStatus, aLen);
+        }
+    void RecvOneOrMore(TDes8& aBuf, TRequestStatus& aStatus, TSockXfrLength& aLen)
+        {
+        if (iSec) iSec->RecvOneOrMore(aBuf, aStatus, aLen);
+        else      iSock.RecvOneOrMore(aBuf, 0, aStatus, aLen);
+        }
+private:
+    RSocket& iSock;
+    CSecureSocket* iSec;
     };
 
 /* The actual HTTPS GET, run IN THE WORKER THREAD under that thread's own top-level scheduler.
@@ -214,31 +240,34 @@ TInt TlsWorkerL(TlsArgs& a)
     TInt rc = connect(c, hostw, a.port);
     if (rc != KErrNone) { closeConn(c); delete host8; return rc; }
 
-    /* Wrap the TCP socket in TLS. */
-    TInt secErr = KErrNone;
-    CSecureSocket* sec = newSecure(c.sock, secErr);
-    if (!sec) { stage("sec_fail"); closeConn(c); delete host8; return -3500 + secErr; }
-    stage("sec_new");
-
-    /* Headless: never pop a cert-trust dialog. SNI + cert name check via the domain name. */
-    sec->SetOpt(KSoDialogMode, KSolInetSSL, KSSLDialogUnattendedMode);
-    sec->SetOpt(KSoSSLDomainName, KSolInetSSL, h8);
-    stage("sec_opt");
-
-    {
-    CAsyncWaiter hw;
-    sec->StartClientHandshake(hw.iStatus);
-    stage("hs_issued");
-    hw.Await();
-    if (hw.Result() != KErrNone)
+    /* Wrap the TCP socket in TLS — unless this is a cleartext request. */
+    CSecureSocket* sec = NULL;
+    if (a.tls)
         {
-        stage("hs_fail");
-        TInt e = hw.Result();
-        sec->Close(); delete sec; closeConn(c); delete host8;
-        return -3600 + e;             /* handshake failure: -3600+err */
+        TInt secErr = KErrNone;
+        sec = newSecure(c.sock, secErr);
+        if (!sec) { stage("sec_fail"); closeConn(c); delete host8; return -3500 + secErr; }
+        stage("sec_new");
+
+        /* Headless: never pop a cert-trust dialog. SNI + cert name check via the domain name. */
+        sec->SetOpt(KSoDialogMode, KSolInetSSL, KSSLDialogUnattendedMode);
+        sec->SetOpt(KSoSSLDomainName, KSolInetSSL, h8);
+        stage("sec_opt");
+
+        CAsyncWaiter hw;
+        sec->StartClientHandshake(hw.iStatus);
+        stage("hs_issued");
+        hw.Await();
+        if (hw.Result() != KErrNone)
+            {
+            stage("hs_fail");
+            TInt e = hw.Result();
+            sec->Close(); delete sec; closeConn(c); delete host8;
+            return -3600 + e;             /* handshake failure: -3600+err */
+            }
+        stage("hs_ok");
         }
-    }
-    stage("hs_ok");
+    Xfer xfer(c.sock, sec);
 
     /* Build and send the request. */
     TBuf8<640> req;
@@ -252,13 +281,14 @@ TInt TlsWorkerL(TlsArgs& a)
     {
     TSockXfrLength sent;
     CAsyncWaiter sw;
-    sec->Send(req, sw.iStatus, sent);
+    xfer.Send(req, sw.iStatus, sent);
     sw.Await();
     if (sw.Result() != KErrNone)
         {
         stage("send_fail");
         TInt e = sw.Result();
-        sec->Close(); delete sec; closeConn(c); delete host8;
+        if (sec) { sec->Close(); delete sec; }
+        closeConn(c); delete host8;
         return -3700 + e;
         }
     }
@@ -271,7 +301,7 @@ TInt TlsWorkerL(TlsArgs& a)
         TPtr8 p(a.out + written, 0, a.outCap - written);
         TSockXfrLength got;
         CAsyncWaiter rw;
-        sec->RecvOneOrMore(p, rw.iStatus, got);
+        xfer.RecvOneOrMore(p, rw.iStatus, got);
         rw.Await();
         TInt r = rw.Result();
         if (r == KErrEof) { written += p.Length(); break; }  /* peer closed: keep last bytes */
@@ -282,8 +312,7 @@ TInt TlsWorkerL(TlsArgs& a)
         }
     stage("done");
 
-    sec->Close();
-    delete sec;
+    if (sec) { sec->Close(); delete sec; }
     closeConn(c);
     delete host8;
     return written;
@@ -320,9 +349,9 @@ extern "C" {
  * nested CActiveSchedulerWait panics (measured). A private thread with its own scheduler is the
  * clean fix — this thread just blocks on the worker's logon (thread death completes it directly, no
  * AO dispatch needed) and returns its result. */
-int32_t shim_https_get(const uint16_t* host, int32_t hostLen, int32_t port,
-                       const uint16_t* path, int32_t pathLen,
-                       uint8_t* out, int32_t outCap)
+static int32_t GetOverWorker(const uint16_t* host, int32_t hostLen, int32_t port,
+                             const uint16_t* path, int32_t pathLen,
+                             uint8_t* out, int32_t outCap, TBool aTls)
     {
     if (!host || hostLen <= 0 || !out || outCap <= 0)
         return KErrArgument;
@@ -330,7 +359,7 @@ int32_t shim_https_get(const uint16_t* host, int32_t hostLen, int32_t port,
     TlsArgs args;
     args.host = host; args.hostLen = hostLen; args.port = port;
     args.path = path; args.pathLen = pathLen;
-    args.out = out; args.outCap = outCap; args.result = KErrGeneral;
+    args.out = out; args.outCap = outCap; args.tls = aTls; args.result = KErrGeneral;
 
     RThread thr;
     _LIT(KName, "adbian_tls");
@@ -373,6 +402,31 @@ int32_t shim_https_get(const uint16_t* host, int32_t hostLen, int32_t port,
         return -3900 - exitReason;
         }
     return args.result;
+    }
+
+int32_t shim_https_get(const uint16_t* host, int32_t hostLen, int32_t port,
+                       const uint16_t* path, int32_t pathLen,
+                       uint8_t* out, int32_t outCap)
+    {
+    return GetOverWorker(host, hostLen, port, path, pathLen, out, outCap, ETrue);
+    }
+
+/* The same GET without TLS. Cleartext, and deliberately so.
+ *
+ * The case it exists for: a service on the same LAN that trims a calendar feed too big for this
+ * phone to read. It cannot be reached over HTTPS, because `CSecureSocket` validates the server's
+ * certificate against the device's own store and a 2009 handset has no way to be told to trust a
+ * certificate minted this morning for a private address — the handshake answers
+ * `KErrSSLInvalidCert` (-7404), which is the correct answer to the question it was asked.
+ *
+ * So the choice is between cleartext on a network the user controls and no feature at all. The
+ * caller decides, per URL, by writing `http://` — never a fallback, because a silent downgrade from
+ * https to http is how a secret ends up on the wire. */
+int32_t shim_http_get(const uint16_t* host, int32_t hostLen, int32_t port,
+                      const uint16_t* path, int32_t pathLen,
+                      uint8_t* out, int32_t outCap)
+    {
+    return GetOverWorker(host, hostLen, port, path, pathLen, out, outCap, EFalse);
     }
 
 } /* extern "C" */

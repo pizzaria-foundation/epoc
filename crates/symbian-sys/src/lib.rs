@@ -679,6 +679,17 @@ extern "C" {
         out: *mut u8,
         out_cap: i32,
     ) -> i32;
+    // The same GET without TLS, for a service on a network the user controls whose certificate
+    // this handset cannot be made to trust. Cleartext; the caller opts in per URL.
+    pub fn shim_http_get(
+        host: *const u16,
+        host_len: i32,
+        port: i32,
+        path: *const u16,
+        path_len: i32,
+        out: *mut u8,
+        out_cap: i32,
+    ) -> i32;
     pub fn shim_dns_resolve(conn: i32, host: *const u16, len: i32, handle: *mut i32) -> i32;
     pub fn shim_dns_close(handle: i32);
     pub fn shim_tcp_open(conn: i32, handle: *mut i32) -> i32;
@@ -1209,6 +1220,17 @@ mod host_stubs {
     }
     pub unsafe fn shim_net_stop(_h: i32) {}
     pub unsafe fn shim_https_get(
+        _host: *const u16,
+        _host_len: i32,
+        _port: i32,
+        _path: *const u16,
+        _path_len: i32,
+        _out: *mut u8,
+        _out_cap: i32,
+    ) -> i32 {
+        SHIM_ERR_NOT_READY
+    }
+    pub unsafe fn shim_http_get(
         _host: *const u16,
         _host_len: i32,
         _port: i32,
