@@ -889,7 +889,17 @@ macro_rules! entry {
         pub extern "C" fn rust_app_start() {
             // SAFETY: called exactly once, from CShimAppUi::ConstructL, on the GUI thread.
             unsafe {
-                __SYMBIAN_APP = Some($crate::__Box::new($ctor));
+                let mut app = $crate::__Box::new($ctor);
+                // Hand every app the system clipboard so text fields copy and paste out of the box.
+                // Gated on the `clipboard` cargo feature, which symbuild turns on for USE_CLIPBOARD=1
+                // (that same flag links the clipboard shim). Off, the line vanishes and nothing pulls
+                // shim_clip in, so an app that has not asked for a clipboard links exactly as before.
+                #[cfg(feature = "clipboard")]
+                $crate::symbian_ui::App::install_clipboard(
+                    &mut *app,
+                    $crate::__Box::new($crate::SystemClipboard),
+                );
+                __SYMBIAN_APP = Some(app);
                 __SYMBIAN_PAINTED = false;
             }
         }

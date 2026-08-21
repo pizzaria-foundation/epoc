@@ -380,6 +380,12 @@ impl<A: DeclarativeApp> symbian_ui::App for DeclarativeAppBridge<A> {
     fn title(&self) -> &str {
         A::TITLE
     }
+
+    /// Take the platform clipboard `entry!` hands over, so every text field on every screen can
+    /// copy and paste. Replaces the `NoClipboard` the bridge starts with.
+    fn install_clipboard(&mut self, clip: alloc::boxed::Box<dyn Clipboard>) {
+        self.clip = clip;
+    }
 }
 
 #[cfg(test)]

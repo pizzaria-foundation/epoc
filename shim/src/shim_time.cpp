@@ -232,4 +232,13 @@ int32_t shim_utc_offset(void)
     return User::UTCOffset().Int();
     }
 
+/* A blocking thread sleep, for a headless helper that must back off — e.g. retrying a database
+ * open that a foreground app is holding for the length of one query. User::After is the plain
+ * sleep and yields the CPU, so the other process gets to release its lock. Never on a GUI thread. */
+void shim_sleep_ms(int32_t ms)
+    {
+    if (ms > 0)
+        User::After(ms * 1000);
+    }
+
 } /* extern "C" */

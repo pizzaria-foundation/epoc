@@ -8,6 +8,9 @@ rust-version.workspace = true
 
 [features]
 default = []
+# Wires the system clipboard into every app via entry! (copy/paste in text fields). symbuild
+# turns this on when an app sets USE_CLIPBOARD=1, so the app needs no code — see tools/symbuild.
+clipboard = []
 # The dev bridge, off by default: a release build must not ship a service that accepts file
 # writes from anything on the LAN. `tools/symbuild` turns it on when EPOCADB_HOST is set in
 # api.conf, via DEV_BRIDGE_FEATURE in app.conf.

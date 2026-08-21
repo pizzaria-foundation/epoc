@@ -28,14 +28,30 @@
 #include <txtetext.h>   /* CPlainText */
 #include <s32strm.h>
 
+/* Breadcrumb for the clipboard read: overwrite C:\Data\cal\clipstage.txt with the current step,
+ * so a KERN-EXEC leaves the last call reached. Diagnostic only. */
+static void ClipStage(const char* tag)
+    {
+    RFs fs;
+    if (fs.Connect() != KErrNone) return;
+    _LIT(KDir,   "C:\\Data\\cal\\");
+    _LIT(KStage, "C:\\Data\\cal\\clipstage.txt");
+    fs.MkDirAll(KDir);
+    RFile f;
+    if (f.Replace(fs, KStage, EFileWrite) == KErrNone)
+        {
+        TPtrC8 p((const TUint8*)tag);
+        f.Write(p);
+        f.Close();
+        }
+    fs.Close();
+    }
+
 extern "C" {
 
-/* The stream dictionary key Avkon's editors read on Paste.
- *
- * `KClipboardUidTypePlainText`, spelled out rather than included: it lives in a header the rest of
- * this shim does not pull in, and the value is part of the on-disk format either way. A different
- * UID here writes a clipboard nothing can read. */
-static const TUid KPlainTextClipboardUid = { 0x10003A69 };
+/* The stream dictionary key Avkon's editors read on Paste: KClipboardUidTypePlainText, from
+ * txtetext.h (already included for CPlainText). The value hardcoded here before was wrong
+ * (0x10003A69 vs the real 0x10003A1D), which made a paste look up a key nothing writes. */
 
 static void DoSetTextL(RFs& aFs, const TDesC& aText)
     {
@@ -66,13 +82,18 @@ static void DoSetTextL(RFs& aFs, const TDesC& aText)
 static void DoGetTextL(RFs& aFs, uint16_t* aOut, TInt aCap, TInt& aLen)
     {
     aLen = 0;
+    ClipStage("open");
     CClipboard* cb = CClipboard::NewForReadingLC(aFs);
-    if (cb->StreamDictionary().At(KPlainTextClipboardUid) == KNullStreamId)
+    ClipStage("opened");
+    if (cb->StreamDictionary().At(KClipboardUidTypePlainText) == KNullStreamId)
         User::Leave(KErrNotFound);
+    ClipStage("has_text");
 
     CPlainText* text = CPlainText::NewL();
     CleanupStack::PushL(text);
+    ClipStage("newl");
     text->PasteFromStoreL(cb->Store(), cb->StreamDictionary(), 0);
+    ClipStage("pasted");
 
     TInt n = text->DocumentLength();
     if (n > aCap)
@@ -83,6 +104,7 @@ static void DoGetTextL(RFs& aFs, uint16_t* aOut, TInt aCap, TInt& aLen)
         text->Extract(out, 0, n);
         aLen = out.Length();
         }
+    ClipStage("extracted");
     CleanupStack::PopAndDestroy(text);
     CleanupStack::PopAndDestroy(cb);
     }
@@ -115,23 +137,71 @@ int32_t shim_clip_set_text(const uint16_t* text, int32_t len)
  * Text longer than `cap` is truncated rather than refused: a paste that delivers the first `cap`
  * characters of a very long clipboard is useful, and the caller sizes the buffer for what its field
  * can hold anyway. */
+/* What the reader thread is handed. `out` is the caller's buffer (same process, so any thread may
+ * write it); `len`/`rc` come back. */
+struct ClipReadArgs
+    {
+    uint16_t* out;
+    int32_t cap;
+    int32_t len;
+    int32_t rc;
+    };
+
+/* Read the clipboard on a private thread. The Avkon clipboard store has been observed to *panic*
+ * (a KERN-EXEC, not a leave) rather than fail cleanly on some contents/handsets, and a panic on the
+ * GUI thread takes the whole app down with no trace. Isolating the read on its own thread turns
+ * that panic into the thread's exit reason, which the caller reports as an error instead of dying.
+ * No active scheduler is needed: CClipboard/CPlainText are synchronous. */
+static TInt ClipReadThread(TAny* aArg)
+    {
+    ClipReadArgs* a = (ClipReadArgs*)aArg;
+    CTrapCleanup* cleanup = CTrapCleanup::New();
+    if (!cleanup) { a->rc = KErrNoMemory; return KErrNoMemory; }
+    RFs fs;
+    TInt rc = fs.Connect();
+    if (rc == KErrNone)
+        {
+        TInt n = 0;
+        TRAPD(err, DoGetTextL(fs, a->out, a->cap, n));
+        fs.Close();
+        a->len = n;
+        a->rc = err;
+        }
+    else
+        a->rc = rc;
+    delete cleanup;
+    return KErrNone;
+    }
+
 int32_t shim_clip_get_text(uint16_t* out, int32_t cap, int32_t* len)
     {
     if (!out || cap <= 0 || !len)
         return SHIM_ERR_ARGUMENT;
     *len = 0;
 
-    RFs fs;
-    TInt rc = fs.Connect();
-    if (rc != KErrNone)
-        return rc;
+    ClipReadArgs args;
+    args.out = out; args.cap = cap; args.len = 0; args.rc = KErrGeneral;
 
-    TInt n = 0;
-    TRAPD(err, DoGetTextL(fs, out, cap, n));
-    fs.Close();
-    if (err != KErrNone)
-        return err;
-    *len = n;
+    RThread thr;
+    _LIT(KName, "shim_clip_read");
+    /* 32 KB stack; NULL heap = share this process heap so any transient allocation is consistent. */
+    TInt cr = thr.Create(KName, ClipReadThread, 32 * 1024, NULL, &args);
+    if (cr != KErrNone)
+        return cr;
+
+    TRequestStatus st;
+    thr.Logon(st);
+    thr.Resume();
+    User::WaitForRequest(st);
+    TExitType et = thr.ExitType();
+    TInt reason = thr.ExitReason();
+    thr.Close();
+
+    if (et == EExitPanic)
+        return -(4000 + reason);   /* the clipboard read panicked; -(4000+reason) names it */
+    if (args.rc != KErrNone)
+        return args.rc;
+    *len = args.len;
     return SHIM_OK;
     }
 

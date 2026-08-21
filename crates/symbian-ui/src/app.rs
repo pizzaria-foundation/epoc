@@ -29,6 +29,7 @@
 
 use symbian_gfx::{Canvas, Rect};
 
+use crate::clip::Clipboard;
 use crate::input::{Handled, KeyEvent};
 use crate::theme::Theme;
 
@@ -83,6 +84,16 @@ pub trait App {
     fn title(&self) -> &str {
         "app"
     }
+
+    /// Hand the app a platform clipboard, so its text fields can copy and paste.
+    ///
+    /// A defaulted no-op: an app that holds no clipboard (or is not a bridge) simply ignores it,
+    /// and paste stays the quiet no-op an empty clipboard already is. `entry!` calls this once on
+    /// the device with the system clipboard, so every app gets copy-and-paste without wiring it —
+    /// the SDK-wide fix for "paste does nothing". The clipboard trait lives here in `symbian-ui`,
+    /// which is what lets this method exist without the toolkit depending on the shim that
+    /// implements it.
+    fn install_clipboard(&mut self, _clip: alloc::boxed::Box<dyn Clipboard>) {}
 }
 
 #[cfg(test)]

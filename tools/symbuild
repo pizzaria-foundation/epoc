@@ -226,6 +226,14 @@ if [ "${USE_SHIM:-0}" = 1 ]; then
   fi
 fi
 
+# USE_SQL's library, for a HEADLESS DAEMON too. The USE_SHIM block above (which carries the base
+# library set and every other USE_* lib gate) does not run for USE_SHIM_DAEMON, so a daemon that
+# opens a database — apps/calsync in the cal repo does — would link shim_sql.o against nothing.
+# The GUI path still adds sqldb inside that block; this only fills the daemon gap.
+if [ "${USE_SQL:-0}" = 1 ] && [ "${USE_SHIM_DAEMON:-0}" = 1 ]; then
+  SYMBIAN_LIBS="${SYMBIAN_LIBS:-euser} sqldb"
+fi
+
 # Appended *outside* the USE_SHIM branch above, unlike every other USE_* library rule.
 #
 # Those rules only fire for a GUI app, because SYMBIAN_LIBS is only defaulted there — a
@@ -403,6 +411,13 @@ if [ -n "$RUST_CRATE" ]; then
   if [ "$HIGHCAP" = 1 ] && [ -n "${HIGHCAP_CARGO_FEATURE:-}" ]; then
     FEATS="${FEATS:+$FEATS,}$HIGHCAP_CARGO_FEATURE"
     echo "    high-cap cargo feature: $HIGHCAP_CARGO_FEATURE"
+  fi
+  # USE_CLIPBOARD wires the system clipboard into entry! (copy/paste in every text field), on top
+  # of linking the clipboard shim. The feature lives on symbian-app, a direct dep of the device
+  # crate, so the dep/feature syntax reaches it.
+  if [ "${USE_CLIPBOARD:-0}" = 1 ]; then
+    FEATS="${FEATS:+$FEATS,}symbian-app/clipboard"
+    echo "    clipboard: on (entry! injects SystemClipboard)"
   fi
   CARGO_FEATURES=()
   [ -n "$FEATS" ] && CARGO_FEATURES=(--features "$FEATS")
@@ -684,6 +699,7 @@ if [ ${#SRCS[@]} -gt 0 ]; then
       ${USE_DLL_PROBE:+$([ "$USE_DLL_PROBE" = 1 ] && echo -DSHIM_USE_DLL_PROBE)} \
       ${USE_NCN:+$([ "$USE_NCN" = 1 ] && echo -DSHIM_USE_NCN)} \
       ${USE_TLS:+$([ "$USE_TLS" = 1 ] && echo -DSHIM_USE_TLS)} \
+      ${USE_KEYLOG:+$([ "$USE_KEYLOG" = 1 ] && echo -DSHIM_KEYLOG)} \
       -fexceptions -fno-rtti \
       -Wall -Wno-narrowing -Wno-ctor-dtor-privacy -Wno-unknown-pragmas \
       -Wno-attributes \

@@ -446,8 +446,50 @@ TCoeInputCapabilities CShimControl::InputCapabilities() const
 #endif
     }
 
+#ifdef SHIM_KEYLOG
+/* Raw key capture for apps/keyprobe: append EVERY OfferKeyEventL call to C:\\Data\\keyprobe.txt,
+ * BEFORE the EEventKey filter that normally drops down/up edges — so a Ctrl chord that never
+ * produces a translated character is still visible here. type: 0=EEventKey 1=EEventKeyUp
+ * 2=EEventKeyDown 3=EEventKeyRepeat (TEventCode values). code=iCode, scan=iScanCode, mods=iModifiers. */
+static void KeyProbeLog(const TKeyEvent& aKeyEvent, TEventCode aType)
+    {
+    RFs fs;
+    if (fs.Connect() != KErrNone) return;
+    _LIT(KDir, "C:\\Data\\");
+    _LIT(KLog, "C:\\Data\\keyprobe.txt");
+    fs.MkDirAll(KDir);
+    RFile f;
+    TInt rc = f.Open(fs, KLog, EFileWrite | EFileShareAny);
+    if (rc == KErrNotFound || rc == KErrPathNotFound)
+        rc = f.Create(fs, KLog, EFileWrite | EFileShareAny);
+    if (rc == KErrNone)
+        {
+        TInt pos = 0;
+        f.Seek(ESeekEnd, pos);
+        TBuf8<96> line;
+        line.Append(_L8("type="));
+        line.AppendNum((TInt) aType);
+        line.Append(_L8(" code=0x"));
+        line.AppendNumFixedWidth((TUint) aKeyEvent.iCode, EHex, 4);
+        line.Append(_L8(" scan=0x"));
+        line.AppendNumFixedWidth((TUint) aKeyEvent.iScanCode, EHex, 4);
+        line.Append(_L8(" mods=0x"));
+        line.AppendNumFixedWidth((TUint) aKeyEvent.iModifiers, EHex, 4);
+        line.Append(_L8(" rep="));
+        line.AppendNum((TInt) aKeyEvent.iRepeats);
+        line.Append(_L8("\r\n"));
+        f.Write(line);
+        f.Close();
+        }
+    fs.Close();
+    }
+#endif
+
 TKeyResponse CShimControl::OfferKeyEventL(const TKeyEvent& aKeyEvent, TEventCode aType)
     {
+#ifdef SHIM_KEYLOG
+    KeyProbeLog(aKeyEvent, aType);
+#endif
     /* The Fn key never produces an EEventKey — it is a modifier, so it only ever
      * arrives as down/up. Catch it here, before the EEventKey filter that used to
      * hide it. */
@@ -518,6 +560,37 @@ TKeyResponse CShimControl::OfferKeyEventL(const TKeyEvent& aKeyEvent, TEventCode
         ev.native = 0;
         ShimPushEvent(ev);
         return EKeyWasConsumed;
+        }
+
+    /* Ctrl+letter never arrives as a translated EEventKey on the E72 QWERTY (measured with
+     * apps/keyprobe): the window server sends only the down/up edges — EModifierCtrl set, no
+     * character. So synthesise the Ctrl chord here from the DOWN edge's scancode, for the editing
+     * chords a text field acts on (paste, copy, cut, select-all). Scancodes are hardware-specific
+     * (V=0x37 on this handset); add the others as they are measured. Emitted as the control char
+     * ('v'->0x16) with the Ctrl modifier bit, which ctrl_chord on the Rust side turns back into
+     * Key::Ctrl('v'). Consumed so Avkon does not also act on it. */
+    if (aType == EEventKeyDown && (aKeyEvent.iModifiers & EModifierCtrl))
+        {
+        TInt letter = 0;
+        switch ((TInt) aKeyEvent.iScanCode)
+            {
+            case 0x37: letter = 'v'; break;   /* V */
+            /* TODO measure and add: C (copy), X (cut), A (select-all) */
+            }
+        if (letter)
+            {
+            ShimEvent e;
+            e.kind = SHIM_EV_KEY_DOWN;
+            e.handle = 0;
+            e.status = SHIM_OK;
+            e.a = letter - 'a' + 1;            /* control char: 'v' -> 0x16 */
+            e.b = 2;                           /* Ctrl bit (matches sys::modifier::CTRL) */
+            e.c = 0;
+            e.d = (TInt) aKeyEvent.iScanCode;
+            e.native = (TInt) aKeyEvent.iModifiers;
+            ShimPushEvent(e);
+            return EKeyWasConsumed;
+            }
         }
 
     /* Otherwise only EEventKey carries a translated character. Down and up would
@@ -756,6 +829,11 @@ CShimAppUi::~CShimAppUi()
      * none of ours. What does matter is that it runs at all: a connection left open past
      * process exit keeps server-side state alive until the server notices. */
     ShimSqlCleanup();
+#endif
+#ifdef SHIM_USE_BT
+    /* A registry subsession left open past process exit panics naming the BT registry server
+     * rather than us — the same rule as every other handle here. */
+    ShimBtCleanup();
 #endif
     ShimFilesCleanup();
 #ifdef SHIM_USE_FEP

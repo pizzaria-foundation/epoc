@@ -72,6 +72,13 @@ pub fn utc_offset() -> i32 {
     unsafe { symbian_sys::shim_utc_offset() }
 }
 
+/// Block the current thread for `ms` milliseconds. For a headless helper backing off on a busy
+/// resource; never call it on a GUI thread (it freezes the window server).
+pub fn sleep_ms(ms: i32) {
+    // SAFETY: a plain thread sleep with no pointers.
+    unsafe { symbian_sys::shim_sleep_ms(ms) }
+}
+
 /// Microseconds since the handset booted, from the nanokernel tick.
 ///
 /// Monotonic, unlike [`unix_time`], which the user can change from the clock application.

@@ -547,6 +547,7 @@ extern "C" {
     pub fn shim_work_busy() -> i32;
 
     // timers
+    pub fn shim_sleep_ms(ms: i32);
     pub fn shim_timer_after(ms: i32, handle: *mut i32) -> i32;
     pub fn shim_timer_every(ms: i32, handle: *mut i32) -> i32;
     pub fn shim_timer_cancel(handle: i32);
@@ -1052,6 +1053,7 @@ mod host_stubs {
     pub unsafe fn shim_work_busy() -> i32 {
         0
     }
+    pub unsafe fn shim_sleep_ms(_ms: i32) {}
     pub unsafe fn shim_timer_after(_ms: i32, _h: *mut i32) -> i32 {
         SHIM_ERR_NOT_SUPPORTED
     }

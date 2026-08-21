@@ -60,6 +60,11 @@ pub struct KeyProbe {
 
 impl KeyProbe {
     pub fn new() -> Self {
+        // Preload the system clipboard with a known string, so the paste test in cal has something
+        // to paste (Opções ▸ Colar / Ctrl+V should produce exactly this).
+        let test = "https://cole.isto/teste/basic.ics";
+        let utf16: alloc::vec::Vec<u16> = test.encode_utf16().collect();
+        unsafe { sys::shim_clip_set_text(utf16.as_ptr(), utf16.len() as i32); }
         KeyProbe { rows: [Row::default(); CAP], len: 0, total: 0, file_handle: 0 }
     }
 
