@@ -98,8 +98,12 @@ struct Conn
     RConnection conn;
     RHostResolver hr;
     RSocket sock;
-    TBool ssOpen, connOpen, sockOpen;
-    Conn() : ssOpen(EFalse), connOpen(EFalse), sockOpen(EFalse) {}
+    /* Only used by the fetch-to-file form. */
+    RFs outFs;
+    RFile outFile;
+    TBool ssOpen, connOpen, sockOpen, fileOpen, fsOpen;
+    Conn()
+        : ssOpen(EFalse), connOpen(EFalse), sockOpen(EFalse), fileOpen(EFalse), fsOpen(EFalse) {}
     };
 
 /* Bring up a bearer, resolve the host, open and connect a TCP socket. Blocking.
@@ -162,6 +166,8 @@ TInt connect(Conn& c, const TDesC& aHost, TInt aPort)
 
 void closeConn(Conn& c)
     {
+    if (c.fileOpen) { c.outFile.Close(); c.fileOpen = EFalse; }
+    if (c.fsOpen)   { c.outFs.Close(); c.fsOpen = EFalse; }
     if (c.sockOpen) { c.sock.Close(); }
     if (c.connOpen) { c.conn.Close(); }
     if (c.ssOpen)   { c.ss.Close(); }
@@ -196,8 +202,53 @@ struct TlsArgs
     uint8_t* out; int32_t outCap;
     /* ETrue for HTTPS, EFalse for cleartext HTTP. See shim_http_get for why the second exists. */
     TBool tls;
+    /* Set for the fetch-to-file form: where the BODY is written, whether to ask for gzip, and what
+     * came back. `out` is unused then — a body that does not fit in memory is the whole point. */
+    const uint16_t* file; int32_t fileLen;
+    TBool wantGzip;
+    int32_t status;      /* HTTP status, filled in by the worker */
+    TBool gotGzip;       /* whether the body is gzip-encoded */
     int32_t result;
     };
+
+/* Create (replacing) the file the body is written to. The directory has to exist; the caller owns
+ * that, because a shim that creates directories behind a caller's back hides a misconfigured path
+ * until the day it matters. */
+TInt openFileForWrite(Conn& c, TlsArgs& a)
+    {
+    TInt rc = c.outFs.Connect();
+    if (rc != KErrNone) return rc;
+    c.fsOpen = ETrue;
+    TPtrC path((const TUint16*)a.file, a.fileLen);
+    rc = c.outFile.Replace(c.outFs, path, EFileWrite | EFileStream);
+    if (rc != KErrNone) return rc;
+    c.fileOpen = ETrue;
+    return KErrNone;
+    }
+
+/* Read the status code and the content encoding out of the response head. Those two are what the
+ * caller cannot recover from the file afterwards; everything else it can. */
+void parseHead(const TDesC8& aHead, TlsArgs& a)
+    {
+    /* "HTTP/1.x 200 OK" — the number after the first space. */
+    TInt sp = aHead.Locate(' ');
+    if (sp != KErrNotFound && aHead.Length() >= sp + 4)
+        {
+        TLex8 lex(aHead.Mid(sp + 1, 3));
+        TInt code = 0;
+        if (lex.Val(code) == KErrNone) a.status = code;
+        }
+    /* Case-insensitive search for the one header that changes how the file must be read. */
+    HBufC8* lower = HBufC8::New(aHead.Length());
+    if (lower)
+        {
+        TPtr8 l = lower->Des();
+        l.Copy(aHead);
+        l.LowerCase();
+        a.gotGzip = (l.Find(_L8("content-encoding: gzip")) != KErrNotFound) ? ETrue : EFalse;
+        delete lower;
+        }
+    }
 
 /* Send and receive over whichever of the two sockets this request is using.
  *
@@ -244,6 +295,7 @@ TInt TlsWorkerL(TlsArgs& a)
     CSecureSocket* sec = NULL;
     if (a.tls)
         {
+        stage("sec_try");
         TInt secErr = KErrNone;
         sec = newSecure(c.sock, secErr);
         if (!sec) { stage("sec_fail"); closeConn(c); delete host8; return -3500 + secErr; }
@@ -267,16 +319,27 @@ TInt TlsWorkerL(TlsArgs& a)
             }
         stage("hs_ok");
         }
+    else
+        {
+        stage("plain");
+        }
     Xfer xfer(c.sock, sec);
 
-    /* Build and send the request. */
+    /* Build and send the request.
+     *
+     * The file form asks HTTP/1.0 on purpose: a 1.0 server may not use chunked transfer encoding,
+     * so the body is "everything until the peer closes" and this loop needs no de-chunking on the
+     * way to disk. Measured against the server that prompted it — 1.0 + gzip answers with neither
+     * Content-Length nor chunking, and closes. */
     TBuf8<640> req;
     req.Append(_L8("GET "));
     for (TInt i = 0; i < a.pathLen && a.path; ++i) req.Append((TChar)((const TUint16*)a.path)[i]);
     if (a.pathLen <= 0) req.Append(_L8("/"));
-    req.Append(_L8(" HTTP/1.1\r\nHost: "));
+    req.Append(a.file ? _L8(" HTTP/1.0\r\nHost: ") : _L8(" HTTP/1.1\r\nHost: "));
     req.Append(h8);
-    req.Append(_L8("\r\nUser-Agent: ADBian\r\nConnection: close\r\n\r\n"));
+    req.Append(_L8("\r\nUser-Agent: ADBian"));
+    if (a.wantGzip) req.Append(_L8("\r\nAccept-Encoding: gzip"));
+    req.Append(_L8("\r\nConnection: close\r\n\r\n"));
 
     {
     TSockXfrLength sent;
@@ -294,21 +357,137 @@ TInt TlsWorkerL(TlsArgs& a)
     }
     stage("sent");
 
-    /* Read the whole response until the peer closes (Connection: close). */
     TInt written = 0;
-    for (;;)
+    if (!a.file)
         {
-        TPtr8 p(a.out + written, 0, a.outCap - written);
-        TSockXfrLength got;
-        CAsyncWaiter rw;
-        xfer.RecvOneOrMore(p, rw.iStatus, got);
-        rw.Await();
-        TInt r = rw.Result();
-        if (r == KErrEof) { written += p.Length(); break; }  /* peer closed: keep last bytes */
-        if (r != KErrNone) break;                /* error or reset — return what we have */
-        written += p.Length();
-        if (p.Length() == 0) break;
-        if (a.outCap - written <= 0) break;
+        /* Read the whole response into the caller's buffer, until the peer closes. */
+        for (;;)
+            {
+            TPtr8 p(a.out + written, 0, a.outCap - written);
+            TSockXfrLength got;
+            CAsyncWaiter rw;
+            xfer.RecvOneOrMore(p, rw.iStatus, got);
+            rw.Await();
+            TInt r = rw.Result();
+            if (r == KErrEof) { written += p.Length(); break; }  /* peer closed: keep last bytes */
+            if (r != KErrNone) break;                /* error or reset — return what we have */
+            written += p.Length();
+            if (p.Length() == 0) break;
+            if (a.outCap - written <= 0) break;
+            }
+        }
+    else
+        {
+        /* Straight to disk. The headers are read into a small buffer first — the status and the
+         * content encoding are the only things the caller cannot work out from the file — and
+         * everything after the blank line is body.
+         *
+         * Nothing here is bounded by memory: this is the path for a body far larger than the phone
+         * could hold, which is exactly why it exists. */
+        stage("file_open");
+        TInt frc = openFileForWrite(c, a);
+        if (frc != KErrNone)
+            {
+            if (sec) { sec->Close(); delete sec; }
+            closeConn(c); delete host8;
+            return -4000 + frc;
+            }
+
+        stage("file_ok");
+        /* On the heap, not in this function's frame. Six kilobytes of stack buffers here cost the
+         * TLS handshake — which runs in the same frame, deeper — the room it needs, and the phone
+         * answered with KERN-EXEC 3 before the secure socket was even created. A frame is allocated
+         * on entry, so a buffer declared in a branch that has not run yet still charges for itself.
+         */
+        HBufC8* headBuf = HBufC8::New(2048);
+        HBufC8* chunkBuf = HBufC8::New(4096);
+        if (!headBuf || !chunkBuf)
+            {
+            delete headBuf; delete chunkBuf;
+            if (sec) { sec->Close(); delete sec; }
+            closeConn(c); delete host8;
+            return KErrNoMemory;
+            }
+        TPtr8 head = headBuf->Des();
+        TBool inBody = EFalse;
+        /* A write that fails must not pass for a body that arrived: C: can be full, and a spooled
+         * feed missing its middle would parse as a calendar missing its middle. */
+        TInt werr = KErrNone;
+        for (;;)
+            {
+            TPtr8 p((TUint8*)chunkBuf->Ptr(), 0, chunkBuf->Des().MaxLength());
+            TSockXfrLength got;
+            CAsyncWaiter rw;
+            xfer.RecvOneOrMore(p, rw.iStatus, got);
+            rw.Await();
+            TInt r = rw.Result();
+            TInt n = p.Length();
+
+            if (n > 0)
+                {
+                TPtrC8 data((const TUint8*)chunkBuf->Ptr(), n);
+                if (!inBody)
+                    {
+                    /* Accumulate until the blank line. A header block over 2 KB is not something a
+                     * server we asked for a calendar should send; treat it as body and move on. */
+                    TInt room = head.MaxLength() - head.Length();
+                    TInt take = n < room ? n : room;
+                    head.Append(data.Left(take));
+                    TInt sep = head.Find(_L8("\r\n\r\n"));
+                    if (sep != KErrNotFound)
+                        {
+                        parseHead(head.Left(sep), a);
+                        stage("head_done");
+                        inBody = ETrue;
+                        /* Whatever followed the blank line inside this chunk is the first body. */
+                        TInt bodyAt = sep + 4;
+                        if (head.Length() > bodyAt)
+                            {
+                            TPtrC8 first = head.Mid(bodyAt);
+                            werr = c.outFile.Write(first);
+                            written += first.Length();
+                            }
+                        if (take < n && werr == KErrNone)
+                            {
+                            TPtrC8 rest = data.Mid(take);
+                            werr = c.outFile.Write(rest);
+                            written += rest.Length();
+                            }
+                        }
+                    else if (take < n)
+                        {
+                        /* Header buffer full and no blank line: give up on parsing and keep bytes. */
+                        parseHead(head, a);
+                        inBody = ETrue;
+                        TPtrC8 rest = data.Mid(take);
+                        werr = c.outFile.Write(rest);
+                        written += rest.Length();
+                        }
+                    }
+                else
+                    {
+                    werr = c.outFile.Write(data);
+                    written += n;
+                    }
+                }
+
+            if (werr != KErrNone) break;  /* the disk refused — reported below, not swallowed */
+            if (r == KErrEof) break;      /* peer closed: the body is complete */
+            if (r != KErrNone) break;     /* error or reset — what reached disk is what we have */
+            if (n == 0) break;
+            }
+        c.outFile.Flush();
+        c.outFile.Close();
+        c.fileOpen = EFalse;
+        delete headBuf;
+        delete chunkBuf;
+        if (werr != KErrNone)
+            {
+            stage("write_fail");
+            if (sec) { sec->Close(); delete sec; }
+            closeConn(c); delete host8;
+            return -4100 + werr;
+            }
         }
     stage("done");
 
@@ -351,23 +530,39 @@ extern "C" {
  * AO dispatch needed) and returns its result. */
 static int32_t GetOverWorker(const uint16_t* host, int32_t hostLen, int32_t port,
                              const uint16_t* path, int32_t pathLen,
-                             uint8_t* out, int32_t outCap, TBool aTls)
+                             uint8_t* out, int32_t outCap, TBool aTls,
+                             const uint16_t* file = NULL, int32_t fileLen = 0,
+                             TBool wantGzip = EFalse, int32_t* statusOut = NULL,
+                             int32_t* gzipOut = NULL)
     {
-    if (!host || hostLen <= 0 || !out || outCap <= 0)
-        return KErrArgument;
+    const TBool toFile = (file != NULL && fileLen > 0);
+    if (!host || hostLen <= 0) return KErrArgument;
+    if (!toFile && (!out || outCap <= 0)) return KErrArgument;
 
     TlsArgs args;
     args.host = host; args.hostLen = hostLen; args.port = port;
     args.path = path; args.pathLen = pathLen;
     args.out = out; args.outCap = outCap; args.tls = aTls; args.result = KErrGeneral;
+    args.file = NULL; args.fileLen = 0; args.wantGzip = EFalse;
+    args.status = 0; args.gotGzip = EFalse;
 
     RThread thr;
     _LIT(KName, "adbian_tls");
-    /* 32 KB stack (TLS record buffers + mbedtls live on it); NULL heap = share this process heap,
-     * so the worker's allocations and the shared `out` buffer are the same heap we free from. */
-    const TInt KStack = 32 * 1024;
+    /* 64 KB stack. The TLS record buffers and the mbedtls port live on it, and 32 KB was enough
+     * only while this function's own frame was small — adding two buffers to a branch of it was
+     * enough to panic the handset with KERN-EXEC 3 inside CSecureSocket::NewL. The buffers moved to
+     * the heap and the stack doubled: the fix and the margin, because the next thing added here
+     * should not have to rediscover this.
+     *
+     * NULL heap = share this process heap, so the worker's allocations and the shared `out` buffer
+     * are the same heap we free from. */
+    const TInt KStack = 64 * 1024;
     TInt cr = thr.Create(KName, TlsThreadEntry, KStack, NULL, &args);
     if (cr != KErrNone) { stage("thr_fail"); return -3800 + cr; }
+
+    args.file = toFile ? file : NULL;
+    args.fileLen = toFile ? fileLen : 0;
+    args.wantGzip = wantGzip;
 
     TRequestStatus logon;
     thr.Logon(logon);
@@ -401,6 +596,8 @@ static int32_t GetOverWorker(const uint16_t* host, int32_t hostLen, int32_t port
             }
         return -3900 - exitReason;
         }
+    if (statusOut) *statusOut = args.status;
+    if (gzipOut) *gzipOut = args.gotGzip ? 1 : 0;
     return args.result;
     }
 
@@ -427,6 +624,24 @@ int32_t shim_http_get(const uint16_t* host, int32_t hostLen, int32_t port,
                       uint8_t* out, int32_t outCap)
     {
     return GetOverWorker(host, hostLen, port, path, pathLen, out, outCap, EFalse);
+    }
+
+/* Fetch straight to a file, optionally asking for gzip. Returns the BODY byte count written, or a
+ * negative error; the HTTP status and whether the body is gzip come back through the out params.
+ *
+ * This is the form for a body the phone cannot hold: one measured calendar export is 17.4 MB of
+ * text, 1.65 MB gzipped, and the useful part of it is a few hundred kilobytes. Fetched compressed to
+ * disk and then inflated in pieces (shim_gzip.cpp), memory stays flat and the file that arrived is
+ * still on the phone afterwards — which on a device with no debugger is most of the diagnosis. */
+int32_t shim_http_fetch_file(const uint16_t* host, int32_t hostLen, int32_t port,
+                             const uint16_t* path, int32_t pathLen,
+                             int32_t tls, int32_t gzip,
+                             const uint16_t* filePath, int32_t filePathLen,
+                             int32_t* statusOut, int32_t* gzipOut)
+    {
+    return GetOverWorker(host, hostLen, port, path, pathLen, NULL, 0,
+                         tls ? ETrue : EFalse, filePath, filePathLen,
+                         gzip ? ETrue : EFalse, statusOut, gzipOut);
     }
 
 } /* extern "C" */

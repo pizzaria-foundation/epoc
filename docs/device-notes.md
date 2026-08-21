@@ -1162,10 +1162,17 @@ signatures are RSA-with-SHA-1 and the device accepts nothing else.
 ## Transport
 
 **The E72 tears down its Bluetooth ACL link after each transfer** and stops answering SDP,
-so the *next* push fails with `org.bluez.obex.Error.Failed: Unable to find service record`
-— which reads as though the phone has no OBEX at all. A `bluetoothctl connect` refills the
-SDP cache; `btpush.py` does that automatically now, and tolerates the connect itself
-failing with `br-connection-page-timeout`, since the push often works anyway.
+so the *next* transfer fails with `org.bluez.obex.Error.Failed: Unable to find service
+record` — which reads as though the phone has no OBEX at all. A `bluetoothctl connect`
+refills the SDP cache, and tolerating that connect's own
+`br-connection-page-timeout` matters, since the transfer often works anyway. `btrecv.py`
+does both.
+
+This is also why there is no `epoc push` any more: OBEX object push put every package in
+Messaging and failed on every second attempt, and `epoc sideload` — the same file, over
+ADBian's RFCOMM shell, landing in `C:\Data\_app_install\` where File mgr. can tap it — has
+neither problem. The finding stays because OBEX is still how files come *back* off the
+phone.
 
 **The registration resource must go to `\private\10003a3f\import\apps\`.** 10003a3f is
 AppArc's own SID, not yours, and `import` is its writable drop-box. Installing to

@@ -36,6 +36,65 @@ pub fn http_get(host: &str, port: u16, path: &str, cap: usize) -> Result<Vec<u8>
     get(host, port, path, cap, false)
 }
 
+/// What a [`fetch_to_file`] brought back.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct Fetched {
+    /// The HTTP status the server answered with.
+    pub status: u16,
+    /// The number of **body** bytes written to the file.
+    pub bytes: usize,
+    /// Whether the file is gzip-encoded — the server's answer, not the request's wish.
+    pub gzip: bool,
+}
+
+/// Fetch a URL straight to a file, optionally asking the server for gzip.
+///
+/// For a body too large to hold in memory. One measured calendar export is 17.4 MB of text and
+/// 1.65 MB gzipped; the phone cannot keep either in a buffer, but it can write the compressed one
+/// to disk and then read it back inflated in pieces (see [`crate::zlib`]).
+///
+/// The request is HTTP/1.0, so a server may not answer with chunked transfer encoding and the body
+/// is simply "everything until the peer closes" — no de-chunking on the way to disk. Only the body
+/// is written; the status and the encoding come back here, because they are the two things the file
+/// cannot tell you afterwards.
+///
+/// The directory must exist. Blocking, like the rest of this module — headless helpers only.
+pub fn fetch_to_file(
+    host: &str,
+    port: u16,
+    path: &str,
+    file: &crate::fs::Utf16Path,
+    tls: bool,
+    gzip: bool,
+) -> Result<Fetched> {
+    let h: Vec<u16> = host.encode_utf16().collect();
+    let p: Vec<u16> = path.encode_utf16().collect();
+    let f = file.as_units();
+    let mut status = 0i32;
+    let mut gzipped = 0i32;
+    // SAFETY: every pointer is valid for its stated length and only read; `status`/`gzipped` are
+    // live locals the shim writes once.
+    let rc = unsafe {
+        sys::shim_http_fetch_file(
+            h.as_ptr(),
+            h.len() as i32,
+            port as i32,
+            p.as_ptr(),
+            p.len() as i32,
+            tls as i32,
+            gzip as i32,
+            f.as_ptr(),
+            f.len() as i32,
+            &mut status,
+            &mut gzipped,
+        )
+    };
+    if rc < 0 {
+        return Err(Error::from_code(rc));
+    }
+    Ok(Fetched { status: status as u16, bytes: rc as usize, gzip: gzipped != 0 })
+}
+
 fn get(host: &str, port: u16, path: &str, cap: usize, tls: bool) -> Result<Vec<u8>> {
     let h: Vec<u16> = host.encode_utf16().collect();
     let p: Vec<u16> = path.encode_utf16().collect();

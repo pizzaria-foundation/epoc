@@ -285,6 +285,13 @@ if [ "${USE_TLS:-0}" = 1 ]; then
   SYMBIAN_LIBS="${SYMBIAN_LIBS:-euser} ssl securesocket esock insock commdb netmeta"
 fi
 
+# zlib, for reading a gzip file in pieces (shim_gzip.cpp). The platform's own libz.dll — it loads on
+# the device with `inflate` resolving (docs/device-dump.txt) — not a vendored copy. Worth having
+# whenever a feed is fetched compressed: one measured calendar is 17.4 MB of text and 1.65 MB gzipped.
+if [ "${USE_ZLIB:-0}" = 1 ]; then
+  SYMBIAN_LIBS="${SYMBIAN_LIBS:-euser} libz"
+fi
+
 # Bluetooth. Six libraries, and the heaviest import set any flag in this file adds:
 #
 #   btmanclient     RBTRegServ, RBTRegistry, RBTLocalDevice, TBTRegistrySearch
@@ -630,6 +637,11 @@ if [ "${USE_SHIM:-0}" = 1 ] || [ "${USE_SHIM_DAEMON:-0}" = 1 ]; then
       shim_tls.cpp)
         [ "${USE_TLS:-0}" = 1 ] || continue
         ;;
+      # Inflating a gzip file a chunk at a time. Synchronous CPU work: no worker thread, safe from
+      # a daemon's pump, unlike shim_tls beside it.
+      shim_gzip.cpp)
+        [ "${USE_ZLIB:-0}" = 1 ] || continue
+        ;;
     esac
     SRCS+=("$src")
   done
@@ -693,6 +705,7 @@ if [ ${#SRCS[@]} -gt 0 ]; then
       ${USE_PROP:+$([ "$USE_PROP" = 1 ] && echo -DSHIM_USE_PROP)} \
       ${USE_MEM:+$([ "$USE_MEM" = 1 ] && echo -DSHIM_USE_MEM)} \
       ${USE_HAL:+$([ "$USE_HAL" = 1 ] && echo -DSHIM_USE_HAL)} \
+      ${USE_ZLIB:+$([ "$USE_ZLIB" = 1 ] && echo -DSHIM_USE_ZLIB)} \
       ${USE_FS_INFO:+$([ "$USE_FS_INFO" = 1 ] && echo -DSHIM_USE_FS_INFO)} \
       ${USE_CAPS:+$([ "$USE_CAPS" = 1 ] && echo -DSHIM_USE_CAPS)} \
       ${USE_MSG:+$([ "$USE_MSG" = 1 ] && echo -DSHIM_USE_MSG)} \

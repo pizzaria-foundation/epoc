@@ -1,7 +1,7 @@
 //! Bluetooth: the state the platform's BT server keeps, as safe Rust.
 //!
 //! The server itself is in ROM and nothing here replaces it — the native OBEX push, the
-//! headset profiles and the host's own `tools/btpush.py` all depend on it. What this module
+//! headset profiles and the host's own `tools/btrecv.py` all depend on it. What this module
 //! does is read and write the state it keeps, so a change made here is one the native
 //! Bluetooth screen sees, and one made there is one we see.
 //!

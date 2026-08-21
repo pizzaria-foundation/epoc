@@ -1306,7 +1306,7 @@ int32_t shim_process_start_timeout(const uint16_t* path, int32_t path_len, int32
  * # What is ours and what is the platform's
  *
  * The Bluetooth *server* is in ROM and every other consumer depends on it: the native OBEX
- * push, the headset profiles, the host's own btpush.py. Nothing here replaces it. These
+ * push, the headset profiles, the host's own btrecv.py. Nothing here replaces it. These
  * calls read and write the state that server keeps — the device registry, the power CenRep
  * key, the local-device record — so a change made through them is a change the native
  * Bluetooth screen sees too, and vice versa.

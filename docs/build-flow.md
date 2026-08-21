@@ -105,7 +105,7 @@ find, since the device refuses a malformed image by doing nothing at all.
                                     | (SIGN=1 -> signsis; off by default,
                                     |  the handset has a patched installserver)
                                     v
-                              btpush.py -> phone
+                          epoc sideload -> phone
 ```
 
 ## 3. The four things that actually break

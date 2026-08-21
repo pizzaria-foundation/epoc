@@ -188,7 +188,6 @@ One front door for everything:
     epoc build <app-dir> [clean]  sources -> .sis
     epoc db <args...>             the dev bridge: serve, logcat, push, pull, install
     epoc preview                  render the SDK's contact sheets to preview-out/
-    epoc push <file>              send a file to the phone over Bluetooth
     epoc serve                    serve out/ over the LAN so the phone can fetch a .sis
 
 `epoc db` fronts `tools/epocadb`; `new` and `build` front `tools/symnew` and
@@ -278,9 +277,9 @@ Every one of these exists because a question could not be answered from a docume
       opus             the vendored libopus, and the only unsafe in the audio path
 
     shim/              the C++ side: everything that can Leave, and the event pump
-    tools/             epoc (new, build, db, preview, push, serve), and the pieces behind it:
-                       symbuild, symnew, epocadb, mkfont, mkkeymap, e32dump, e32prep,
-                       sisdump, sisextract, btpush
+    tools/             epoc (new, build, db, preview, sideload, serve), and the pieces behind
+                       it: symbuild, symnew, epocadb, mkfont, mkkeymap, e32dump, e32prep,
+                       sisdump, sisextract, btrecv
     apps/              what ships with the SDK: devdump, mtmdemo, bootctl/bootd, and probes
     examples/          device diagnostics and the C++ comparison — see "What is in here"
     docs/              start with getting-started.md

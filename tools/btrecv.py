@@ -3,7 +3,7 @@
 
     python3 tools/btrecv.py [directory]        # default: ./inbox
 
-The other direction from `btpush.py`, and needed for the same reason: Fedora ships
+The receiving half of OBEX, and the only half left: Fedora ships
 obexd but no CLI front-end for it, so the receiving side has to be driven over D-Bus.
 
 The piece that is easy to miss: obexd will not accept an incoming push unless an *agent*

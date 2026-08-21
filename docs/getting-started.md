@@ -135,15 +135,18 @@ every check that can run on the host saves an install round trip.
 Getting it onto the phone:
 
 ```
-python3 tools/btpush.py <MAC> apps/myapp/build/myapp.sis     # Bluetooth
+tools/epoc sideload apps/myapp/build/myapp.sis               # the phone's remote shell
 python3 tools/serve.py out 8000                              # or over the LAN
 ```
 
-`btpush` retries through the E72's habit of dropping its ACL link after each transfer,
-which otherwise reads as `Unable to find service record` — as though the phone had no
-OBEX at all. `serve.py` sets the `application/vnd.symbian.install` MIME type, without
-which the browser saves the file as an unknown blob instead of handing it to the
-installer.
+`sideload` puts the package in `C:\Data\_app_install\` over ADBian's RFCOMM shell, where
+File mgr. can tap it — which is also why it replaced the Bluetooth OBEX push: OBEX buries
+the file in Messaging, and the E72 drops its ACL link after each transfer, so every second
+push failed with `Unable to find service record` as though the phone had no OBEX at all.
+
+`serve.py` is the route for a phone with no remote shell on it yet — a first install, or a
+reflashed handset. It sets the `application/vnd.symbian.install` MIME type, without which
+the browser saves the file as an unknown blob instead of handing it to the installer.
 
 Packages are **unsigned** by default. The development handset runs a patched installserver
 (Open4All / RomPatcher+), which drops both the signature requirement and the capability

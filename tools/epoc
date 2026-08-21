@@ -5,7 +5,6 @@
 #   epoc build <app-dir> [clean]  sources → installable .sis
 #   epoc db <args…>               the dev bridge: serve, logcat, push, pull, install
 #   epoc preview                  render the SDK's contact sheets to preview-out/
-#   epoc push <file>              send a file to the phone over Bluetooth (lands in the Inbox)
 #   epoc sideload <file…>         put packages in C:\Data\_app_install, ready to tap
 #   epoc serve                    serve out/ over the LAN so the phone can fetch a .sis
 #   epoc rshell [device] [chan]   drive the RFCOMM remote shell on the phone
@@ -23,7 +22,7 @@ set -euo pipefail
 SDK="$(cd "$(dirname "$0")/.." && pwd)"
 
 usage() {
-  sed -n '3,12p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '3,11p' "$0" | sed 's/^# \{0,1\}//'
   exit "${1:-0}"
 }
 
@@ -48,7 +47,6 @@ case "$CMD" in
   build)    exec "$SDK/tools/symbuild" "$@" ;;
   db)       exec "$SDK/tools/epocadb" "$@" ;;
   preview)  exec cargo run -q -p preview "$@" ;;
-  push)     exec python3 "$SDK/tools/btpush.py" "$@" ;;
   serve)    exec python3 "$SDK/tools/serve.py" "$@" ;;
   rshell)   adbian rshell.py "$@" ;;
   sh)       adbian rsh.py "$@" ;;

@@ -679,6 +679,25 @@ extern "C" {
         out: *mut u8,
         out_cap: i32,
     ) -> i32;
+    // Fetch straight to a file, optionally asking for gzip — for a body too large to hold. Returns
+    // the body byte count; the status and whether it is gzip come back through the out params.
+    pub fn shim_http_fetch_file(
+        host: *const u16,
+        host_len: i32,
+        port: i32,
+        path: *const u16,
+        path_len: i32,
+        tls: i32,
+        gzip: i32,
+        file: *const u16,
+        file_len: i32,
+        status: *mut i32,
+        gzipped: *mut i32,
+    ) -> i32;
+    // zlib — read a gzip file in pieces (shim_gzip.cpp). Synchronous; safe from a pump callback.
+    pub fn shim_gunzip_open(path: *const u16, len: i32, handle: *mut i32) -> i32;
+    pub fn shim_gunzip_read(handle: i32, out: *mut u8, cap: i32) -> i32;
+    pub fn shim_gunzip_close(handle: i32);
     // The same GET without TLS, for a service on a network the user controls whose certificate
     // this handset cannot be made to trust. Cleartext; the caller opts in per URL.
     pub fn shim_http_get(
@@ -1230,6 +1249,28 @@ mod host_stubs {
     ) -> i32 {
         SHIM_ERR_NOT_READY
     }
+    pub unsafe fn shim_http_fetch_file(
+        _host: *const u16,
+        _host_len: i32,
+        _port: i32,
+        _path: *const u16,
+        _path_len: i32,
+        _tls: i32,
+        _gzip: i32,
+        _file: *const u16,
+        _file_len: i32,
+        _status: *mut i32,
+        _gzipped: *mut i32,
+    ) -> i32 {
+        SHIM_ERR_NOT_READY
+    }
+    pub unsafe fn shim_gunzip_open(_p: *const u16, _l: i32, _h: *mut i32) -> i32 {
+        SHIM_ERR_NOT_READY
+    }
+    pub unsafe fn shim_gunzip_read(_h: i32, _out: *mut u8, _cap: i32) -> i32 {
+        SHIM_ERR_NOT_READY
+    }
+    pub unsafe fn shim_gunzip_close(_h: i32) {}
     pub unsafe fn shim_http_get(
         _host: *const u16,
         _host_len: i32,

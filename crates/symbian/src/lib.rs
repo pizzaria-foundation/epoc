@@ -50,6 +50,7 @@ pub mod prop;
 pub mod random;
 pub mod tele;
 pub mod tls;
+pub mod zlib;
 pub mod url;
 pub mod vol;
 pub mod sql;

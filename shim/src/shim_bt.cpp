@@ -9,7 +9,7 @@
  *
  * # We do not replace the BT server
  *
- * It is in ROM and the native OBEX push, the headset profiles and the host's own btpush.py
+ * It is in ROM and the native OBEX push, the headset profiles and the host's own btrecv.py
  * all depend on it. Everything here reads or writes the state that server keeps, so a change
  * made through this file is one the native Bluetooth screen sees, and one the native screen
  * makes is one we see.
