@@ -5,8 +5,11 @@
 #   epoc build <app-dir> [clean]  sources → installable .sis
 #   epoc db <args…>               the dev bridge: serve, logcat, push, pull, install
 #   epoc preview                  render the SDK's contact sheets to preview-out/
-#   epoc push <file>              send a file to the phone over Bluetooth
+#   epoc push <file>              send a file to the phone over Bluetooth (lands in the Inbox)
+#   epoc sideload <file…>         put packages in C:\Data\_app_install, ready to tap
 #   epoc serve                    serve out/ over the LAN so the phone can fetch a .sis
+#   epoc rshell [device] [chan]   drive the RFCOMM remote shell on the phone
+#   epoc sh <args…>               one-shot rshell: 'ls C:\Data', --pull, --push, --sideload
 #
 # Why a dispatcher rather than a rewrite: `symnew`, `symbuild` and `epocadb` are three
 # languages' worth of working tool (bash, bash, Python) and none of them is improved by being
@@ -20,8 +23,21 @@ set -euo pipefail
 SDK="$(cd "$(dirname "$0")/.." && pwd)"
 
 usage() {
-  sed -n '3,9p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '3,12p' "$0" | sed 's/^# \{0,1\}//'
   exit "${1:-0}"
+}
+
+# ADBian is a sibling checkout, not part of this SDK: it is the remote shell, and the three
+# verbs below are the SDK's front door to it. Say so plainly when it is not there, rather than
+# letting python report a missing file.
+adbian() {
+  local script="$SDK/../ADBian/client/$1"; shift
+  [ -f "$script" ] || {
+    echo "epoc: needs the ADBian checkout beside this one:" >&2
+    echo "  git clone git@github.com:pizzaria-foundation/ADBian.git $SDK/../ADBian" >&2
+    exit 1
+  }
+  exec python3 "$script" "$@"
 }
 
 CMD="${1:-}"
@@ -34,6 +50,9 @@ case "$CMD" in
   preview)  exec cargo run -q -p preview "$@" ;;
   push)     exec python3 "$SDK/tools/btpush.py" "$@" ;;
   serve)    exec python3 "$SDK/tools/serve.py" "$@" ;;
+  rshell)   adbian rshell.py "$@" ;;
+  sh)       adbian rsh.py "$@" ;;
+  sideload) adbian rsh.py --sideload "$@" ;;
   # Handy shorthands for the two db subcommands anyone types twenty times a day.
   logcat)   exec "$SDK/tools/epocadb" logcat "$@" ;;
   pull)     exec "$SDK/tools/epocadb" pull "$@" ;;
