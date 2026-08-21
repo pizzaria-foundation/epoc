@@ -25,6 +25,26 @@ pub const HEADER_SIZE: usize = 16;
 /// Refused above this. A boot supervisor with 33 entries is a mistake, not a configuration.
 pub const MAX_ENTRIES: usize = 32;
 
+/// Delay before the first launch when a home screen is in the list.
+///
+/// It was 25 s, and 25 s was a wrong answer to a question that had a different cause. The home
+/// screen was dying seconds after launch, and the theory was that it had been started before the
+/// window server was serving — so the cure was to wait longer. The real cause was
+/// `User::WaitForRequest` on the GUI thread taking the process down with a stray-signal panic;
+/// waiting longer never addressed it and only made every boot slower.
+///
+/// With that fixed, the delay is back to covering what it actually covers: AppArc not yet serving,
+/// which fails the launch outright and which the supervisor already retries. Kept above zero
+/// because a launch that lands too early is still a wasted attempt.
+pub const HOME_FIRST_DELAY_MS: u32 = 10_000;
+
+/// The value the 25 s floor wrote into every config it touched.
+///
+/// [`BootConfig::ensure_home`] replaces exactly this number and no other, which is what lets it
+/// undo its own mistake without overruling a delay somebody chose. Same distinction as
+/// [`Entry::auto_disarmed`]: a value a machine wrote is not a decision a person made, and only the
+/// first is ours to revisit.
+pub const HOME_FIRST_DELAY_LEGACY_MS: u32 = 25_000;
 /// Delay before the *first* launch. The phone is still bringing up the shell when the startup list
 /// runs; a launch that lands too early gets `KErrNotFound` from an AppArc that is not serving yet.
 pub const DEFAULT_FIRST_DELAY_MS: u32 = 8_000;
@@ -108,6 +128,15 @@ pub struct Entry {
     /// The caption, cached at the time it was added. Cached and not resolved live so an entry whose
     /// app has since been uninstalled still draws a readable row instead of a bare hex UID.
     pub name: String,
+    /// This entry is the thing the phone is for, and its death is an outage rather than an
+    /// inconvenience. Two consequences in `supervise`: the whole supervisor polls at the fast
+    /// cadence while one of these is armed, so a crash costs seconds instead of minutes; and it is
+    /// exempt from the global restart ceiling, which exists to stop several flapping apps from
+    /// owning the phone and must not be the reason the home screen stays dead.
+    ///
+    /// Bounded anyway, and by the two limits that matter: its own [`Policy`] budget, and safe mode,
+    /// which after three boots that never settle launches nothing at all.
+    pub critical: bool,
 }
 
 impl Entry {
@@ -121,7 +150,15 @@ impl Entry {
             policy: Policy::Times(3),
             delay_ms: DEFAULT_DELAY_MS,
             name,
+            critical: false,
         }
+    }
+
+    /// The entry a home screen needs: always restarted, watched at the fast cadence, and first in
+    /// the boot. `apps/launcher` writes exactly this on a phone that has no `boot.cfg` yet, so a
+    /// fresh install supervises the home without anybody opening the boot manager.
+    pub fn home(uid3: u32, name: String) -> Self {
+        Self { policy: Policy::Always, critical: true, ..Self::new(uid3, name) }
     }
 }
 
@@ -188,6 +225,66 @@ impl BootConfig {
         i + 1
     }
 
+    /// Make sure `uid3` is in the list as a critical, always-restarted entry, and say whether that
+    /// changed anything.
+    ///
+    /// Three cases, and the middle one is why this exists rather than a bare "write if absent":
+    ///
+    /// - **No config at all** — the caller writes a fresh one containing this entry. Handled by the
+    ///   caller, not here; there is nothing to inspect.
+    /// - **A config that does not mention this app** — append it. This is the case a seed-only rule
+    ///   misses: somebody opens the boot manager first and saves a list, and from then on the home
+    ///   screen is never supervised because a file exists. Appending an entry for an app that has
+    ///   none is not editing anyone's choice; it is the absence of one.
+    /// - **A config that already mentions it** — leave it entirely alone, policy and all, even if
+    ///   it is disabled or not critical. That row is the user's answer, and overruling it every
+    ///   start would make the boot manager a screen that argues back.
+    pub fn ensure_home(&mut self, uid3: u32, name: String) -> bool {
+        let mut changed = false;
+
+        // An auto-disarm is a machine's conclusion, and this call is evidence against it: the app
+        // that burned its restart budget is the one asking, so it is running. Clearing it here is
+        // the difference between a supervisor that learns and a phone that is silently without a
+        // home screen until somebody finds the boot manager.
+        //
+        // `auto_disarmed` is what makes this safe to do. A row the *user* switched off is
+        // `enabled == false` with the flag clear, and that is left alone — the two look the same on
+        // screen and mean opposite things, which is exactly why the flag exists.
+        if let Some(e) = self.entries.iter_mut().find(|e| e.uid3 == uid3) {
+            if e.auto_disarmed {
+                e.auto_disarmed = false;
+                e.enabled = true;
+                changed = true;
+            }
+        }
+
+        if !self.entries.iter().any(|e| e.uid3 == uid3) {
+            if self.entries.len() >= MAX_ENTRIES {
+                return false;
+            }
+            // First, because position is launch order and the home screen is what the user is
+            // waiting to see. Everything else can start behind it.
+            self.entries.insert(0, Entry::home(uid3, name));
+            changed = true;
+        }
+
+        // The floor applies whether or not the row was just added, and that is the point. A GUI app
+        // launched before the window server is serving does not fail — it comes up half-initialised,
+        // alive as a process and useless as an application, which is the one failure the supervisor
+        // cannot see. A config written before that was understood carries the old 8 s and would keep
+        // reproducing it forever.
+        //
+        // `max`, so a longer delay somebody chose deliberately is left alone. This raises a floor;
+        // it does not set a value.
+        if self.first_delay_ms < HOME_FIRST_DELAY_MS
+            || self.first_delay_ms == HOME_FIRST_DELAY_LEGACY_MS
+        {
+            self.first_delay_ms = HOME_FIRST_DELAY_MS;
+            changed = true;
+        }
+        changed
+    }
+
     /// Encode to the on-disk blob: 16-byte header, `count` × 16-byte records, then a UTF-16LE
     /// string blob the records point into.
     pub fn encode(&self) -> Vec<u8> {
@@ -220,6 +317,14 @@ impl BootConfig {
             }
             if e.auto_disarmed {
                 flags |= 0x02;
+            }
+            // Bit 2 of a byte that had six spare, rather than a new field and a version bump. That
+            // choice is what keeps this backward AND forward compatible: a bootd built before this
+            // flag existed reads the record, ignores the bit, and supervises the entry as an
+            // ordinary one — degraded, never refused. A version bump would have made the same file
+            // `BadVersion`, and `BadVersion` means launch nothing.
+            if e.critical {
+                flags |= 0x04;
             }
             out.extend_from_slice(&e.uid3.to_le_bytes());
             out.push(flags);
@@ -310,6 +415,7 @@ impl BootConfig {
                 policy,
                 delay_ms,
                 name,
+                critical: flags & 0x04 != 0,
             });
         }
 
@@ -325,6 +431,122 @@ fn to_ds(ms: u32) -> u16 {
 
 fn from_ds(ds: u16) -> u32 {
     ds as u32 * 100
+}
+
+#[cfg(test)]
+mod ensure_home_tests {
+    use super::*;
+    use alloc::string::ToString;
+    use alloc::vec;
+
+    const HOME: u32 = 0xE0AA_0000;
+
+    #[test]
+    fn an_empty_config_gets_the_home_entry_first_and_critical() {
+        let mut c = BootConfig::default();
+        assert!(c.ensure_home(HOME, "Home".to_string()));
+        assert_eq!(c.entries.len(), 1);
+        assert!(c.entries[0].critical);
+        assert_eq!(c.entries[0].policy, Policy::Always);
+        assert_eq!(c.first_delay_ms, HOME_FIRST_DELAY_MS, "a GUI app must not race the boot");
+    }
+
+    #[test]
+    fn a_longer_delay_the_user_chose_is_not_shortened() {
+        // A floor is a floor: somebody who set 40 s had a reason.
+        let mut c = BootConfig { first_delay_ms: 40_000, ..BootConfig::default() };
+        c.ensure_home(HOME, "Home".to_string());
+        assert_eq!(c.first_delay_ms, 40_000);
+    }
+
+    #[test]
+    fn the_delay_this_code_wrote_when_it_was_wrong_is_taken_back() {
+        // 25 s was written by an earlier version of this function, to cure a crash whose cause was
+        // somewhere else entirely. Every phone that ran it carries the number, and a floor can only
+        // ever raise — so without this the mistake would outlive the bug it was aimed at.
+        let mut c = BootConfig {
+            first_delay_ms: HOME_FIRST_DELAY_LEGACY_MS,
+            entries: vec![Entry::new(HOME, "Home".to_string())],
+            ..BootConfig::default()
+        };
+        assert!(c.ensure_home(HOME, "Home".to_string()));
+        assert_eq!(c.first_delay_ms, HOME_FIRST_DELAY_MS);
+    }
+
+    #[test]
+    fn a_delay_that_merely_resembles_ours_is_still_the_users_if_it_is_not_that_number() {
+        let mut c = BootConfig { first_delay_ms: 24_000, ..BootConfig::default() };
+        c.ensure_home(HOME, "Home".to_string());
+        assert_eq!(c.first_delay_ms, 24_000, "only the exact value we wrote is ours to revisit");
+    }
+
+    #[test]
+    fn a_list_somebody_else_wrote_gains_the_home_in_front_of_it() {
+        // The case a seed-only rule misses: the boot manager was opened first, so a file exists and
+        // the home screen would never be supervised.
+        let mut c = BootConfig {
+            entries: vec![Entry::new(0x1000_0001, "Calculator".to_string())],
+            ..BootConfig::default()
+        };
+        assert!(c.ensure_home(HOME, "Home".to_string()));
+        assert_eq!(c.entries[0].uid3, HOME, "the home launches before the rest");
+        assert_eq!(c.entries[1].uid3, 0x1000_0001, "and nothing else moved or changed");
+    }
+
+    #[test]
+    fn an_old_config_has_its_first_delay_raised_even_though_the_row_stays() {
+        // The phone that already had a boot list written before the delay was understood. The row
+        // is the user's and is not touched; the delay is a safety floor and is.
+        let mut c = BootConfig {
+            first_delay_ms: 8_000,
+            entries: vec![Entry::new(HOME, "Home".to_string())],
+            ..BootConfig::default()
+        };
+        assert!(c.ensure_home(HOME, "Home".to_string()));
+        assert_eq!(c.first_delay_ms, HOME_FIRST_DELAY_MS);
+        assert_eq!(c.entries.len(), 1);
+        assert_eq!(c.entries[0].policy, Policy::Times(3), "the row itself is left as it was");
+    }
+
+    #[test]
+    fn a_row_the_supervisor_disarmed_is_re_armed_by_the_app_that_is_running() {
+        let mut disarmed = Entry::new(HOME, "Home".to_string());
+        disarmed.enabled = false;
+        disarmed.auto_disarmed = true;
+        let mut c = BootConfig {
+            first_delay_ms: HOME_FIRST_DELAY_MS,
+            entries: vec![disarmed],
+            ..BootConfig::default()
+        };
+        assert!(c.ensure_home(HOME, "Home".to_string()));
+        assert!(c.entries[0].enabled, "the crash loop it was disarmed for is demonstrably over");
+        assert!(!c.entries[0].auto_disarmed);
+    }
+
+    #[test]
+    fn an_existing_row_for_the_home_is_never_overruled() {
+        // Disabled, ordinary policy, not critical — every one of those is an answer the user gave.
+        let mut existing = Entry::new(HOME, "Home".to_string());
+        existing.enabled = false;
+        existing.policy = Policy::Never;
+        let mut c = BootConfig {
+            first_delay_ms: HOME_FIRST_DELAY_MS,
+            entries: vec![existing.clone()],
+            ..BootConfig::default()
+        };
+        assert!(!c.ensure_home(HOME, "Home".to_string()));
+        assert_eq!(c.entries, vec![existing]);
+    }
+
+    #[test]
+    fn a_full_list_is_not_grown_past_the_ceiling() {
+        let mut c = BootConfig {
+            entries: (0..MAX_ENTRIES as u32).map(|i| Entry::new(i + 1, String::new())).collect(),
+            ..BootConfig::default()
+        };
+        assert!(!c.ensure_home(HOME, "Home".to_string()));
+        assert_eq!(c.entries.len(), MAX_ENTRIES);
+    }
 }
 
 #[cfg(test)]
@@ -346,6 +568,7 @@ mod tests {
                     policy: Policy::Always,
                     delay_ms: 2_000,
                     name: "Calculator".to_string(),
+                    critical: false,
                 },
                 Entry {
                     uid3: 0xE0AA_0000,
@@ -354,6 +577,7 @@ mod tests {
                     policy: Policy::Times(3),
                     delay_ms: 5_500,
                     name: "Início".to_string(),
+                    critical: true,
                 },
             ],
         }

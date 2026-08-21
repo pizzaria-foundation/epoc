@@ -1,0 +1,10 @@
+
+;AiIdleNoBoot 1.1
+;Stops the Active Idle bringing itself to the foreground at boot (E72).
+;Target: aiidleint.dll, CAiUiIdleIntegrationImpl::HandleSystemEvent.
+;NOP the two `blx r2` (90 47 -> C0 46) that call self->[0x2c]->vtbl[0x24](arg).
+;Patterns extended by 2 trailing bytes so each matches exactly once.
+;Reversible: RomPatcher+ shadow-patches RAM; remove this .rmp and reboot to revert.
+;
+	SnR:sys\bin\aiidleint.dll:E06A01684A6A01219047E06B:E06A01684A6A0121C046E06B
+	SnR:sys\bin\aiidleint.dll:E06A01684A6A002190474D49:E06A01684A6A0021C0464D49

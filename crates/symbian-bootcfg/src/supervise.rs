@@ -44,12 +44,22 @@ pub const POLL_BASE_MS: i32 = 15_000;
 /// Idle ceiling. Left alone the interval doubles to this and no further, so a quiet phone is woken
 /// about once every five minutes.
 pub const POLL_MAX_MS: i32 = 300_000;
+/// The cadence when a critical entry is armed. A home screen that dies must come back in seconds,
+/// and the five-minute idle ceiling above is how a crash turns into "the phone had no home for
+/// four minutes". Paid for in wakes: a `TFindProcess` walk every 5..30 s against every 15..300 s.
+pub const POLL_CRITICAL_BASE_MS: i32 = 5_000;
+pub const POLL_CRITICAL_MAX_MS: i32 = 30_000;
 /// Per-entry restart spacing: an app that crashes on startup is retried at 5 s, 10 s, 20 s … rather
 /// than on every poll.
 pub const ENTRY_BACKOFF_BASE_MS: i32 = 5_000;
 pub const ENTRY_BACKOFF_MAX_MS: i32 = 300_000;
 /// Quiet time in the supervise phase before the boot counts as settled.
 pub const SETTLE_MS: u64 = 60_000;
+/// Restarts allowed for an entry that was launched and never once seen running. Distinct from the
+/// policy budget, which governs an app that *died* — this governs one that never arrived. Bounded
+/// so that an app whose process UID3 differs from its registered app UID3 (permanently invisible to
+/// `TFindProcess`, and perfectly healthy) is retried a few times rather than forever.
+pub const NEVER_UP_TRIES: u8 = 4;
 /// A launch call that fails outright is retried this many times before the sequence moves on —
 /// AppArc may not be serving yet this early in the boot.
 pub const LAUNCH_TRIES: u8 = 3;
@@ -90,12 +100,18 @@ struct Slot {
     delay_ms: u32,
     /// False for a disabled entry, and for bootd/bootctl themselves.
     supervised: bool,
+    /// See [`crate::config::Entry::critical`]: fast cadence, and exempt from the global ceiling.
+    critical: bool,
     launched_at: Option<u64>,
     /// Seen running at least once since the last launch. An entry that never appears alive is
     /// never called dead — otherwise an app whose process UID3 differs from its app UID3 would look
     /// permanently dead and be restarted forever.
     ever_alive: bool,
     dead_strikes: u8,
+    /// Restarts issued for an entry that has never been observed running. Bounded separately from
+    /// the policy budget: this is "it never came up", not "it died", and the two run out for
+    /// different reasons.
+    never_up_tries: u8,
     launch_tries: u8,
     restarts: u16,
     /// No further restart will ever be issued for this entry — it is `Never` and died, or it spent
@@ -139,6 +155,17 @@ pub struct Supervisor {
     /// caller comes straight back for the wait.
     reset_cadence: bool,
     boot_count: u8,
+    /// The Software Installer is on screen right now, so no restart may be issued.
+    ///
+    /// Set by the caller each round. It exists because of exactly one sequence: the user installs a
+    /// new build over a running one, the installer stops the old process to replace `\sys\bin`,
+    /// and this supervisor — whose whole job is to notice that death — puts the app straight back
+    /// and pins the file the installer is holding open. The install then fails, and the reason the
+    /// user sees is "file in use", which names the wrong culprit entirely.
+    ///
+    /// Deferring, not cancelling: the death is still recorded, the strike count is held at the
+    /// threshold, and the restart happens on the first poll after the installer is gone.
+    installing: bool,
 }
 
 impl Supervisor {
@@ -157,9 +184,11 @@ impl Supervisor {
                     policy: e.policy,
                     delay_ms: e.delay_ms,
                     supervised,
+                    critical: e.critical,
                     launched_at: None,
                     ever_alive: false,
                     dead_strikes: 0,
+                    never_up_tries: 0,
                     launch_tries: 0,
                     restarts: 0,
                     terminal: false,
@@ -183,6 +212,16 @@ impl Supervisor {
             None => Phase::Supervise,
         };
 
+        // One cadence for the whole supervisor, not one per entry: there is a single timer, and the
+        // fastest thing being watched sets the rate. So the presence of any armed critical entry
+        // makes every poll fast — which is the point, since the poll is what notices the death.
+        let critical = slots.iter().any(|s| s.supervised && s.critical);
+        let (poll_base, poll_max) = if critical {
+            (POLL_CRITICAL_BASE_MS, POLL_CRITICAL_MAX_MS)
+        } else {
+            (POLL_BASE_MS, POLL_MAX_MS)
+        };
+
         Self {
             slots,
             phase,
@@ -190,13 +229,14 @@ impl Supervisor {
             max_restarts: cfg.max_restarts,
             restarts_used: 0,
             launched_any: false,
-            poll: Backoff::new(POLL_BASE_MS, POLL_MAX_MS),
+            poll: Backoff::new(poll_base, poll_max),
             queue: VecDeque::new(),
             start_ms: now_ms,
             last_change_ms: now_ms,
             settled_reported: false,
             reset_cadence: false,
             boot_count: 0,
+            installing: false,
         }
     }
 
@@ -208,6 +248,13 @@ impl Supervisor {
     /// Recorded in the status report so bootctl can say "this is the third boot that never settled".
     pub fn set_boot_count(&mut self, n: u8) {
         self.boot_count = n;
+    }
+
+    /// Tell the supervisor whether the Software Installer is running, before each [`step`] round.
+    ///
+    /// [`step`]: Supervisor::step
+    pub fn set_installing(&mut self, installing: bool) {
+        self.installing = installing;
     }
 
     /// The UID3s in slot order, so the caller can build the `alive` slice without holding the config.
@@ -320,11 +367,48 @@ impl Supervisor {
                 }
                 continue;
             }
-            // Not running. Only meaningful once it has had time to start AND has been seen alive.
+            // Not running. Only meaningful once it has had time to start.
             let grace_over = s
                 .launched_at
                 .is_some_and(|t| now_ms.saturating_sub(t) >= LAUNCH_GRACE_MS);
-            if !grace_over || !s.ever_alive {
+            if !grace_over {
+                continue;
+            }
+            // Launched, past its grace, and never once observed running. Two different things look
+            // like this and they need opposite treatment:
+            //
+            //   - an app whose process UID3 differs from its registered app UID3, which is alive
+            //     and will *never* be seen — restarting it forever is the bug this guard was added
+            //     for;
+            //   - an app that failed to start, or crashed in its first seconds, which is the
+            //     failure a boot supervisor most needs to catch.
+            //
+            // Refusing to act was wrong for the second, and silently: the entry stopped mattering,
+            // nothing was written down, and the boot "settled" with the home screen absent.
+            // Measured on the E72, where the launcher crashed on roughly two starts in three.
+            //
+            // So: bounded retries. A few attempts cover a crash that is not deterministic; running
+            // out stops the forever-loop the guard was protecting against, and does it loudly.
+            if !s.ever_alive {
+                if s.never_up_tries >= NEVER_UP_TRIES {
+                    if !s.terminal {
+                        s.terminal = true;
+                        s.state = State::Dead;
+                        self.last_change_ms = now_ms;
+                    }
+                    continue;
+                }
+                if now_ms < s.next_restart_ms {
+                    continue;
+                }
+                s.never_up_tries = s.never_up_tries.saturating_add(1);
+                let spacing = s.backoff.on_tick().max(0) as u64;
+                s.next_restart_ms = now_ms.saturating_add(spacing);
+                s.launched_at = Some(now_ms);
+                self.last_change_ms = now_ms;
+                self.settled_reported = false;
+                self.reset_cadence = true;
+                self.queue.push_back(Action::Restart(i));
                 continue;
             }
             s.dead_strikes = s.dead_strikes.saturating_add(1);
@@ -385,7 +469,11 @@ impl Supervisor {
             return;
         }
 
-        if global_spent {
+        // The global ceiling exists to stop a handful of flapping apps from owning the phone. A
+        // critical entry is the phone — refusing to bring the home screen back because a different
+        // app crashed ten times is the ceiling doing the exact damage it was added to prevent. It
+        // still burns from the same counter, so everything non-critical stays stopped.
+        if global_spent && !s.critical {
             s.state = State::Dead;
             s.terminal = true;
             self.phase = Phase::GaveUp;
@@ -393,9 +481,11 @@ impl Supervisor {
             return;
         }
 
-        if now_ms < s.next_restart_ms {
-            // Its own backoff has not elapsed. Report it as dead but leave it non-terminal, and
-            // hold the strike count at the threshold so the very next poll reconsiders it.
+        if self.installing || now_ms < s.next_restart_ms {
+            // Either its own backoff has not elapsed, or an install is in progress. Report it as
+            // dead but leave it non-terminal, and hold the strike count at the threshold so the
+            // very next poll reconsiders it. Neither case burns a restart from any budget: the
+            // entry did not come back, so nothing was spent trying.
             s.state = State::Dead;
             s.dead_strikes = DEAD_STRIKES;
             return;
@@ -490,6 +580,128 @@ mod tests {
         acts
     }
 
+    fn critical(uid: u32) -> Entry {
+        Entry { delay_ms: 2_000, ..Entry::home(uid, String::new()) }
+    }
+
+    /// The interval a quiet supervisor settles on: run enough healthy rounds for the backoff to
+    /// reach its ceiling, and report the last armed wait. That ceiling is the honest measure of
+    /// "how long can the home be dead before anyone notices", where the first wait is not — the
+    /// staged boot has already stepped the ladder by the time supervision starts.
+    fn idle_cadence(cfg: &BootConfig, alive: &[bool]) -> u32 {
+        let mut s = Supervisor::new(cfg, OWN, CTL, 0);
+        let mut t = 0;
+        boot(&mut s, &mut t);
+        let mut ms = 0;
+        for _ in 0..12 {
+            let (_, w) = run(&mut s, t, alive);
+            ms = w;
+            t += w as u64;
+        }
+        ms
+    }
+
+    #[test]
+    fn an_install_defers_the_restart_instead_of_racing_the_installer_for_the_file() {
+        let mut s = Supervisor::new(&cfg_of(vec![critical(1)]), OWN, CTL, 0);
+        let mut t = 0;
+        boot(&mut s, &mut t);
+
+        // The installer stops the running app to replace \sys\bin. Put it back now and the
+        // install fails on a file this supervisor is holding open.
+        s.set_installing(true);
+        let acts = kill_once(&mut s, &mut t);
+        assert!(!acts.iter().any(|a| matches!(a, Action::Restart(_))), "nothing is relaunched");
+        assert_eq!(s.snapshot().entries[0].state, State::Dead, "but the death is recorded");
+
+        // Still nothing, however long the install takes.
+        t += 120_000;
+        let (acts, _) = run(&mut s, t, &[false]);
+        assert!(!acts.iter().any(|a| matches!(a, Action::Restart(_))));
+
+        // Installer gone: the very next poll brings it back, with no budget spent on the wait.
+        s.set_installing(false);
+        let (acts, _) = run(&mut s, t, &[false]);
+        assert!(acts.contains(&Action::Restart(0)), "the home returns as soon as it is safe to");
+    }
+
+    #[test]
+    fn a_deferred_restart_costs_no_budget() {
+        // `Times(1)` held through a long install must still have its one restart afterwards.
+        let e = Entry { policy: Policy::Times(1), ..critical(1) };
+        let mut s = Supervisor::new(&cfg_of(vec![e]), OWN, CTL, 0);
+        let mut t = 0;
+        boot(&mut s, &mut t);
+        s.set_installing(true);
+        for _ in 0..5 {
+            kill_once(&mut s, &mut t);
+        }
+        s.set_installing(false);
+        let (acts, _) = run(&mut s, t, &[false]);
+        assert!(acts.contains(&Action::Restart(0)), "five deferred rounds spent nothing");
+    }
+
+    #[test]
+    fn a_critical_entry_makes_the_whole_supervisor_watch_at_the_fast_cadence() {
+        let ordinary = idle_cadence(&cfg_of(vec![entry(1, Policy::Always)]), &[true]);
+        let home = idle_cadence(&cfg_of(vec![critical(1)]), &[true]);
+        assert_eq!(ordinary, POLL_MAX_MS as u32);
+        assert_eq!(home, POLL_CRITICAL_MAX_MS as u32);
+        assert!(home < ordinary, "the home is noticed dead sooner, which is the whole point");
+    }
+
+    #[test]
+    fn a_disabled_critical_entry_does_not_speed_the_cadence_up() {
+        // The flag is about what is *being watched*. An entry nobody is watching must not make the
+        // phone wake ten times as often for nothing.
+        let mut off = critical(1);
+        off.enabled = false;
+        let cfg = cfg_of(vec![off, entry(2, Policy::Always)]);
+        assert_eq!(idle_cadence(&cfg, &[false, true]), POLL_MAX_MS as u32);
+    }
+
+    #[test]
+    fn the_global_ceiling_stops_an_ordinary_entry_but_never_the_home() {
+        // One flapping app burns the whole ceiling; the home dies afterwards and must still return.
+        let cfg = BootConfig {
+            max_restarts: 1,
+            ..cfg_of(vec![entry(1, Policy::Always), critical(2)])
+        };
+        let mut s = Supervisor::new(&cfg, OWN, CTL, 0);
+        let mut t = 0;
+        boot(&mut s, &mut t);
+
+        // Both come up, then both die. Entry 0 spends the ceiling of 1.
+        run(&mut s, t, &[true, true]);
+        t += LAUNCH_GRACE_MS + 1_000;
+        run(&mut s, t, &[false, true]);
+        t += 20_000;
+        let (acts, _) = run(&mut s, t, &[false, true]);
+        assert!(acts.contains(&Action::Restart(0)), "the first death is inside the ceiling");
+
+        // Now the home dies with the ceiling already spent.
+        run(&mut s, t, &[true, true]);
+        t += LAUNCH_GRACE_MS + 1_000;
+        run(&mut s, t, &[true, false]);
+        t += 20_000;
+        let (acts, _) = run(&mut s, t, &[true, false]);
+        assert!(acts.contains(&Action::Restart(1)), "the home comes back past the global ceiling");
+        assert!(!acts.contains(&Action::GaveUp), "and the supervisor does not declare defeat");
+    }
+
+    #[test]
+    fn a_critical_entry_still_obeys_its_own_budget_and_safe_mode_above_it() {
+        // Critical is an exemption from ONE limit. `Times(1)` still runs out, because a policy the
+        // user chose is not something the flag gets to overrule.
+        let e = Entry { policy: Policy::Times(1), ..critical(1) };
+        let mut s = Supervisor::new(&cfg_of(vec![e]), OWN, CTL, 0);
+        let mut t = 0;
+        boot(&mut s, &mut t);
+        assert!(kill_once(&mut s, &mut t).contains(&Action::Restart(0)));
+        let acts = kill_once(&mut s, &mut t);
+        assert!(acts.contains(&Action::Disarm(0)), "the budget runs out even for a critical entry");
+    }
+
     #[test]
     fn the_first_wait_is_the_global_delay_and_the_rest_are_per_entry() {
         let cfg = cfg_of(vec![entry(1, Policy::Never), entry(2, Policy::Never)]);
@@ -550,18 +762,44 @@ mod tests {
     }
 
     #[test]
-    fn an_app_never_seen_alive_is_never_restarted() {
-        // The UID-mismatch case: the process list never shows it, so it always reads as not
-        // running. Restarting on that would loop forever.
+    fn an_app_never_seen_alive_is_retried_a_bounded_number_of_times_and_then_left() {
+        // Two failures look identical from here and want opposite treatment: an app whose process
+        // UID3 differs from its app UID3 (alive, permanently invisible — restarting forever is the
+        // bug) and an app that crashed on startup (dead, and the thing a boot supervisor exists
+        // for). Retrying a bounded number of times serves the second without reopening the first.
         let cfg = cfg_of(vec![entry(1, Policy::Always)]);
         let mut s = Supervisor::new(&cfg, OWN, CTL, 0);
         let mut t = 0;
         boot(&mut s, &mut t);
-        for _ in 0..10 {
+        let mut restarts = 0;
+        for _ in 0..40 {
             let (acts, ms) = run(&mut s, t, &[false]);
-            assert!(acts.iter().all(|a| !matches!(a, Action::Restart(_))));
-            t += ms as u64;
+            restarts += acts.iter().filter(|a| matches!(a, Action::Restart(_))).count();
+            t += ms.max(1) as u64;
         }
+        assert_eq!(restarts, NEVER_UP_TRIES as usize, "tried, and then stopped trying");
+        assert_eq!(
+            s.snapshot().entries[0].state,
+            State::Dead,
+            "and says so, instead of the boot quietly settling with the app absent"
+        );
+    }
+
+    #[test]
+    fn an_app_that_comes_up_late_is_not_counted_against_the_never_up_budget() {
+        // A slow starter must not burn the budget meant for one that never arrives.
+        let cfg = cfg_of(vec![entry(1, Policy::Always)]);
+        let mut s = Supervisor::new(&cfg, OWN, CTL, 0);
+        let mut t = 0;
+        boot(&mut s, &mut t);
+        // One round where it has not appeared yet, then it does.
+        t += LAUNCH_GRACE_MS + 1_000;
+        run(&mut s, t, &[false]);
+        t += 10_000;
+        run(&mut s, t, &[true]);
+        assert_eq!(s.snapshot().entries[0].state, State::Alive);
+        // From here it behaves like any healthy entry: a real death is a real restart.
+        assert!(kill_once(&mut s, &mut t).contains(&Action::Restart(0)));
     }
 
     #[test]

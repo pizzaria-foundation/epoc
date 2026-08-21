@@ -237,12 +237,18 @@ impl BootScreen {
             Policy::Always => String::from("always"),
         };
         let delay = e.delay_ms / 100;
+        // Shown, never edited here. The flag is written by the system that owns the entry — the
+        // launcher marks itself on a fresh phone — and a switch for it would let someone quietly
+        // un-mark their home screen, or mark five apps and hand the global ceiling back its teeth.
+        // What the user needs from this screen is to know why the phone is watching this row
+        // closely; changing it is the owning app's business.
+        let mark = if e.critical { " · home" } else { "" };
         if e.auto_disarmed {
             format!("{}. {}  — off (crash loop)", i + 1, name)
         } else if !e.enabled {
             format!("{}. {}  — off", i + 1, name)
         } else {
-            format!("{}. {}  · {} · +{}.{}s", i + 1, name, policy, delay / 10, delay % 10)
+            format!("{}. {}  · {} · +{}.{}s{}", i + 1, name, policy, delay / 10, delay % 10, mark)
         }
     }
 
@@ -699,6 +705,20 @@ mod tests {
         press(&mut s, Key::Backspace);
         assert_eq!(s.cfg.entries.len(), 1);
         assert_eq!(s.cfg.entries[0].uid3, 0x1000_0002);
+    }
+
+    #[test]
+    fn a_critical_row_says_so_and_editing_it_does_not_clear_the_flag() {
+        let mut cfg = cfg2();
+        cfg.entries[0].critical = true;
+        let mut s = BootScreen::new(cfg, None, roster());
+        assert!(s.row_label(0).contains("home"), "the user can see why this row is watched closely");
+        assert!(!s.row_label(1).contains("home"));
+        // Walk the Entry tab and change the policy: the flag belongs to the owning app and must
+        // survive somebody adjusting the rows around it.
+        press(&mut s, Key::Select); // off
+        press(&mut s, Key::Select); // and back on
+        assert!(s.cfg.entries[0].critical, "the flag is not collateral damage of an edit");
     }
 
     #[test]

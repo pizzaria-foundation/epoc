@@ -85,12 +85,13 @@ rather than replacing it.
 </td>
 <td width="33%" valign="top">
 
-### [boot manager](docs/bootmanager.md)
+### boot manager
 
 <img src="docs/screenshots/bootctl-status.png" width="280">
 
-**Boot order and restart policy** — neither of which S60 has. Ships in this repo as
-`apps/bootctl` and `apps/bootd`, because a supervisor is infrastructure, not a product.
+**Boot order and restart policy** — neither of which S60 has. The codec and the screens are here
+(`crates/symbian-bootcfg`, `crates/symbian-bootctl`); the two binaries moved to the home repo,
+where the system they supervise lives.
 
 </td>
 </tr>
@@ -137,12 +138,11 @@ and 283 of the 292 libraries asked about load, Open C among them.
                                             exports pinned by app.conf, gated by e32dump
     Device reconnaissance           done    apps/devdump: one .sis, a launcher and ten
                                             isolated probes; the report is docs/device-dump.txt
-    Boot order and restart policy   built   apps/bootctl + apps/bootd: the platform has neither
-                                            (STARTUP_ITEM_INFO has no ordering field and one
-                                            recovery policy, "do nothing"), so a supervisor of
-                                            our own is the only way. Built and packaged; the
-                                            on-device sequence in docs/bootmanager.md has not
-                                            been run yet
+    Boot order and restart policy   built   crates/symbian-bootcfg + symbian-bootctl: the codec,
+                                            the supervisor state machine and the screens. The
+                                            platform has neither (STARTUP_ITEM_INFO has no
+                                            ordering field and one recovery policy, "do nothing").
+                                            The binaries that use them live in the home repo
     Custom MTM registration         done    apps/mtmdemo: a Client MTM the Message Server
                                             accepts. Registry 15 -> 16 on an E72, read from a
                                             fresh session. See docs/device-notes.md
@@ -235,10 +235,6 @@ exercise or serve the SDK itself.
       mtmdemo      A Client MTM the Message Server actually loads, plus the UI Data and
                    UI MTM components: our icon in Nokia's Inbox, our viewer opening our
                    message, reply from Nokia's own menu. Builds a .dll, not a .sis
-      bootctl      Boot manager. Pick apps, set the order, set a restart policy, read
-                   what the last boot did. Ships bootd in its package. docs/bootmanager.md
-      bootd        The headless supervisor behind it, and the only executable registered
-                   in the platform's start-up list
       iconprobe    The app-icon fetch, isolated in a non-resident app because bisecting it
                    inside a resident home screen kept taking the home screen with it.
                    Resolved on the E72: reading the app's registered icon FILE through
@@ -301,7 +297,6 @@ Each crate has its own README with the decisions behind it.
 | [device-notes.md](docs/device-notes.md) | everything the hardware taught us that no document says |
 | [build-flow.md](docs/build-flow.md) | the pipeline, stage by stage |
 | [epocadb.md](docs/epocadb.md) | the dev bridge: live logs, file push/pull, the wire protocol |
-| [bootmanager.md](docs/bootmanager.md) | boot order and restart policy, and why the platform has neither |
 | [launcher.md](docs/launcher.md) | the platform side of a home screen: startup resource, resident mode |
 | [device-dump.txt](docs/device-dump.txt) | the raw report one install of `apps/devdump` brought back |
 
