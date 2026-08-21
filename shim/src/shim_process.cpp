@@ -21,6 +21,42 @@
 
 extern "C" {
 
+/* Start a process and do not wait for it.
+ *
+ * The one that is safe to call from a GUI thread, and the reason the others are not:
+ * `User::WaitForRequest` on a thread with a running CActiveScheduler consumes whatever
+ * completes next, including completions belonging to active objects. The scheduler then
+ * finds a signal for a request it does not own and the process dies with a stray-signal
+ * panic — a kernel panic, so the Rust handler never runs and no breadcrumb is written.
+ *
+ * Measured, not theorised: the launcher died on roughly two starts in three, always in the
+ * `start_daemon` call for the first daemon that was not already running, always with an
+ * empty panic.txt, and the surviving sessions were exactly the ones where every daemon was
+ * already up and this code was therefore never reached. It is probabilistic because it
+ * needs another completion to land inside the wait, and a home screen with a repeating
+ * timer, two P&S subscriptions and a window server connection supplies one constantly.
+ *
+ * The caller loses the rendezvous, which is a real loss: SHIM_OK here means a process
+ * object was created, not that the child is alive. Anyone who needs to know polls
+ * shim_process_running afterwards, which is what the launcher already did with the answer
+ * it was throwing away. */
+int32_t shim_process_spawn(const uint16_t* path, int32_t path_len)
+    {
+    if (!path || path_len <= 0)
+        return SHIM_ERR_ARGUMENT;
+
+    TPtrC16 name(reinterpret_cast<const TUint16*>(path), path_len);
+    RProcess proc;
+    TInt rc = proc.Create(name, KNullDesC);
+    if (rc != KErrNone)
+        return rc;
+    proc.Resume();
+    proc.Close();
+    return SHIM_OK;
+    }
+
+/* NOT safe from a thread running an active scheduler — see shim_process_spawn. For a
+ * headless daemon or a probe whose whole job is to block on its child. */
 int32_t shim_process_start(const uint16_t* path, int32_t path_len)
     {
     if (!path || path_len <= 0)
@@ -59,6 +95,7 @@ int32_t shim_process_start(const uint16_t* path, int32_t path_len)
     return signalled == KErrNone ? SHIM_OK : signalled;
     }
 
+/* NOT safe from a thread running an active scheduler — see shim_process_spawn. */
 int32_t shim_process_start_timeout(const uint16_t* path, int32_t path_len, int32_t timeout_ms)
     {
     if (!path || path_len <= 0 || timeout_ms <= 0)
