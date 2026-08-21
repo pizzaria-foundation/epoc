@@ -148,6 +148,41 @@ impl OpenMode {
     }
 }
 
+/// One entry's metadata, as [`Fs::stat`] reports it.
+///
+/// The timestamp is broken-out fields rather than an epoch offset because Symbian's epoch is
+/// year 0, and every caller that wanted "a date" had to rediscover that. `month` and `day` are
+/// 1-based here even though `TDateTime`'s are not — the conversion happens once, in the shim.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct Stat {
+    pub size: u64,
+    pub year: i32,
+    pub month: i32,
+    pub day: i32,
+    pub hour: i32,
+    pub minute: i32,
+    pub second: i32,
+    /// `KEntryAtt*` bits, as the file server reports them.
+    pub attributes: i32,
+    pub is_dir: bool,
+}
+
+impl Stat {
+    fn from_raw(raw: &sys::ShimFileStat) -> Self {
+        Stat {
+            size: raw.size(),
+            year: raw.year,
+            month: raw.month,
+            day: raw.day,
+            hour: raw.hour,
+            minute: raw.minute,
+            second: raw.second,
+            attributes: raw.attributes,
+            is_dir: raw.is_dir != 0,
+        }
+    }
+}
+
 /// The four operations everything else here is built from.
 ///
 /// Deliberately the raw shape — a read that may return less than asked, a write that
@@ -164,6 +199,13 @@ pub trait Fs {
     /// UTF-16 units, returning how many names were written. A directory that does not
     /// exist lists as zero.
     fn list_dir(&mut self, path: &[u16], out: &mut [u16]) -> Result<usize>;
+    /// Like [`Fs::list_dir`], but including subdirectories. Each directory name is written with
+    /// a trailing `\`, so a caller reading the NUL-separated buffer can tell a directory from a
+    /// file without a second call — for a shell that navigates rather than reads a known dir.
+    fn list_entries(&mut self, path: &[u16], out: &mut [u16]) -> Result<usize>;
+    /// Size, modification time and attributes of one entry. A directory path may carry its
+    /// trailing `\` or not.
+    fn stat(&mut self, path: &[u16]) -> Result<Stat>;
     fn delete(&mut self, path: &[u16]) -> Result<()>;
     fn rename(&mut self, from: &[u16], to: &[u16]) -> Result<()>;
     /// Create a directory. An existing one is success, so this is safe to call blind.
@@ -238,6 +280,24 @@ impl Fs for ShimFs {
         };
         Error::check(rc)?;
         Ok(count.max(0) as usize)
+    }
+
+    fn list_entries(&mut self, path: &[u16], out: &mut [u16]) -> Result<usize> {
+        let mut count = 0i32;
+        // SAFETY: as `list_dir` — pointers valid for their lengths, count is a live local.
+        let rc = unsafe {
+            sys::shim_dir_list_all(path.as_ptr(), path.len() as i32, out.as_mut_ptr(), out.len() as i32, &mut count)
+        };
+        Error::check(rc)?;
+        Ok(count.max(0) as usize)
+    }
+
+    fn stat(&mut self, path: &[u16]) -> Result<Stat> {
+        let mut st = sys::ShimFileStat::default();
+        // SAFETY: `path` is valid for its length; the shim writes `st` once and does not keep it.
+        let rc = unsafe { sys::shim_file_stat(path.as_ptr(), path.len() as i32, &mut st) };
+        Error::check(rc)?;
+        Ok(Stat::from_raw(&st))
     }
 
     fn delete(&mut self, path: &[u16]) -> Result<()> {
@@ -540,6 +600,54 @@ impl Fs for MemFs {
         Ok(n)
     }
 
+    fn list_entries(&mut self, path: &[u16], out: &mut [u16]) -> Result<usize> {
+        // Immediate children of `path`: files as-is, subdirectories as their first component
+        // with a trailing `\`, deduplicated — the same shape the device returns.
+        let sep = b'\\' as u16;
+        let mut names: Vec<Vec<u16>> = Vec::new();
+        for (key, _data) in &self.files {
+            if key.len() <= path.len() || key[..path.len()] != *path {
+                continue;
+            }
+            let name = &key[path.len()..];
+            let entry: Vec<u16> = match name.iter().position(|&u| u == sep) {
+                // A file directly in this directory.
+                None => name.to_vec(),
+                // Something in a subdirectory: the subdirectory itself, with a trailing sep.
+                Some(i) => {
+                    let mut d = name[..i].to_vec();
+                    d.push(sep);
+                    d
+                }
+            };
+            if !names.iter().any(|x| *x == entry) {
+                names.push(entry);
+            }
+        }
+        let mut pos = 0usize;
+        let mut n = 0usize;
+        for name in &names {
+            if pos + name.len() + 1 > out.len() {
+                break;
+            }
+            out[pos..pos + name.len()].copy_from_slice(name);
+            pos += name.len();
+            out[pos] = 0;
+            pos += 1;
+            n += 1;
+        }
+        Ok(n)
+    }
+
+    fn stat(&mut self, path: &[u16]) -> Result<Stat> {
+        // The fake has no clock and no attributes: it answers the one field it genuinely
+        // knows, so a test can assert on size without pretending to a modification time.
+        match self.find(path) {
+            Some(i) => Ok(Stat { size: self.files[i].1.len() as u64, ..Stat::default() }),
+            None => Err(Error::NotFound),
+        }
+    }
+
     fn delete(&mut self, path: &[u16]) -> Result<()> {
         match self.find(path) {
             Some(i) => {
@@ -753,5 +861,42 @@ mod tests {
         let key = vec![0xABu8; 256];
         write_atomic(&mut fs, &path, &key).unwrap();
         assert_eq!(read(&mut fs, &path).unwrap().unwrap(), key);
+    }
+
+    /// Split a NUL-separated UTF-16 buffer back into strings, for asserting a listing.
+    fn names(buf: &[u16], count: usize) -> alloc::vec::Vec<String> {
+        let mut out = alloc::vec::Vec::new();
+        let mut i = 0;
+        for _ in 0..count {
+            let start = i;
+            while i < buf.len() && buf[i] != 0 {
+                i += 1;
+            }
+            out.push(utf8(&buf[start..i]));
+            i += 1;
+        }
+        out
+    }
+
+    #[test]
+    fn list_entries_shows_files_and_subdirs_with_a_trailing_slash() {
+        let mut fs = MemFs::new();
+        let units = |s: &str| -> Vec<u16> { s.encode_utf16().collect() };
+        // Two files directly under Z:\, and one file inside a subdirectory.
+        fs.files.push((units("Z:\\readme.txt"), b"hi".to_vec()));
+        fs.files.push((units("Z:\\boot.cfg"), b"x".to_vec()));
+        fs.files.push((units("Z:\\system\\apps\\a.txt"), b"y".to_vec()));
+
+        let dir = units("Z:\\");
+        let mut buf = vec![0u16; 256];
+        let count = fs.list_entries(&dir, &mut buf).unwrap();
+        let got = names(&buf, count);
+
+        // The two files as-is, plus the immediate subdirectory with its trailing separator —
+        // and only once, though two paths pass through it here (one, in this data).
+        assert!(got.contains(&String::from("readme.txt")), "{got:?}");
+        assert!(got.contains(&String::from("boot.cfg")), "{got:?}");
+        assert!(got.contains(&String::from("system\\")), "{got:?}");
+        assert_eq!(count, 3, "{got:?}");
     }
 }

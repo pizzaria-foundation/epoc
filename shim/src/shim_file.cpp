@@ -132,6 +132,25 @@ TInt ShimFsSession(RFs*& aOut)
     return Fs(aOut);
     }
 
+/* Create a directory, given a directory path.
+ *
+ * RFs::MkDirAll drops everything after the last backslash, so MkDirAll("C:\\Data\\bootd") makes
+ * C:\\Data and returns KErrAlreadyExists — success, with the directory absent, and the complaint
+ * arriving one layer later as KErrPathNotFound from the first write. Nothing in this file creates
+ * a directory except through here; a second call site doing it by hand is how that shipped twice.
+ */
+static TInt MkDirEnsure(RFs& fs, const TDesC& path)
+    {
+    TFileName dir;
+    if (path.Length() + 1 > dir.MaxLength())
+        return KErrOverflow;
+    dir.Copy(path);
+    if (dir.Length() == 0 || dir[dir.Length() - 1] != '\\')
+        dir.Append('\\');
+    const TInt rc = fs.MkDirAll(dir);
+    return (rc == KErrNone || rc == KErrAlreadyExists) ? KErrNone : rc;
+    }
+
 extern "C" {
 
 int32_t shim_private_path(uint16_t* buf, int32_t cap, int32_t* len)
@@ -157,11 +176,9 @@ int32_t shim_private_path(uint16_t* buf, int32_t cap, int32_t* len)
     full.Append(_L("C:"));
     full.Append(path);
 
-    /* Create it if this is the first run. MkDirAll rather than MkDir: the private
-     * path has two components and the parent may not exist either. KErrAlreadyExists
-     * is the normal case from the second run onwards. */
-    err = fs->MkDirAll(full);
-    if (err != KErrNone && err != KErrAlreadyExists)
+    /* Create it if this is the first run. */
+    err = MkDirEnsure(*fs, full);
+    if (err != KErrNone)
         return err;
 
     if (full.Length() > cap)
@@ -357,10 +374,7 @@ int32_t shim_mkdir(const uint16_t* path, int32_t path_len)
     if (err != KErrNone)
         return err;
     TPtrC16 p(reinterpret_cast<const TUint16*>(path), path_len);
-    /* MkDirAll creates every missing component. An existing directory is success as far
-     * as the caller cares — it wanted the directory to be there, and it is. */
-    const TInt rc = fs->MkDirAll(p);
-    return (rc == KErrNone || rc == KErrAlreadyExists) ? SHIM_OK : rc;
+    return MkDirEnsure(*fs, p);
     }
 
 int32_t shim_dir_list(const uint16_t* path, int32_t path_len, uint16_t* buf, int32_t cap, int32_t* count)
@@ -404,6 +418,99 @@ int32_t shim_dir_list(const uint16_t* path, int32_t path_len, uint16_t* buf, int
     delete entries;
     if (count)
         *count = n;
+    return SHIM_OK;
+    }
+
+int32_t shim_dir_list_all(const uint16_t* path, int32_t path_len, uint16_t* buf, int32_t cap, int32_t* count)
+    {
+    if (count)
+        *count = 0;
+    if (!path || path_len <= 0 || !buf || cap <= 0)
+        return SHIM_ERR_ARGUMENT;
+    RFs* fs = NULL;
+    const TInt err = Fs(fs);
+    if (err != KErrNone)
+        return err;
+
+    TPtrC16 dir(reinterpret_cast<const TUint16*>(path), path_len);
+    CDir* entries = NULL;
+    /* Files AND directories this time — a shell has to navigate. A directory name is written
+     * with a trailing backslash so the caller can tell it from a file out of the
+     * NUL-separated buffer alone, without a second stat per entry. */
+    const TInt gerr = fs->GetDir(dir, KEntryAttNormal | KEntryAttHidden | KEntryAttDir,
+                                 ESortByName, entries);
+    if (gerr != KErrNone)
+        {
+        return (gerr == KErrNotFound || gerr == KErrPathNotFound) ? SHIM_OK : gerr;
+        }
+
+    TInt pos = 0;
+    TInt n = 0;
+    const TInt total = entries->Count();
+    for (TInt i = 0; i < total; i++)
+        {
+        const TEntry& e = (*entries)[i];
+        const TDesC& name = e.iName;
+        const TBool isDir = e.IsDir();
+        /* name + optional '\' + a NUL separator must fit, or stop and report what did. */
+        const TInt need = name.Length() + (isDir ? 1 : 0) + 1;
+        if (pos + need > cap)
+            break;
+        for (TInt j = 0; j < name.Length(); j++)
+            buf[pos++] = name[j];
+        if (isDir)
+            buf[pos++] = (TUint16) '\\';
+        buf[pos++] = 0;
+        n++;
+        }
+    delete entries;
+    if (count)
+        *count = n;
+    return SHIM_OK;
+    }
+
+int32_t shim_file_stat(const uint16_t* path, int32_t path_len, ShimFileStat* out)
+    {
+    if (!path || path_len <= 0 || !out)
+        return SHIM_ERR_ARGUMENT;
+    RFs* fs = NULL;
+    const TInt err = Fs(fs);
+    if (err != KErrNone)
+        return err;
+
+    TPtrC16 name(reinterpret_cast<const TUint16*>(path), path_len);
+    TEntry entry;
+    TInt gerr = fs->Entry(name, entry);
+    if (gerr != KErrNone && path_len > 1 && path[path_len - 1] == (uint16_t) '\\')
+        {
+        /* RFs::Entry wants a directory without its trailing separator, but every directory
+         * path this SDK passes around carries one (MkDirAll needs it). Retry trimmed rather
+         * than making every caller keep two spellings of the same path. */
+        TPtrC16 trimmed(reinterpret_cast<const TUint16*>(path), path_len - 1);
+        gerr = fs->Entry(trimmed, entry);
+        }
+    if (gerr != KErrNone)
+        return gerr;
+
+    /* iSize, not FileSize(): this SDK's TEntry predates the 64-bit accessor, so the size is a
+     * TInt and the high half is always zero. A file over 2 GB cannot exist on the phone's own
+     * filesystem anyway, and the ABI keeps both halves so that stays true when it can. */
+    const TUint32 size = (TUint32) entry.iSize;
+    out->size_lo = (uint32_t) size;
+    out->size_hi = 0;
+
+    /* TDateTime counts months and days from zero; every human-facing use adds one, so it is
+     * added here once rather than in each caller. */
+    const TDateTime dt = entry.iModified.DateTime();
+    out->year = dt.Year();
+    out->month = dt.Month() + 1;
+    out->day = dt.Day() + 1;
+    out->hour = dt.Hour();
+    out->minute = dt.Minute();
+    out->second = dt.Second();
+
+    out->attributes = (int32_t) entry.iAtt;
+    out->is_dir = entry.IsDir() ? 1 : 0;
     return SHIM_OK;
     }
 
