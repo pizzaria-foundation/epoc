@@ -54,6 +54,9 @@ pub struct TextField {
     /// [`take`], so a shadow copy in the screen is never needed and the only place
     /// the password lives is here.
     masked: bool,
+    /// When true the field is a multi-line text area: `\n` is a legal character, Enter inserts one,
+    /// and Up/Down move the caret between lines. Default false keeps every existing field single-line.
+    multiline: bool,
 }
 
 impl TextField {
@@ -73,6 +76,17 @@ impl TextField {
     pub fn accepting(mut self, accept: fn(char) -> bool) -> Self {
         self.accept = Some(accept);
         self
+    }
+
+    /// Make this a multi-line text area (Enter inserts a newline; Up/Down move between lines).
+    pub fn multiline(mut self, on: bool) -> Self {
+        self.multiline = on;
+        self
+    }
+
+    /// Whether this field is a multi-line text area.
+    pub fn is_multiline(&self) -> bool {
+        self.multiline
     }
 
     /// The visible content. When masked, every character is replaced with `*`; the
@@ -199,6 +213,11 @@ impl TextField {
     /// field accepts. A refusal after a selection was replaced still counts as an edit, which is
     /// why the caller sees the return value rather than a "nothing happened".
     pub fn insert(&mut self, ch: char) -> bool {
+        // A newline is a legal character only in a multi-line field; a single-line field drops it
+        // so a pasted address with a trailing return does not smuggle one in.
+        if ch == '\n' && !self.multiline {
+            return false;
+        }
         if let Some(accept) = self.accept {
             if !accept(ch) {
                 return false;
@@ -315,6 +334,134 @@ impl TextField {
         self.anchor = None;
     }
 
+    // ---- word granularity -------------------------------------------------------------------
+
+    /// The byte offset one word to the left of the caret: skip any whitespace, then the run of
+    /// non-whitespace before it. Used by word-left and delete-word-back.
+    fn prev_word_boundary(&self) -> usize {
+        let mut pos = self.cursor;
+        let head = &self.text[..pos];
+        let mut chars = head.char_indices().rev().peekable();
+        while let Some(&(i, c)) = chars.peek() {
+            if c.is_whitespace() { pos = i; chars.next(); } else { break; }
+        }
+        while let Some(&(i, c)) = chars.peek() {
+            if !c.is_whitespace() { pos = i; chars.next(); } else { break; }
+        }
+        pos
+    }
+
+    /// The byte offset one word to the right: skip the run of non-whitespace, then any whitespace.
+    fn next_word_boundary(&self) -> usize {
+        let tail = &self.text[self.cursor..];
+        let mut pos = self.cursor;
+        let mut chars = tail.char_indices().peekable();
+        while let Some(&(i, c)) = chars.peek() {
+            if !c.is_whitespace() { pos = self.cursor + i + c.len_utf8(); chars.next(); } else { break; }
+        }
+        while let Some(&(i, c)) = chars.peek() {
+            if c.is_whitespace() { pos = self.cursor + i + c.len_utf8(); chars.next(); } else { break; }
+        }
+        pos
+    }
+
+    fn move_to(&mut self, pos: usize, keep_selection: bool) {
+        if keep_selection { self.anchor.get_or_insert(self.cursor); } else { self.anchor = None; }
+        self.cursor = pos;
+    }
+
+    /// Move the caret one word left (Ctrl+Left).
+    pub fn word_left(&mut self) { let p = self.prev_word_boundary(); self.move_to(p, false); }
+    /// Move the caret one word right (Ctrl+Right).
+    pub fn word_right(&mut self) { let p = self.next_word_boundary(); self.move_to(p, false); }
+
+    /// Delete the selection, or the word before the caret (Ctrl+Backspace).
+    pub fn delete_word_back(&mut self) -> bool {
+        if self.delete_selection() { return true; }
+        let from = self.prev_word_boundary();
+        if from == self.cursor { return false; }
+        self.text.replace_range(from..self.cursor, "");
+        self.cursor = from;
+        true
+    }
+
+    /// Delete the selection, or the word after the caret (Ctrl+Delete).
+    pub fn delete_word_forward(&mut self) -> bool {
+        if self.delete_selection() { return true; }
+        let to = self.next_word_boundary();
+        if to == self.cursor { return false; }
+        self.text.replace_range(self.cursor..to, "");
+        true
+    }
+
+    // ---- line granularity (single-line: the whole field) ------------------------------------
+
+    fn line_start_at(&self, pos: usize) -> usize {
+        self.text[..pos].rfind('\n').map(|i| i + 1).unwrap_or(0)
+    }
+    fn line_end_at(&self, pos: usize) -> usize {
+        self.text[pos..].find('\n').map(|i| pos + i).unwrap_or(self.text.len())
+    }
+
+    /// Move the caret to the start of the current line.
+    pub fn line_start(&mut self) { let p = self.line_start_at(self.cursor); self.move_to(p, false); }
+    /// Move the caret to the end of the current line.
+    pub fn line_end(&mut self) { let p = self.line_end_at(self.cursor); self.move_to(p, false); }
+
+    /// Delete the whole current line (and its trailing newline, if any). On a single-line field
+    /// this clears the field. The one destructive shortcut, so it drops any selection first.
+    pub fn delete_line(&mut self) -> bool {
+        self.anchor = None;
+        let start = self.line_start_at(self.cursor);
+        let mut end = self.line_end_at(self.cursor);
+        if end < self.text.len() && self.text[end..].starts_with('\n') {
+            end += 1; // take the newline so the line truly disappears
+        }
+        if start == end { return false; }
+        self.text.replace_range(start..end, "");
+        self.cursor = start.min(self.text.len());
+        true
+    }
+
+    // ---- vertical movement (multi-line only) ------------------------------------------------
+
+    fn nth_col_offset(line: &str, col: usize) -> usize {
+        line.char_indices().nth(col).map(|(i, _)| i).unwrap_or(line.len())
+    }
+
+    fn move_up(&mut self) -> bool {
+        let ls = self.line_start_at(self.cursor);
+        if ls == 0 { return false; }
+        let col = self.text[ls..self.cursor].chars().count();
+        let prev_end = ls - 1;
+        let prev_start = self.line_start_at(prev_end);
+        let prev_line = &self.text[prev_start..prev_end];
+        self.cursor = prev_start + Self::nth_col_offset(prev_line, col);
+        true
+    }
+
+    fn move_down(&mut self) -> bool {
+        let le = self.line_end_at(self.cursor);
+        if le == self.text.len() { return false; }
+        let ls = self.line_start_at(self.cursor);
+        let col = self.text[ls..self.cursor].chars().count();
+        let next_start = le + 1;
+        let next_end = self.line_end_at(next_start);
+        let next_line = &self.text[next_start..next_end];
+        self.cursor = next_start + Self::nth_col_offset(next_line, col);
+        true
+    }
+
+    /// Move the caret up one line, keeping the column (multi-line).
+    pub fn up(&mut self) -> bool { self.anchor = None; self.move_up() }
+    /// Move the caret down one line, keeping the column (multi-line).
+    pub fn down(&mut self) -> bool { self.anchor = None; self.move_down() }
+
+    /// Move up one line extending the selection (Shift+Up).
+    pub fn select_up(&mut self) -> bool { self.anchor.get_or_insert(self.cursor); self.move_up() }
+    /// Move down one line extending the selection (Shift+Down).
+    pub fn select_down(&mut self) -> bool { self.anchor.get_or_insert(self.cursor); self.move_down() }
+
     /// Put the selection — or the whole field, when nothing is selected — on the clipboard.
     ///
     /// A masked field refuses: a password copied here would sit in the phone's clipboard, readable
@@ -389,7 +536,9 @@ impl TextField {
             // which is the standard behaviour and also the only way out of one on a phone with no
             // pointer to click somewhere else with.
             Key::Left => {
-                if ev.mods.shift {
+                if ev.mods.ctrl {
+                    self.word_left();
+                } else if ev.mods.shift {
                     self.select_left();
                 } else {
                     self.left();
@@ -397,13 +546,33 @@ impl TextField {
                 Handled::Consumed
             }
             Key::Right => {
-                if ev.mods.shift {
+                if ev.mods.ctrl {
+                    self.word_right();
+                } else if ev.mods.shift {
                     self.select_right();
                 } else {
                     self.right();
                 }
                 Handled::Consumed
             }
+            // Up/Down and Enter act only in a multi-line field; a single-line field leaves them
+            // alone (a composer moves focus into the transcript with Up/Down).
+            Key::Up if self.multiline => {
+                if ev.mods.shift { self.select_up(); } else { self.up(); }
+                Handled::Consumed
+            }
+            Key::Down if self.multiline => {
+                if ev.mods.shift { self.select_down(); } else { self.down(); }
+                Handled::Consumed
+            }
+            Key::Enter if self.multiline => {
+                self.insert('\n');
+                Handled::Consumed
+            }
+            // Ctrl+Backspace arrives as the backspace control char with the Ctrl bit, which
+            // `ctrl_chord` renders as Ctrl('h') (0x08 + 0x60): delete the word before the caret.
+            // Falls through when there was nothing to delete. (Verify the exact code on the E72.)
+            Key::Ctrl('h') => Handled::from(self.delete_word_back()),
             // Each of these answers whether it actually did something, so a chord this field could
             // not honour — nothing on the clipboard, a masked field, no clipboard at all — falls
             // through to the screen rather than being swallowed. See the note above.
@@ -771,5 +940,91 @@ mod tests {
         f.take();
         assert!(f.is_empty());
         assert_eq!(f.display(), "");
+    }
+
+    #[test]
+    fn word_left_and_right_hop_whole_words() {
+        let mut f = TextField::new();
+        f.insert_str("foo bar baz");
+        f.word_left();
+        assert_eq!(f.cursor(), 8, "from end to start of 'baz'");
+        f.word_left();
+        assert_eq!(f.cursor(), 4, "to start of 'bar'");
+        f.word_right();
+        assert_eq!(f.cursor(), 8, "back to start of 'baz' (skips space then word)");
+    }
+
+    #[test]
+    fn delete_word_back_removes_the_word_before_the_caret() {
+        let mut f = TextField::new();
+        f.insert_str("foo bar baz");
+        assert!(f.delete_word_back());
+        assert_eq!(f.text(), "foo bar ");
+        assert!(f.delete_word_back());
+        assert_eq!(f.text(), "foo ");
+        assert!(f.delete_word_back());
+        assert_eq!(f.text(), "");
+        assert!(!f.delete_word_back(), "nothing left to delete");
+    }
+
+    #[test]
+    fn delete_word_back_takes_the_selection_when_there_is_one() {
+        let mut f = TextField::new();
+        f.insert_str("hello world");
+        f.select_all();
+        assert!(f.delete_word_back());
+        assert_eq!(f.text(), "", "a selection wins over word granularity");
+    }
+
+    #[test]
+    fn delete_line_clears_a_single_line_field() {
+        let mut f = TextField::new();
+        f.insert_str("a long url");
+        assert!(f.delete_line());
+        assert_eq!(f.text(), "");
+        assert!(!f.delete_line());
+    }
+
+    #[test]
+    fn a_single_line_field_refuses_newlines() {
+        let mut f = TextField::new();
+        assert!(!f.insert('\n'));
+        assert_eq!(f.text(), "");
+    }
+
+    #[test]
+    fn a_multiline_field_takes_newlines_and_moves_between_lines() {
+        let mut f = TextField::new().multiline(true);
+        f.insert_str("abc");
+        assert!(f.insert('\n'));
+        f.insert_str("de");
+        assert_eq!(f.text(), "abc\nde");
+        // caret is after "de" (column 2 on line 2). Up keeps the column on the longer line 1.
+        assert!(f.up());
+        assert_eq!(f.cursor(), 2, "column 2 of 'abc'");
+        assert!(!f.up(), "already on the first line");
+        assert!(f.down());
+        assert_eq!(f.cursor(), 6, "column 2 of 'de' is its end");
+        assert!(!f.down(), "already on the last line");
+    }
+
+    #[test]
+    fn up_clamps_the_column_to_a_shorter_line() {
+        let mut f = TextField::new().multiline(true);
+        f.insert_str("hi\nlonger");
+        // caret at end of "longer" (column 6); line above "hi" has only 2 columns.
+        assert!(f.up());
+        assert_eq!(f.cursor(), 2, "clamped to the end of 'hi'");
+    }
+
+    #[test]
+    fn delete_line_on_multiline_removes_the_line_and_its_newline() {
+        let mut f = TextField::new().multiline(true);
+        f.insert_str("one\ntwo\nthree");
+        // put the caret on line 2 ("two")
+        f.home();
+        f.down();
+        assert!(f.delete_line());
+        assert_eq!(f.text(), "one\nthree");
     }
 }

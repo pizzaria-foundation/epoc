@@ -442,15 +442,37 @@ pub fn text_field(
     // `display()` rather than `text()`: it is the one call that hides a password, so asking for it
     // here means no drawing path can leak one.
     let display = field.display();
+    let right = r.x1 - 4;
+
     if display.is_empty() {
         if let Some(ph) = style.placeholder.filter(|ph| !ph.is_empty()) {
             c.draw_text(Point::new(text_x, top + body.ascent()), ph, body, p.dim);
         }
+        if style.focused {
+            c.fill_rect(Rect::new(text_x, top, text_x + 1, bottom), p.accent);
+        }
     } else {
+        // Horizontal scroll so the caret is always visible: measure where the caret sits from the
+        // start of the text, and if that is past the visible width, shift the whole run left by the
+        // overflow so the caret rides the right edge. Stateless — recomputed every frame from the
+        // caret position — which is why a long URL no longer just truncates with an ellipsis and
+        // hides the end the user is typing at. `display_offset` maps the caret's byte offset onto
+        // the (possibly masked) display string.
+        let caret_off = field.display_offset(field.cursor()).min(display.len());
+        let caret_px = body.measure(&display[..caret_off]);
+        let avail = (right - text_x).max(1);
+        let scroll = (caret_px - avail).max(0);
+        let base_x = text_x - scroll;
+
+        // Clip to the content area so text scrolled off the left does not paint over the prefix or
+        // outside the field's band.
+        let saved = c.save();
+        c.clip_to(Rect::new(text_x, r.y0, right, r.y1));
+
         if let Some((from, to)) = field.selection() {
             paint::text_selection(
                 c,
-                text_x,
+                base_x,
                 top,
                 top + body.line_height(),
                 &display,
@@ -460,22 +482,13 @@ pub fn text_field(
                 p.selection.mid(),
             );
         }
-        c.draw_text_in(
-            Rect::new(text_x, top, r.x1 - 4, top + body.line_height()),
-            &display,
-            body,
-            p.text,
-            Align::Start,
-        );
-    }
+        c.draw_text(Point::new(base_x, top + body.ascent()), &display, body, p.text);
 
-    if style.focused {
-        // `display_offset` is the conversion a masked field needs: the caret is a byte offset into
-        // the password and the display is one `*` per character, so measuring the real prefix would
-        // put the caret wherever the password happened to be wider than its stars.
-        let shown = &display[..field.display_offset(field.cursor()).min(display.len())];
-        let cx = text_x + body.measure(shown);
-        c.fill_rect(Rect::new(cx, top, cx + 1, bottom), p.accent);
+        if style.focused {
+            let cx = base_x + caret_px;
+            c.fill_rect(Rect::new(cx, top, cx + 1, bottom), p.accent);
+        }
+        c.restore(saved);
     }
 }
 

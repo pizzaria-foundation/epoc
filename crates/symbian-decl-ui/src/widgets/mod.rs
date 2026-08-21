@@ -20,6 +20,7 @@ pub mod softkey_bar;
 pub mod spacer;
 pub mod stack;
 pub mod text;
+pub mod text_area;
 pub mod text_field;
 pub mod title_bar;
 
@@ -37,6 +38,7 @@ pub use softkey_bar::SoftkeyBar;
 pub use spacer::Spacer;
 pub use stack::Stack;
 pub use text::{Ink, Text};
+pub use text_area::TextArea;
 pub use text_field::TextField;
 pub use title_bar::TitleBar;
 
