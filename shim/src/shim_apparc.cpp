@@ -352,17 +352,34 @@ int32_t shim_app_launch(uint32_t uid3)
  * server rather than RProcess::Kill is what lets one app stop another without owning it. SHIM_OK
  * if a task was found and killed, SHIM_ERR_NOT_FOUND if the app has no running task, or
  * SHIM_ERR_NOT_READY before the window-server session exists. */
-int32_t shim_app_kill(uint32_t uid3)
+static TInt DoKillL(uint32_t aUid3)
     {
     CCoeEnv* env = CCoeEnv::Static();
     if (!env)
         return SHIM_ERR_NOT_READY;
     TApaTaskList list(env->WsSession());
-    TApaTask task = list.FindApp(TUid::Uid(uid3));
+    TApaTask task = list.FindApp(TUid::Uid(aUid3));
     if (!task.Exists())
         return SHIM_ERR_NOT_FOUND;
     task.KillTask();
     return SHIM_OK;
+    }
+
+int32_t shim_app_kill(uint32_t uid3)
+    {
+    /* TRAPped, like every other function in this file, and it was the one that was not.
+     *
+     * `TApaTaskList::FindApp` walks the window server's group list, which allocates — it is
+     * `RWsSession::WindowGroupList` underneath, the same call `DoRunningL` is TRAPped for. A leave
+     * crossing an `extern "C"` boundary is undefined behaviour, and on this handset the observable
+     * form of that is the whole application disappearing with no panic file and nothing in any log:
+     * exactly what the launcher did when an app was closed from the task switcher.
+     *
+     * Whether that is what killed it is still being measured (the launcher logs each step of its
+     * kill path now). This is here either way: the rule this file states in three other places
+     * cannot have an exception nobody noticed. */
+    TRAPD(err, err = DoKillL(uid3));
+    return err;
     }
 
 /* Fill aOut with the UID3s of running applications (window-server groups, front-to-back Z order),
