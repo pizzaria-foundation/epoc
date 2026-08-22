@@ -26,6 +26,9 @@ pub extern crate alloc;
 pub use alloc as __alloc;
 
 pub mod agenda;
+/// The next few days of the calendar, for a home screen. The reminder queue's sibling — see the
+/// module header for why it cannot be the same file.
+pub mod daily;
 pub mod apps;
 pub mod backoff;
 pub mod bt;
