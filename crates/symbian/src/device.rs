@@ -218,6 +218,73 @@ pub fn publish_keylock(locked: bool) -> Result<()> {
     crate::prop::set(LOCK_CATEGORY, LOCK_KEY, locked as i32)
 }
 
+/// Whether somebody is using the phone: the inverse of the published keypad lock.
+///
+/// The one call an application's background work should be asking. Reads the key the home screen
+/// publishes ([`LOCK_KEY`]), so it works in a headless daemon and in a GUI app alike — unlike
+/// [`keylock`], which needs a control environment.
+///
+/// **Unreadable means in use.** A phone with no home screen of ours running publishes nothing, and a
+/// facility that answered "nobody is here" to that would silently stop every app on the handset. A
+/// stop signal has to fail open.
+pub fn in_use() -> bool {
+    crate::prop::get(LOCK_CATEGORY, LOCK_KEY).map(|v| v == 0).unwrap_or(true)
+}
+
+/// A subscription to [`in_use`], for an event loop.
+///
+/// Every application that wants to stop working when the phone goes into a pocket needs the same
+/// three lines — subscribe, route the property event, compare against the last value — so they live
+/// here once instead of in each app. The comparison matters: P&S delivers a change, and an
+/// application that acted on every delivery would tear its connection down and build it again each
+/// time the key was rewritten with the same value.
+///
+/// ```ignore
+/// let mut watch = device::UseWatch::start();
+/// // in handle_raw:
+/// match watch.on_event(ev) {
+///     Some(false) => driver.park(),   // pocket: stop retrying, drop the link
+///     Some(true) => driver.resume(),  // back in a hand: connect now
+///     None => {}
+/// }
+/// ```
+pub struct UseWatch {
+    in_use: bool,
+}
+
+impl UseWatch {
+    /// Subscribe and read the current answer.
+    pub fn start() -> Self {
+        // Defined blind first: a key nobody has defined is a key a subscribe never fires on, and the
+        // home screen may not have started yet.
+        let _ = crate::prop::define_public(LOCK_CATEGORY, LOCK_KEY);
+        let _ = crate::prop::subscribe(LOCK_CATEGORY, LOCK_KEY);
+        Self { in_use: in_use() }
+    }
+
+    /// The last answer seen.
+    pub fn in_use(&self) -> bool {
+        self.in_use
+    }
+
+    /// Feed every raw event. `Some(now)` when the answer just changed, `None` otherwise.
+    ///
+    /// The value comes from the event (`c` carries the freshly read integer) rather than from a
+    /// second read: it is one less IPC round trip, and it cannot disagree with the change that woke
+    /// us.
+    pub fn on_event(&mut self, ev: &symbian_sys::ShimEvent) -> Option<bool> {
+        if ev.kind != symbian_sys::SHIM_EV_PROP || ev.a as u32 != LOCK_KEY {
+            return None;
+        }
+        let now = ev.c == 0;
+        if now == self.in_use {
+            return None;
+        }
+        self.in_use = now;
+        Some(now)
+    }
+}
+
 /// Whether the keypad is locked — or the phone is in autolock, which for a caller is the same fact.
 ///
 /// # What this is for
