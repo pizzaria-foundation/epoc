@@ -159,8 +159,28 @@ impl BackoffPoller {
             self.arm(delay);
             return false;
         }
-        let delay = if ours { self.backoff.on_tick() } else { self.backoff.on_reset(self.jitter()) };
+        if ours {
+            let delay = self.backoff.on_tick();
+            self.arm(delay);
+            return true;
+        }
+        // A property changed. `ev.a` is the key (see `SHIM_EV_PROP`), and *which* key it was decides
+        // whether this is a reason to do the work now or only to do it sooner.
+        let delay = self.backoff.on_reset(self.jitter());
         self.arm(delay);
+        if ev.a as u32 == self.key {
+            // The activity signal: "somebody is here". That is a statement about the *cadence*, not a
+            // request for a poll, and treating it as a request is expensive — measured on the
+            // handset, where the launcher bumps this on every keypress and `notifd` answered each one
+            // by opening the message store and counting 104 inbox entries. Three queries inside two
+            // seconds while somebody typed a filter.
+            //
+            // So the reset stands and the work waits for the timer it just armed: a burst of twenty
+            // keys costs one poll, one base interval after the last of them.
+            return false;
+        }
+        // Any other key this poller is subscribed to is a message *for* it — a queued notice, a
+        // rewritten reminder queue — and promptness is the whole point of those.
         true
     }
 
@@ -328,8 +348,20 @@ mod tests {
         // Off-device the timer is a no-op (no handle), but the reset and filter logic still runs.
         let mut p = BackoffPoller::new(10, 100, 0, 0xE0AA_0000, 100);
         p.start();
-        // A property change (the launcher's activity bump) always asks for a publish.
-        assert!(p.poll(&ev(symbian_sys::SHIM_EV_PROP)));
+        // The activity bump resets the cadence and does *not* ask for a publish: it says a person is
+        // here, not "answer me now", and answering every one of them is a message-store query per
+        // keypress. The timer it just armed is what does the work.
+        let mut activity = ev(symbian_sys::SHIM_EV_PROP);
+        activity.a = 100;
+        assert!(!p.poll(&activity));
+        assert_eq!(p.armed(), 10, "back to the base rate, though");
+
+        // A change on any *other* key it subscribed to is a message for this daemon — a queued
+        // notice, a rewritten reminder queue — and those are answered at once.
+        let mut other = ev(symbian_sys::SHIM_EV_PROP);
+        other.a = 102;
+        assert!(p.poll(&other));
+
         // An unrelated event does not.
         assert!(!p.poll(&ev(12345)));
     }
