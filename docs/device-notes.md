@@ -720,6 +720,33 @@ argument we sent. Its own `User::TickCount` import resolved from inside the DLL,
 export table and the import table are real. Everything MTMs, ECom and FEPs are built on is
 therefore reachable from this toolchain.
 
+## What the ROM patch does not do, and the app it killed
+
+**A patched installserver lifts the *ceiling*; it does not hand a process capabilities its image
+never declared.** A process holds exactly what its E32 header says, and the sentence below —
+written from `apps/devdump`, which declares nothing and was granted everything — was read as "every
+process gets every capability on this phone". It does not mean that.
+
+What that misreading cost, measured on 22 August 2026: the launcher's task switcher **killed the
+launcher** every time somebody closed an app. `TApaTask::KillTask` is `RThread::Kill` on a thread in
+another process, which needs `PowerMgmt`; the launcher declares `SwEvent WriteDeviceData`. A
+capability violation on an executive call does not return an error — the kernel panics the *calling*
+thread. So the log read
+
+```
+ 97563  [recent] kill uid=0xe0ca0000
+    78  [launcher] new: recents+props done     <- a fresh process; the supervisor put it back
+```
+
+and there was no `C:\Data\panic.txt`, because a fault is neither a Rust panic nor a leave. TRAPping
+the shim call changed nothing, which is what proved it was not a leave — and the step logging
+(`step=ws`) is what proved *which* of three calls it was.
+
+`TApaTask::EndTask` is the route that works: it posts the window group a close event, which needs
+only `SwEvent`, and the application exits itself. An app that ignores it stays running — the honest
+cost, against a task switcher that took the home down. `RProcess::Kill` is the same trap one step
+later; `apps/killhome` knew that about RProcess and assumed the window-server route was exempt.
+
 **The ROM patch grants everything, and the grants are honoured.** All twenty capabilities
 report held, and — the part `HasCapability` alone cannot tell you — the operations agree:
 `C:\sys\bin\`, `Z:\sys\bin\`, `C:\resource\` and AppArc's own data cage all answered

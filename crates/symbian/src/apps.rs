@@ -380,12 +380,33 @@ pub fn open_at(uid3: u32, url: &str) -> Result<()> {
     launch(uid3)
 }
 
-/// Kill the installed app with this UID3 through the window server.
+/// Ask the installed app with this UID3 to close, through the window server.
 ///
-/// Unlike [`crate::process::kill`], which uses `RProcess::Kill` and needs `PowerMgmt` to end a
-/// process it did not create, this goes through the window server (`TApaTask::KillTask`) — the way
-/// one app stops another it does not own, and the way to end a resident launcher that will not
-/// close itself. [`Error::NotFound`] if the app has no running task.
+/// `TApaTask::EndTask`: it posts the application's window group a close event and the application
+/// exits on its own. **No capability**, which is the whole point — see [`kill`], which needs
+/// `PowerMgmt` and faults the caller without it.
+///
+/// The cost is honest and small: an application that ignores the event stays running. A task
+/// switcher can live with that; what it cannot live with is dying.
+///
+/// [`Error::NotFound`] if the app has no running task.
+pub fn end(uid3: u32) -> Result<()> {
+    // SAFETY: no pointers; the shim resolves the task and posts the event.
+    Error::check(unsafe { sys::shim_app_end(uid3) })
+}
+
+/// Kill the installed app with this UID3 through the window server — **needs `PowerMgmt`**.
+///
+/// `TApaTask::KillTask` is `RThread::Kill` on a thread in another process. Without the capability
+/// the kernel does not answer with an error: a capability violation on an executive call panics the
+/// *calling* thread, so this takes the caller down with no panic file and nothing in any log. That
+/// is measured, on the E72, and it is what the launcher's task switcher did to the launcher every
+/// time somebody closed an app.
+///
+/// So: use [`end`] unless this process declares `PowerMgmt` and means it. Kept because for an app
+/// that does — a supervisor, an escape hatch — killing is the point.
+///
+/// [`Error::NotFound`] if the app has no running task.
 pub fn kill(uid3: u32) -> Result<()> {
     // SAFETY: no pointers; the shim finds the task by UID and asks the window server to kill it.
     Error::check(unsafe { sys::shim_app_kill(uid3) })

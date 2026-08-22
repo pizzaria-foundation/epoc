@@ -365,6 +365,48 @@ static TInt DoKillL(uint32_t aUid3)
     return SHIM_OK;
     }
 
+/* Ask the app with this UID3 to close, through the window server.
+ *
+ * `EndTask` where `KillTask` kills: it posts the window group a close event and the application
+ * exits on its own, which needs no capability at all. That distinction is the whole reason this
+ * function exists — see the measurement in shim_app_kill below.
+ *
+ * The cost, stated: an application that ignores the event stays. That is the trade against a caller
+ * that dies, and this is a task switcher, not a supervisor. */
+static TInt DoEndL(uint32_t aUid3)
+    {
+    CCoeEnv* env = CCoeEnv::Static();
+    if (!env)
+        return SHIM_ERR_NOT_READY;
+    TApaTaskList list(env->WsSession());
+    TApaTask task = list.FindApp(TUid::Uid(aUid3));
+    if (!task.Exists())
+        return SHIM_ERR_NOT_FOUND;
+    task.EndTask();
+    return SHIM_OK;
+    }
+
+int32_t shim_app_end(uint32_t uid3)
+    {
+    TRAPD(err, err = DoEndL(uid3));
+    return err;
+    }
+
+/* MEASURED, on the E72, 22 August 2026: this **faults the caller**.
+ *
+ * `TApaTask::KillTask` is `RThread::Kill` on a thread in another process, and that needs PowerMgmt.
+ * Without it the kernel does not return an error — a capability violation on an executive call
+ * panics the calling thread. So the launcher's task switcher took the launcher down every time
+ * somebody closed an app: the log said `[recent] kill … step=ws` and the next line was a fresh
+ * process, with no panic file, because a fault is not a panic and not a leave. The TRAP added an
+ * hour earlier changed nothing, which is what proved it was not a leave.
+ *
+ * The misreading that hid it: "the ROM patch grants every capability" is about the *installer's
+ * ceiling* — a patched installserver accepts any declaration. It does not hand a process
+ * capabilities its own image never declared, and a process holds exactly what its E32 header says.
+ *
+ * Kept, because it is the right call for an app that declares PowerMgmt and means it. Everything
+ * else should use shim_app_end. */
 int32_t shim_app_kill(uint32_t uid3)
     {
     /* TRAPped, like every other function in this file, and it was the one that was not.

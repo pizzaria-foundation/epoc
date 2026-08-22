@@ -706,6 +706,9 @@ int32_t shim_clip_get_text(uint16_t* out, int32_t cap, int32_t* len);
  * to stop an app that will not close itself, like a resident launcher. SHIM_OK if killed,
  * SHIM_ERR_NOT_FOUND if it has no running task. */
 int32_t shim_app_kill(uint32_t uid3);
+/* Ask the app to close (TApaTask::EndTask). No capability; an app that ignores it stays. This is
+ * the one to use — shim_app_kill faults the caller without PowerMgmt, measured. */
+int32_t shim_app_end(uint32_t uid3);
 /* List the UID3s of running apps (window-server task list, front-to-back), deduped, up to `cap`.
  * Returns the count written, or a negative error / SHIM_ERR_NOT_READY. */
 int32_t shim_apps_running(uint32_t* out, int32_t cap);

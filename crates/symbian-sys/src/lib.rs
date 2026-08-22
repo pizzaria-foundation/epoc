@@ -915,6 +915,13 @@ extern "C" {
     /// that will not close itself, like a resident launcher. [`SHIM_OK`] if killed,
     /// [`SHIM_ERR_NOT_FOUND`] if it has no running task.
     pub fn shim_app_kill(uid3: u32) -> i32;
+    /// Ask the app with this UID3 to close (`TApaTask::EndTask`), through the window server.
+    ///
+    /// The one to use. [`shim_app_kill`] is `RThread::Kill` underneath and **faults the caller**
+    /// without `PowerMgmt` — measured on the E72, and it took the launcher down every time an app
+    /// was closed from its task switcher. This posts a close event instead: no capability, and an
+    /// application that ignores it simply stays.
+    pub fn shim_app_end(uid3: u32) -> i32;
     /// List running apps' UID3s (window-server task list, front-to-back), up to `cap`. Returns the
     /// count written, or a negative error / [`SHIM_ERR_NOT_READY`].
     pub fn shim_apps_running(out: *mut u32, cap: i32) -> i32;
@@ -1521,6 +1528,9 @@ mod host_stubs {
         SHIM_ERR_NOT_READY
     }
     pub unsafe fn shim_app_kill(_uid3: u32) -> i32 {
+        SHIM_ERR_NOT_READY
+    }
+    pub unsafe fn shim_app_end(_uid3: u32) -> i32 {
         SHIM_ERR_NOT_READY
     }
     pub unsafe fn shim_apps_running(_out: *mut u32, _cap: i32) -> i32 {
