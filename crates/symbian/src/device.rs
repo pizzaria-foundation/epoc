@@ -198,6 +198,34 @@ pub mod hal_attr {
     pub const DISPLAY_Y_PIXELS: i32 = 32;
 }
 
+/// Whether the keypad is locked — or the phone is in autolock, which for a caller is the same fact.
+///
+/// # What this is for
+///
+/// It is the stop signal a background job actually wants. "Are we in the foreground" does not answer
+/// it for a home screen, which is foreground by definition, and the keypad lock is the one state that
+/// means *the phone is in a pocket*: nobody is reading the screen and nobody is about to press
+/// anything. A poller that keeps its cadence through that is spending battery on an audience of
+/// nobody.
+///
+/// # Where it comes from
+///
+/// `RAknKeyLock::IsKeyLockEnabled`, out of avkon — already linked by every GUI build, so it costs no
+/// import. Gated behind `USE_KEYLOCK` all the same, and it needs a control environment: a headless
+/// daemon gets [`Error::NotReady`], which is why the pattern is for the application to read this and
+/// tell its daemons rather than each asking.
+///
+/// The Publish&Subscribe route the write-ups name (`KCoreAppUIsAutolockStatus`) is not available
+/// here: the public SDK ships no header for the category, and the candidates answer `KErrNotFound`
+/// when read on the handset. Measured before this was written, rather than shipped as a guess.
+pub fn keylock() -> Result<bool> {
+    let rc = unsafe { symbian_sys::shim_keylock() };
+    if rc < 0 {
+        return Err(crate::Error::from_code(rc));
+    }
+    Ok(rc == 1)
+}
+
 /// Read the charge state from HWRM.
 ///
 /// The level key is the one that must be present; the charging key is treated as "not charging"

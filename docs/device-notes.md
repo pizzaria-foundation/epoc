@@ -720,6 +720,31 @@ argument we sent. Its own `User::TickCount` import resolved from inside the DLL,
 export table and the import table are real. Everything MTMs, ECom and FEPs are built on is
 therefore reachable from this toolchain.
 
+## The keypad lock is readable; the key everyone names is not
+
+**`KCoreAppUIsAutolockStatus` is not available on this handset.** The public SDK ships no header
+for the category, and the candidates every write-up names answer `KErrNotFound` when read over the
+remote shell:
+
+```
+ps 0x101F8767 1   ERR NotFound      ps 0x101F8763 1   ERR NotFound
+ps 0x101F8767 2   ERR NotFound      ps 0x101F876E 1   ERR NotFound
+```
+
+**`RAknKeyLock::IsKeyLockEnabled` is.** `aknkeylock.h` is in the SDK and
+`_ZN11RAknKeyLock16IsKeyLockEnabledEv` is exported from `avkon.dso` — grepped, not assumed. Its own
+header says it answers ETrue when the keys are locked *or* the phone is in autolock, which for a
+caller is one fact: the phone is in a pocket.
+
+It costs **no new import**: avkon is already in the base library set of every GUI build, and the
+launcher's binary confirms it — 16 DLLs before and after, avkon among them, with one more ordinal.
+It does need a control environment, so a headless daemon cannot ask; the pattern is for the
+application to read it and tell its daemons.
+
+Why it matters more than it sounds: "am I in the foreground" is not a stop signal for a home screen,
+because a home screen is foreground by definition and the keyguard does not take that away. This is
+the one state that says nobody is looking.
+
 ## What the ROM patch does not do, and the app it killed
 
 **A patched installserver lifts the *ceiling*; it does not hand a process capabilities its image

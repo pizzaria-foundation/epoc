@@ -582,6 +582,12 @@ if [ "${USE_SHIM:-0}" = 1 ] || [ "${USE_SHIM_DAEMON:-0}" = 1 ]; then
       shim_sql.cpp)
         [ "${USE_SQL:-0}" = 1 ] || continue
         ;;
+      # Is the keypad locked (RAknKeyLock). Avkon is already in the base library set, so this adds
+      # no import — gated so a binary that never asks does not carry the session. Needs a control
+      # environment: a headless daemon cannot use it and is told by whoever can.
+      shim_keylock.cpp)
+        [ "${USE_KEYLOCK:-0}" = 1 ] || continue
+        ;;
       # Free-RAM and own-heap readings, for an app that watches its own footprint.
       shim_mem.cpp)
         [ "${USE_MEM:-0}" = 1 ] || continue

@@ -709,6 +709,10 @@ int32_t shim_app_kill(uint32_t uid3);
 /* Ask the app to close (TApaTask::EndTask). No capability; an app that ignores it stays. This is
  * the one to use — shim_app_kill faults the caller without PowerMgmt, measured. */
 int32_t shim_app_end(uint32_t uid3);
+
+/* 1 when the keypad is locked (or the phone is in autolock), 0 when it is not, negative on error —
+ * SHIM_ERR_NOT_READY without a control environment. USE_KEYLOCK. */
+int32_t shim_keylock(void);
 /* List the UID3s of running apps (window-server task list, front-to-back), deduped, up to `cap`.
  * Returns the count written, or a negative error / SHIM_ERR_NOT_READY. */
 int32_t shim_apps_running(uint32_t* out, int32_t cap);

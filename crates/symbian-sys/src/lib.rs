@@ -922,6 +922,13 @@ extern "C" {
     /// was closed from its task switcher. This posts a close event instead: no capability, and an
     /// application that ignores it simply stays.
     pub fn shim_app_end(uid3: u32) -> i32;
+    /// `1` when the keypad is locked (or the phone is in autolock), `0` when it is not, negative on
+    /// error — [`SHIM_ERR_NOT_READY`] in a process with no control environment.
+    ///
+    /// `RAknKeyLock::IsKeyLockEnabled`, out of avkon, which every GUI build already links. The
+    /// Publish&Subscribe route every write-up names is not available: those keys are not defined on
+    /// this handset (read over the remote shell, they answer `KErrNotFound`).
+    pub fn shim_keylock() -> i32;
     /// List running apps' UID3s (window-server task list, front-to-back), up to `cap`. Returns the
     /// count written, or a negative error / [`SHIM_ERR_NOT_READY`].
     pub fn shim_apps_running(out: *mut u32, cap: i32) -> i32;
@@ -1531,6 +1538,9 @@ mod host_stubs {
         SHIM_ERR_NOT_READY
     }
     pub unsafe fn shim_app_end(_uid3: u32) -> i32 {
+        SHIM_ERR_NOT_READY
+    }
+    pub unsafe fn shim_keylock() -> i32 {
         SHIM_ERR_NOT_READY
     }
     pub unsafe fn shim_apps_running(_out: *mut u32, _cap: i32) -> i32 {
