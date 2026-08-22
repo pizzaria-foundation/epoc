@@ -198,6 +198,26 @@ pub mod hal_attr {
     pub const DISPLAY_Y_PIXELS: i32 = 32;
 }
 
+/// Publish&Subscribe address the home screen publishes the keypad lock on, for the processes that
+/// cannot read it themselves.
+///
+/// [`keylock`] needs a control environment, so a headless daemon can never ask — but "the phone is in
+/// a pocket" is exactly what a poller wants to know. So the application that *can* ask writes the
+/// answer here, and a daemon reads an integer.
+///
+/// The category is the launcher's, shared with [`crate::intent`], [`crate::agenda`] and
+/// [`crate::daily`]; keys 100–104 are taken, so this is 105. Non-zero means locked. A key that has
+/// never been written reads as an error, which callers must treat as *unlocked* — a stop signal
+/// nobody publishes must not stop anything.
+pub const LOCK_CATEGORY: u32 = crate::intent::CATEGORY;
+pub const LOCK_KEY: u32 = 105;
+
+/// Publish the keypad lock for the daemons. Define-then-set, so whichever side runs first creates it.
+pub fn publish_keylock(locked: bool) -> Result<()> {
+    let _ = crate::prop::define_public(LOCK_CATEGORY, LOCK_KEY);
+    crate::prop::set(LOCK_CATEGORY, LOCK_KEY, locked as i32)
+}
+
 /// Whether the keypad is locked — or the phone is in autolock, which for a caller is the same fact.
 ///
 /// # What this is for

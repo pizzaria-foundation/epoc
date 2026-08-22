@@ -40,6 +40,17 @@ impl Backoff {
         self.base.saturating_add(jitter_ms.max(0))
     }
 
+    /// The delay to arm when something says "stop bothering": the ceiling, and the interval after it
+    /// stays there.
+    ///
+    /// Not the same as letting the doubling get there on its own — from the base that takes five
+    /// steps and about ten minutes, which is ten minutes of a phone in a pocket being asked
+    /// questions. A caller with a *reason* (the keypad is locked) can say so directly.
+    pub fn on_hold(&mut self) -> i32 {
+        self.current = self.max;
+        self.max
+    }
+
     /// The interval that will be armed next (before doubling). For tests and diagnostics.
     pub fn current(&self) -> i32 {
         self.current
@@ -70,6 +81,9 @@ pub struct BackoffPoller {
     /// The launcher activity property to follow (a change resets the cadence).
     cat: u32,
     key: u32,
+    /// A property that means "nobody is looking; go to the ceiling and stay there" while it reads
+    /// non-zero. `None` for a poller that has no such signal. See [`BackoffPoller::with_hold`].
+    hold: Option<(u32, u32)>,
     jitter_ms: i32,
 }
 
@@ -83,7 +97,31 @@ impl BackoffPoller {
             armed_ms: 0,
             cat: activity_cat,
             key: activity_key,
+            hold: None,
             jitter_ms,
+        }
+    }
+
+    /// Follow a *hold* property as well: while it reads non-zero, every tick arms the ceiling and the
+    /// daemon's work is skipped entirely.
+    ///
+    /// What this is for: the keypad lock, published by the home screen at
+    /// [`crate::device::LOCK_KEY`] because a headless daemon cannot read it itself. Without it a
+    /// locked phone still gets five doublings' worth of polls — about ten minutes — before the
+    /// cadence reaches the ceiling it was always going to reach.
+    ///
+    /// A hold that cannot be read counts as *not held*: an unwritten key answers with an error, and
+    /// a stop signal nobody publishes must never be the thing that stops a daemon.
+    pub const fn with_hold(mut self, category: u32, key: u32) -> Self {
+        self.hold = Some((category, key));
+        self
+    }
+
+    /// Whether the hold property currently says "nobody is looking".
+    fn held(&self) -> bool {
+        match self.hold {
+            Some((cat, key)) => crate::prop::get(cat, key).unwrap_or(0) != 0,
+            None => false,
         }
     }
 
@@ -91,6 +129,12 @@ impl BackoffPoller {
     /// daemon's initial publish.
     pub fn start(&mut self) {
         let _ = crate::prop::subscribe(self.cat, self.key);
+        // The hold as well, so *releasing* it wakes the daemon rather than leaving it asleep until
+        // the ceiling expires — the difference between "unlocks and the count is right" and "unlocks
+        // and the count is right in up to five minutes".
+        if let Some((cat, key)) = self.hold {
+            let _ = crate::prop::subscribe(cat, key);
+        }
         let delay = self.backoff.on_tick();
         self.arm(delay);
     }
@@ -98,17 +142,26 @@ impl BackoffPoller {
     /// Feed every raw event. Returns `true` when the daemon should publish now — a backoff timer fired
     /// or the foreground bumped the activity property — having already armed the next timer.
     pub fn poll(&mut self, ev: &symbian_sys::ShimEvent) -> bool {
-        if ev.kind == symbian_sys::SHIM_EV_TIMER && Some(ev.handle) == self.ticker {
-            let delay = self.backoff.on_tick();
-            self.arm(delay);
-            true
-        } else if ev.kind == symbian_sys::SHIM_EV_PROP {
-            let delay = self.backoff.on_reset(self.jitter());
-            self.arm(delay);
-            true
-        } else {
-            false
+        let ours = ev.kind == symbian_sys::SHIM_EV_TIMER && Some(ev.handle) == self.ticker;
+        let prop = ev.kind == symbian_sys::SHIM_EV_PROP;
+        if !ours && !prop {
+            return false;
         }
+        // Held: arm the ceiling and answer `false`, so the daemon does *nothing* — the point is to
+        // not open the message store or wake the modem for a phone in a pocket. The wake itself is a
+        // timer and one P&S read, five minutes apart.
+        //
+        // Checked on a property change too, because the change that matters most is the hold being
+        // *set*: a poller that reset to base first and only noticed on the next tick would spend one
+        // more base interval before going quiet.
+        if self.held() {
+            let delay = self.backoff.on_hold();
+            self.arm(delay);
+            return false;
+        }
+        let delay = if ours { self.backoff.on_tick() } else { self.backoff.on_reset(self.jitter()) };
+        self.arm(delay);
+        true
     }
 
     /// Shorten the pending sleep to at most `ms`, without disturbing the backoff.
@@ -193,6 +246,20 @@ mod tests {
         assert_eq!(b.on_reset(3), 13, "base 10 + jitter 3");
         assert_eq!(b.on_tick(), 20, "doubling resumes from base, not from base+jitter");
         assert_eq!(b.on_tick(), 40);
+    }
+
+    /// A hold goes straight to the ceiling and stays, which is the whole difference from letting the
+    /// doubling arrive there: five steps and about ten minutes of polling a phone in a pocket.
+    #[test]
+    fn a_hold_arms_the_ceiling_and_stays_there() {
+        let mut b = Backoff::new(15, 300);
+        b.on_tick();
+        assert_eq!(b.on_hold(), 300, "the ceiling, now");
+        assert_eq!(b.on_tick(), 300, "and the tick after it is still the ceiling");
+
+        // And a reset still works afterwards — releasing the hold is what that reset is.
+        assert_eq!(b.on_reset(0), 15);
+        assert_eq!(b.on_tick(), 30, "doubling resumes from base");
     }
 
     #[test]
