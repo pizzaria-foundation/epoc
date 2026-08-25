@@ -964,6 +964,13 @@ macro_rules! entry {
                             if foreground {
                                 force_full = true;
                             }
+                            // And the app hears it. Skipping the draw is all *this* loop can
+                            // decide; whether a socket, a timer or a poll should still be
+                            // running while nobody is looking is the application's policy,
+                            // and until now no app could even ask. The return is ignored
+                            // because `dirty` is already settled above.
+                            let raw = $crate::to_raw_event(&ev);
+                            let _ = app.handle_raw(&raw);
                         }
                         $crate::symbian_sys::SHIM_EV_QUIT => {
                             unsafe { $crate::symbian_sys::shim_request_exit() };
