@@ -248,6 +248,20 @@ pub struct PkgScreen {
     /// means asked and there was nothing — and the screen says which, because "no log" and "a log
     /// that is empty" are different answers about whether the application ever ran.
     log: Option<String>,
+    /// Whether the update scan has run yet.
+    ///
+    /// It is deferred by a millisecond so the screen appears before a 400 ms scan of every `.sis`
+    /// on the handset — and with two tabs that was invisible, because only Available changed. With
+    /// one list it is not: the rows are sorted by urgency, so the scan landing *reorders them*, and
+    /// what a person sees is a list that rearranges itself under the cursor a moment after opening.
+    ///
+    /// So the list waits. One transition, from "looking" to the answer, instead of a list that
+    /// shuffles — and the pause it costs is the same 400 ms that was already being spent.
+    ///
+    /// **True by default**, and the inversion is deliberate: being handed data means somebody
+    /// looked. Only a caller that defers says otherwise, and there is one — everything else
+    /// (previews, harnesses, tests) would have had to learn a step that has nothing to do with it.
+    scanned: bool,
     /// Which of [`Self::versions_of`] the open sheet is showing, newest at 0. Left and Right step
     /// it, and Install acts on it — so the arrows are not a way to browse, they are how you choose
     /// what gets installed.
@@ -282,6 +296,7 @@ impl PkgScreen {
             sheet: None,
             sheet_uid: 0,
             log: None,
+            scanned: true,
             sheet_pick: 0,
             menu: None,
             prompt: None,
@@ -292,6 +307,12 @@ impl PkgScreen {
     }
 
     /// Hand it fresh data. Called after anything the application did on the screen's behalf.
+    ///
+    /// The cursor is kept on the **package** rather than on the row number. New data reorders the
+    /// list — that is what sorting by urgency means — and a cursor that stayed on row 3 would be
+    /// pointing at a different package than the one somebody was looking at. It has to be read
+    /// before the data changes and put back after, because the row number is only meaningful
+    /// against the list it came from.
     pub fn refresh(
         &mut self,
         pkgs: PkgDb,
@@ -300,11 +321,21 @@ impl PkgScreen {
         repos: RepoDb,
         queue: Queue,
     ) {
+        let anchor =
+            (self.section() == TAB_PACKAGES).then(|| self.rows().get(self.list.selected).map(|r| r.uid3)).flatten();
         self.pkgs = pkgs;
         self.cands = cands;
         self.cat = cat;
         self.repos = repos;
         self.queue = queue;
+        self.scanned = true;
+        if let Some(uid) = anchor {
+            // Gone from the list entirely — uninstalled while the screen was open — leaves the
+            // cursor where it was, which is the least surprising of the wrong answers.
+            if let Some(i) = self.rows().iter().position(|r| r.uid3 == uid) {
+                self.list.selected = i;
+            }
+        }
     }
 
     /// The request the screen wants performed. Consumed: an action happens once.
@@ -840,6 +871,17 @@ impl PkgScreen {
 
         self.sheet_uid = p.uid3;
         self.sheet = Some(s);
+    }
+
+    /// Say the scan has not run yet, so the list waits instead of drawing a half-answer.
+    ///
+    /// Separate from handing the candidates in, because "no candidates" and "not looked yet" are
+    /// different states that produce the same empty `Vec` — and drawing "nothing here" at a handset
+    /// that has not looked would be a lie with a 400 ms shelf life.
+    ///
+    /// [`Self::refresh`] clears it: fresh data is the answer this was waiting for.
+    pub fn mark_scanning(&mut self) {
+        self.scanned = false;
     }
 
     /// Hand back what [`PkgRequest::ShowLog`] asked for. An empty string is an answer, not a
@@ -1413,6 +1455,10 @@ impl PkgScreen {
         );
         self.tabs.draw(c, tabstrip, theme, &TABS);
 
+        if self.section() == TAB_PACKAGES && !self.scanned {
+            chrome::placeholder(c, content, theme, "Looking for packages\u{2026}");
+            return;
+        }
         let lines = self.lines();
         if lines.is_empty() {
             chrome::placeholder(c, content, theme, self.empty_text());
@@ -1753,6 +1799,47 @@ mod tests {
         // the label doing its job: the same key means fetch or install depending on where the
         // version on show lives.
         assert_eq!(s.sheet.as_ref().unwrap().action_label(), Some("Get"));
+    }
+
+    #[test]
+    fn the_list_waits_rather_than_rearranging_itself_a_moment_later() {
+        // The handset said it: "it loads badly — it comes one way and then becomes another". The
+        // scan is deferred so the screen opens fast, and with two tabs that was invisible because
+        // only Available changed. Sorted by urgency in one list it is not: the scan landing moves
+        // every row.
+        let mut s = screen();
+        s.mark_scanning();
+        let looking = draw(&mut s);
+        s.refresh(
+            pkgs(),
+            vec![cand(LAUNCHER, (0, 2, 0), "launcher-0.2.0.sisx")],
+            cat(),
+            repos(),
+            Queue::default(),
+        );
+        let answered = draw(&mut s);
+        assert_ne!(looking, answered, "the wait draws something, and it is not the list");
+
+        // And a screen simply handed its data never waits — being given rows means somebody looked.
+        let plain = screen();
+        assert!(plain.scanned);
+    }
+
+    #[test]
+    fn a_refresh_keeps_the_cursor_on_the_package_and_not_on_the_row_number() {
+        // New data reorders the list, which is what sorting by urgency means. A cursor that stayed
+        // on row 1 would be pointing at a different package than the one being read.
+        let mut s = screen();
+        press(&mut s, Key::Down);
+        let before = s.rows()[s.list.selected].uid3;
+        s.refresh(
+            pkgs(),
+            vec![cand(LAUNCHER, (0, 2, 0), "launcher-0.2.0.sisx")],
+            cat(),
+            repos(),
+            Queue::default(),
+        );
+        assert_eq!(s.rows()[s.list.selected].uid3, before, "the cursor followed the package");
     }
 
     #[test]
