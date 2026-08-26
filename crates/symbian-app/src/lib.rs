@@ -135,6 +135,30 @@ static UI_SMALL: &[u8] = include_bytes!("../../symbian-ui/assets/ui9.sbf");
 /// timestamps and delivery ticks.
 static UI_EMOJI: &[u8] = include_bytes!("../../symbian-ui/assets/uiemoji11.sbf");
 
+/// The atlas bytes the device theme is built from.
+///
+/// Public because a `Theme` cannot cross a thread boundary — it borrows the `BitmapFont`s that
+/// borrow these — and the browser's page layout runs on the **worker thread**, where it still has to
+/// measure text. The bytes are `'static`, so a worker can build its own fonts from them and no
+/// borrow escapes the thread that made it.
+///
+/// Roles, not sizes: `BODY`/`STRONG`/`SMALL` are what [`with_theme`] means by those words, and a
+/// caller that picks a file by name instead would drift from the toolkit the first time either
+/// changed.
+/// Which palette this phone's applications use. See the module docs.
+pub mod theme_pref;
+
+pub mod atlas {
+    /// Body text. `ui11`.
+    pub const BODY: &[u8] = super::UI_BODY;
+    /// Emphasis, and what the title bar uses. `ui11b`.
+    pub const STRONG: &[u8] = super::UI_STRONG;
+    /// Smaller than body. `ui9`.
+    pub const SMALL: &[u8] = super::UI_SMALL;
+    /// Chained behind body and strong. Metrics always come from the text atlas.
+    pub const EMOJI: &[u8] = super::UI_EMOJI;
+}
+
 /// Build a theme and hand it to `f`.
 ///
 /// A closure rather than a return value because `Theme` borrows its font atlases, so it
@@ -217,14 +241,19 @@ static mut KEYBOARD: symbian_keys::Keyboard =
 /// wrong guess here types the wrong character, which is the kind of bug that gets blamed
 /// on the app for weeks.
 pub fn set_keyboard_layout(layout: symbian_keys::Layout) {
+    // Through a raw pointer rather than `&mut KEYBOARD`, because taking a reference to a mutable
+    // static is what `static_mut_refs` exists to stop; the pointer is bound first so the `&raw`
+    // and the `*` are not adjacent, which is all clippy's `deref_addrof` is looking at.
+    let kb = &raw mut KEYBOARD;
     // SAFETY: single-threaded; every caller is the GUI thread via the shim.
-    unsafe { (*(&raw mut KEYBOARD)).set_layout(layout) }
+    unsafe { (*kb).set_layout(layout) }
 }
 
 /// Translate one shim event using the process keyboard. What the event pump calls.
 pub fn translate_keys(e: &sys::ShimEvent) -> KeyEvents {
+    let kb = &raw mut KEYBOARD;
     // SAFETY: single-threaded; every caller is the GUI thread via the shim.
-    to_key_events(unsafe { &mut *(&raw mut KEYBOARD) }, e)
+    to_key_events(unsafe { &mut *kb }, e)
 }
 
 /// Translate one shim event into toolkit key events, advancing the given keyboard's
@@ -248,6 +277,7 @@ pub fn to_key_events(kb: &mut symbian_keys::Keyboard, e: &sys::ShimEvent) -> Key
         shift: e.b & sys::modifier::SHIFT != 0,
         ctrl: e.b & sys::modifier::CTRL != 0,
         func: e.b & sys::modifier::FUNC != 0,
+        func_held: e.b & sys::modifier::FUNC_HELD != 0,
     };
     let repeat = e.c > 0;
     let one = |key| [Some(KeyEvent { key, mods, repeat }), None];
@@ -353,12 +383,13 @@ impl symbian_ui::Clipboard for SystemClipboard {
 fn host_clip(set: Option<&str>) -> Option<alloc::string::String> {
     use alloc::string::ToString;
     static mut CLIP: Option<alloc::string::String> = None;
+    let clip = &raw const CLIP;
     // SAFETY: single-threaded, GUI thread only — the same rule the keyboard state above follows.
     unsafe {
         if let Some(text) = set {
             CLIP = Some(text.to_string());
         }
-        (*(&raw const CLIP)).clone()
+        (*clip).clone()
     }
 }
 
@@ -1160,12 +1191,13 @@ mod tests {
     }
 
     fn char_event(c: char) -> sys::ShimEvent {
-        let mut ev = sys::ShimEvent::default();
-        ev.kind = sys::SHIM_EV_KEY_CHAR;
-        ev.a = c as i32;
-        // A scan code no layout claims, so the character in `a` is what is used.
-        ev.d = 0x0F01;
-        ev
+        sys::ShimEvent {
+            kind: sys::SHIM_EV_KEY_CHAR,
+            a: c as i32,
+            // A scan code no layout claims, so the character in `a` is what is used.
+            d: 0x0F01,
+            ..Default::default()
+        }
     }
 
     #[test]
@@ -1184,9 +1216,7 @@ mod tests {
             (sys::key::SOFT_LEFT, Key::Softkey(Softkey::Left)),
             (sys::key::SOFT_RIGHT, Key::Softkey(Softkey::Right)),
         ] {
-            let mut ev = sys::ShimEvent::default();
-            ev.kind = sys::SHIM_EV_KEY_DOWN;
-            ev.a = id;
+            let ev = sys::ShimEvent { kind: sys::SHIM_EV_KEY_DOWN, a: id, ..Default::default() };
             assert_eq!(only(&mut plain(), &ev).unwrap().key, want);
         }
     }
@@ -1195,9 +1225,7 @@ mod tests {
     fn an_unknown_key_id_survives_as_raw() {
         // Rather than being dropped. A silently discarded key is how the E72's Fn key
         // stayed invisible through two rounds of on-device debugging.
-        let mut ev = sys::ShimEvent::default();
-        ev.kind = sys::SHIM_EV_KEY_DOWN;
-        ev.a = 0x4242;
+        let ev = sys::ShimEvent { kind: sys::SHIM_EV_KEY_DOWN, a: 0x4242, ..Default::default() };
         assert_eq!(only(&mut plain(), &ev).unwrap().key, Key::Raw(0x4242));
     }
 
@@ -1211,12 +1239,13 @@ mod tests {
 
     /// Ctrl+`letter` as the handset sends it: the control character, with the Ctrl bit set.
     fn ctrl_event(letter: char) -> sys::ShimEvent {
-        let mut ev = sys::ShimEvent::default();
-        ev.kind = sys::SHIM_EV_KEY_DOWN;
-        ev.a = (letter as i32) - 0x60;
-        ev.b = sys::modifier::CTRL;
-        ev.d = 0x0F01;
-        ev
+        sys::ShimEvent {
+            kind: sys::SHIM_EV_KEY_DOWN,
+            a: (letter as i32) - 0x60,
+            b: sys::modifier::CTRL,
+            d: 0x0F01,
+            ..Default::default()
+        }
     }
 
     #[test]
@@ -1252,10 +1281,12 @@ mod tests {
     fn ctrl_with_a_key_that_is_not_a_letter_is_left_alone() {
         // Only letters are chords. An arrow with Ctrl held is still an arrow, and inventing
         // Key::Ctrl for it would take the key away from the screen that wanted it.
-        let mut ev = sys::ShimEvent::default();
-        ev.kind = sys::SHIM_EV_KEY_DOWN;
-        ev.a = sys::key::DOWN;
-        ev.b = sys::modifier::CTRL;
+        let ev = sys::ShimEvent {
+            kind: sys::SHIM_EV_KEY_DOWN,
+            a: sys::key::DOWN,
+            b: sys::modifier::CTRL,
+            ..Default::default()
+        };
         let k = only(&mut plain(), &ev).unwrap();
         assert_eq!(k.key, Key::Down);
         assert!(k.mods.ctrl, "the modifier still rides along for whoever wants it");
@@ -1264,8 +1295,7 @@ mod tests {
     #[test]
     fn non_key_events_do_not_translate() {
         for kind in [sys::SHIM_EV_REDRAW, sys::SHIM_EV_RESIZE, sys::SHIM_EV_TIMER] {
-            let mut ev = sys::ShimEvent::default();
-            ev.kind = kind;
+            let ev = sys::ShimEvent { kind, ..Default::default() };
             assert!(only(&mut plain(), &ev).is_none(), "kind {kind} should not be a key");
         }
     }
@@ -1276,10 +1306,12 @@ mod tests {
         // Turning it into U+FFFD would put a visible box in someone's message; dropping
         // it loses one keystroke of a character that cannot be typed on this keyboard
         // anyway.
-        let mut ev = sys::ShimEvent::default();
-        ev.kind = sys::SHIM_EV_KEY_CHAR;
-        ev.a = 0xD800;
-        ev.d = 0x0F01;
+        let ev = sys::ShimEvent {
+            kind: sys::SHIM_EV_KEY_CHAR,
+            a: 0xD800,
+            d: 0x0F01,
+            ..Default::default()
+        };
         assert!(only(&mut plain(), &ev).is_none());
     }
 
@@ -1323,10 +1355,7 @@ mod tests {
     #[test]
     fn backspace_clears_a_pending_accent_and_an_arrow_does_not() {
         let named = |id| {
-            let mut ev = sys::ShimEvent::default();
-            ev.kind = sys::SHIM_EV_KEY_DOWN;
-            ev.a = id;
-            ev
+            sys::ShimEvent { kind: sys::SHIM_EV_KEY_DOWN, a: id, ..Default::default() }
         };
 
         let mut kb = plain();
