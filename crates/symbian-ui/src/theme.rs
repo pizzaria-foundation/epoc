@@ -28,6 +28,15 @@ pub struct Metrics {
     pub softkey_h: i32,
     /// Uniform height of a dialog-style list row.
     pub row_h: i32,
+    /// A tab strip's height.
+    ///
+    /// A metric and not a font measurement, because a view is built before there is a theme to ask
+    /// — `settings_decl` computes its bands from `Metrics::default()` alone — and two sides that
+    /// derive one height by two routes are two sides that drift.
+    ///
+    /// Shorter than `title_h` on purpose: it was `title_h + pad` in one screen and `row_h` in
+    /// another, which is the height of a title bar and of a list row, for a line of small text.
+    pub tab_h: i32,
     /// Side padding for content that is not a list row.
     pub pad: i32,
     /// Corner radius for bubbles and buttons.
@@ -50,6 +59,7 @@ impl Default for Metrics {
             title_h: 18,
             softkey_h: 17,
             row_h: 38,
+            tab_h: 20,
             pad: 5,
             radius: 6,
             scrollbar_w: 4,

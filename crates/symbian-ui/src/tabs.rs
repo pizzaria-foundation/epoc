@@ -64,12 +64,14 @@ impl Tabs {
     /// rest are flat chrome. `r` is usually the strip just below the title bar.
     /// How tall a strip wants to be.
     ///
-    /// One function because two callers were each computing `title_h + pad`, which is the height of
-    /// a *title bar* and not of a row of labels. A strip is small text and a little air: on a
-    /// 240-pixel screen the old number spent 29 of them on seven words, and the ten it gives back
-    /// are a whole extra row of content.
+    /// One function because three callers were each computing their own — `title_h + pad` twice and
+    /// `row_h` once, which are the heights of a title bar and of a list row, for a line of small
+    /// text. On a 240-pixel screen the old numbers spent 29 and 38 pixels on seven words.
+    ///
+    /// It reads [`Metrics::tab_h`] rather than measuring the font, so a view built before there is
+    /// a theme gets the same answer — see the field.
     pub fn height(theme: &Theme<'_>) -> i32 {
-        theme.fonts.small.line_height() + theme.metrics.pad + 2
+        theme.metrics.tab_h
     }
 
     pub fn draw(&self, c: &mut Canvas<'_>, r: Rect, theme: &Theme<'_>, labels: &[&str]) {
