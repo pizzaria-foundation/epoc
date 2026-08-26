@@ -14,10 +14,10 @@ unknown rather than several.
 
 What it prints is chosen for reading from across the room while holding a phone:
 
-    18:42:03  connect 192.168.15.74:49213
+    18:42:03  connect 192.168.1.10:49213
     18:42:03    recv 12  "hello from E7"
     18:42:03    sent 12
-    18:42:09  close  192.168.15.74:49213  (12 bytes each way)
+    18:42:09  close  192.168.1.10:49213  (12 bytes each way)
 
 The greeting is the other half of a real test. A server that only echoes proves the
 phone can send *and then* receive; one that speaks first also proves the client issues a

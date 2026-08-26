@@ -42,7 +42,7 @@ use symbian_sys as sys;
 use symbian_ui::{chrome, App, Canvas, Handled, Key, KeyEvent, RawEvent, Rect, Softkey, Theme};
 
 /// Where `tools/echo.py` listens. Change and rebuild.
-const ECHO_ADDR: Ipv4 = Ipv4::new(192, 168, 15, 74);
+const ECHO_ADDR: Ipv4 = Ipv4::new(192, 168, 1, 10);
 const ECHO_PORT: u16 = 7654;
 const HTTP_HOST: &str = "example.com";
 /* A literal address for the same host, used when the lookup fails.

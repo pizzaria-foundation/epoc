@@ -118,7 +118,7 @@ let mut bearer = Bearer::start(&mut net, saved_iap)?;
 persist(bearer.iap());
 
 let mut sock = TcpStream::open(&mut net, &bearer, 512, 256)?;
-sock.connect(&mut net, Ipv4::new(192, 168, 15, 74), 7654)?;
+sock.connect(&mut net, Ipv4::new(192, 168, 1, 10), 7654)?;
 
 // From App::handle_raw, with the event passed through unchanged:
 match sock.on_event(&mut net, ev) {

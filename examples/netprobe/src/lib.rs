@@ -39,7 +39,7 @@ use symbian_ui::{
 /// Hardcoded rather than typed in on the phone: an address entry screen is more code
 /// than the test it serves, and getting it wrong is diagnosable because the probe prints
 /// what it tried.
-const ECHO_ADDR: Ipv4 = Ipv4::new(192, 168, 15, 74);
+const ECHO_ADDR: Ipv4 = Ipv4::new(192, 168, 1, 10);
 const ECHO_PORT: u16 = 7654;
 
 /// Plain HTTP on purpose. There is no TLS here — `libssl` exists only on handsets with
@@ -922,9 +922,9 @@ mod tests {
     fn addresses_format_as_dotted_quad() {
         let mut log = Log::new();
         log.push(|w| {
-            w.ip(Ipv4::new(192, 168, 15, 74));
+            w.ip(Ipv4::new(192, 168, 1, 10));
         });
-        assert_eq!(log.line(0), "192.168.15.74");
+        assert_eq!(log.line(0), "192.168.1.10");
     }
 
     #[test]
@@ -970,7 +970,7 @@ mod tests {
             // A full log, so the drawing loop runs at its widest rather than with one line.
             for i in 0..LOG_CAP + 2 {
                 app.log.push(|w| {
-                    w.s("line ").n(i as i64).s(" 192.168.15.74:7654 recv 64");
+                    w.s("line ").n(i as i64).s(" 192.168.1.10:7654 recv 64");
                 });
             }
             app.work_running = true;

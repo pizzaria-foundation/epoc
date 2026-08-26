@@ -913,7 +913,7 @@ mod tests {
 
     #[test]
     fn dotted_quad_parses_and_round_trips() {
-        assert_eq!(Ipv4::parse("192.168.15.74"), Some(Ipv4::new(192, 168, 15, 74)));
+        assert_eq!(Ipv4::parse("192.168.1.10"), Some(Ipv4::new(192, 168, 1, 10)));
         assert_eq!(Ipv4::parse("0.0.0.0"), Some(Ipv4::new(0, 0, 0, 0)));
         assert_eq!(Ipv4::parse("255.255.255.255").unwrap().octets(), [255, 255, 255, 255]);
     }
