@@ -1185,11 +1185,15 @@ impl PkgScreen {
         } else {
             String::new()
         };
+        // "Store" up here and "Packages" on the tab, and the two are not a slip. The title names the
+        // *place* — it is what the second menu icon opens and what a person came here for — while the
+        // tab names one of three lists inside it, beside Repos and Downloads. A title that repeated
+        // its own first tab would spend the widest line on the screen saying nothing.
         chrome::title_bar(
             c,
             title,
             theme,
-            "Packages",
+            "Store",
             (!detail.is_empty()).then_some(detail.as_str()),
         );
         self.tabs.draw(c, tabstrip, theme, &TABS);
