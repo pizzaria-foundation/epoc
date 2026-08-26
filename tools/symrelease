@@ -183,13 +183,30 @@ fi
 # rather than with a version number half-applied. The tree was verified clean above, which is what
 # makes `git checkout --` a safe undo rather than a destructive one.
 
+# One path per `git checkout`, because the command is all-or-nothing: asked for two files where
+# one is untracked it restores neither, and the `|| true` that keeps the trap alive would hide it.
+# Found by the first dry run, which left VERSION saying a version that had not been released.
+#
+# The built packages go too. They are the reason for the whole script — a .sis carries the version
+# it was built with, so an aborted release that left one on disk would have produced exactly the
+# artefact this exists to prevent: a package claiming a version nothing ever released, ready to be
+# sideloaded by hand. `build/` is regenerable and gitignored, so deleting is free.
 restore() {
-  git checkout -- VERSION CHANGELOG.md 2>/dev/null || true
+  [ "$HAD_CHANGELOG" = 0 ] && rm -f CHANGELOG.md
+  git checkout -- VERSION 2>/dev/null || rm -f VERSION
+  git checkout -- CHANGELOG.md 2>/dev/null || true
   for app in $BUILD; do
     git checkout -- "$app/app.conf" 2>/dev/null || true
   done
-  rm -f "$NOTES" 2>/dev/null || true
+  for f in $SHIP; do
+    rm -f "$f" 2>/dev/null || true
+  done
+  rm -f "$NOTES" "$NOTES.body" 2>/dev/null || true
 }
+# Whether the file existed before this run decides whether restoring means "put it back" or
+# "delete it" — `git checkout` cannot undo the creation of a file it never tracked.
+HAD_CHANGELOG=0
+[ -f CHANGELOG.md ] && HAD_CHANGELOG=1
 NOTES="$(mktemp)"
 trap 'restore' ERR INT TERM
 
