@@ -1,6 +1,7 @@
 //! Horizontal tabs — the strip S60 puts across the top of a settings dialog, switched with
 //! Left/Right. A plain struct that owns only the active index; the labels are the caller's (this
-//! crate ships no text), and the active tab is drawn with the same rounded-top band S60 used.
+//! crate ships no text), and the active tab is drawn as the page rising into the strip — see
+//! [`Tabs::draw`] for why that is not the same as highlighting it.
 //!
 //! It is a *strip*, not a container: it does not own the tabs' contents. A screen holds a `Tabs`
 //! plus one piece of state per tab, routes Left/Right to `handle_key`, and draws the content of
@@ -61,12 +62,21 @@ impl Tabs {
     /// Draw the strip across `r`, one equal-width cell per label. The active tab gets the rounded-top
     /// band ([`paint::band_top_rounded`], the S60 active-tab shape) in the selection surface; the
     /// rest are flat chrome. `r` is usually the strip just below the title bar.
+    /// How tall a strip wants to be.
+    ///
+    /// One function because two callers were each computing `title_h + pad`, which is the height of
+    /// a *title bar* and not of a row of labels. A strip is small text and a little air: on a
+    /// 240-pixel screen the old number spent 29 of them on seven words, and the ten it gives back
+    /// are a whole extra row of content.
+    pub fn height(theme: &Theme<'_>) -> i32 {
+        theme.fonts.small.line_height() + theme.metrics.pad + 2
+    }
+
     pub fn draw(&self, c: &mut Canvas<'_>, r: Rect, theme: &Theme<'_>, labels: &[&str]) {
         if r.is_empty() || labels.is_empty() {
             return;
         }
         let p = &theme.palette;
-        let bg = p.bg.mid();
         let cells = labels.len() as i32;
         let step = r.width() / cells;
         let mut x = r.x0;
@@ -78,11 +88,28 @@ impl Tabs {
 
             let active = i == self.active;
             if active {
-                paint::band_top_rounded(c, cell, &p.selection, theme.metrics.radius, bg);
+                // **The page, not the selection colour.** A tab is the content coming up to meet
+                // the strip, and drawing it that way is what makes it read as a tab rather than as
+                // a highlighted button.
+                //
+                // It used to use `p.selection`, which works in the built-in palettes and works *by
+                // accident*: their accent is a different hue from their chrome, so the two read
+                // apart. A palette derived from a phone's own theme has no such luck — measured on
+                // this handset's pink theme, chrome is `#cfb0b7` and selection `#98767e`: the same
+                // mauve, one darker. Fifty-eight of luma and nothing else, which a person reads as
+                // "slightly different" rather than as "this one".
+                //
+                // Against the page it is a different *surface*, and that survives any palette.
+                paint::band_top_rounded(c, cell, &p.bg, theme.metrics.radius, p.chrome.bottom);
             } else {
                 paint::band(c, cell, &p.chrome);
+                // A hairline along the bottom of every tab that is *not* active. It is what the
+                // active one is missing, and the gap in that line is the second signal — the one
+                // that still works when somebody's palette makes two surfaces nearly the same
+                // colour.
+                c.fill_rect(Rect::new(cell.x0, cell.y1 - 1, cell.x1, cell.y1), p.divider);
             }
-            let color = if active { p.selection_text } else { p.chrome_text };
+            let color = if active { p.text } else { p.chrome_text };
             c.draw_text_in(cell, label, theme.fonts.small, color, Align::Center);
         }
     }

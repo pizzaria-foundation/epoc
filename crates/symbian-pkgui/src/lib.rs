@@ -1202,7 +1202,7 @@ impl PkgScreen {
 
     fn regions(screen: Rect, theme: &Theme<'_>) -> (Rect, Rect, Rect, Rect) {
         let f = chrome::Frame::split(screen, theme, true, true);
-        let (tabs, content) = f.content.split_top(theme.metrics.row_h);
+        let (tabs, content) = f.content.split_top(symbian_ui::Tabs::height(theme));
         (f.title, content, tabs, f.softkeys)
     }
 
