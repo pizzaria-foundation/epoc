@@ -1,0 +1,17 @@
+[package]
+name = "symbian-layout"
+description = "Page layout for a 320px screen: a styled tree in, a resolved display list out"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+symbian-gfx = { workspace = true }
+
+# Host-only. The contact sheet and the parity round trip need a filesystem and a font atlas on
+# disk, neither of which exists on the device — keeping them here means neither reaches it.
+[dev-dependencies]
+symbian-preview = { workspace = true }
+symbian-ui = { workspace = true, features = ["testing"] }

@@ -285,6 +285,39 @@ impl Bearer {
         Ok(Bearer { handle, iap: saved, retried: saved.is_none(), up: false })
     }
 
+    /// Ask which access point, whatever was saved.
+    ///
+    /// The third recovery step, and the one the other constructors leave no room for. [`Bearer::start`]
+    /// prompts only when it has *nothing* saved, and its retry-with-a-prompt fires only when the
+    /// bearer itself fails. Neither covers the case that actually happens on a phone: a saved access
+    /// point that still connects and no longer carries traffic — the Wi-Fi you are joined to with no
+    /// route past it. The bearer comes up, name resolution answers `KErrDndNameNotFound`, and nothing
+    /// in the ladder ever asks the one question that would fix it.
+    ///
+    /// So this exists to be reached from a *transport* failure rather than a bearer one, and the
+    /// caller should forget the saved id when it does: an access point that cannot resolve a name is
+    /// not the one to try again next launch.
+    ///
+    /// `retried: true` — the reader has been asked, and asking twice in a row is not a recovery.
+    pub fn start_prompt<N: Net>(net: &mut N) -> Result<Self> {
+        let handle = net.net_start(Iap::Prompt)?;
+        Ok(Bearer { handle, iap: None, retried: true, up: false })
+    }
+
+    /// Bring up the **configured default** access point, without asking and without joining.
+    ///
+    /// The third strategy, and the one the other two leave no room for: [`Bearer::attach`] joins
+    /// whatever is already up and [`Bearer::start`] prompts when it has no saved id, so a caller
+    /// that wants "the phone's own default, silently" could not say so — [`Iap::Default`] existed
+    /// with nothing to reach it. A headless run needs exactly this: no dialog to answer and no
+    /// dependence on another process having a connection open.
+    ///
+    /// `retried: true`, because there is nothing to fall back to. A failure here is the answer.
+    pub fn start_default<N: Net>(net: &mut N) -> Result<Self> {
+        let handle = net.net_start(Iap::Default)?;
+        Ok(Bearer { handle, iap: None, retried: true, up: false })
+    }
+
     /// The access point in use, once up. Persist it — that is what makes the next run
     /// silent.
     pub fn iap(&self) -> Option<u32> {

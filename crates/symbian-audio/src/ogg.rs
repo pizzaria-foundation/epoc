@@ -488,8 +488,8 @@ mod tests {
 
         // 50 frames of 40 bytes each, spread over two pages.
         let frame = [0x5Au8; 40];
-        let lacing: Vec<u8> = core::iter::repeat(40u8).take(25).collect();
-        let body: Vec<u8> = core::iter::repeat(frame).take(25).flatten().collect();
+        let lacing: Vec<u8> = core::iter::repeat_n(40u8, 25).collect();
+        let body: Vec<u8> = core::iter::repeat_n(frame, 25).flatten().collect();
         data.extend_from_slice(&page(1, 2, false, &lacing, &body));
         data.extend_from_slice(&page(1, 3, false, &lacing, &body));
 

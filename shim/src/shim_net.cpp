@@ -730,6 +730,32 @@ TBool ConnIsUp(TInt aHandle)
 
 } /* namespace */
 
+/* The socket server handle and the RConnection for a bearer handle. See shim_priv.h.
+ *
+ * Both come from the same place the sockets in this file get them, which is the point: the HTTP
+ * stack ends up on the bearer this process negotiated and persisted, not on a second one it chose
+ * for itself. The "is it up" check is not defensive — RHTTPSession pointed at an RConnection that
+ * was never started reaches esock the same way an RSocket::Open does, and esock panics the client
+ * rather than returning an error. That failure mode is the one this file's iUp comment describes:
+ * the application disappears with no message and no report file. */
+TInt ShimNetBearer(TInt aNetHandle, TInt& aServHandle, TAny*& aConn)
+    {
+    RConnection* conn = ConnFor(aNetHandle);
+    if (!conn)
+        return KErrNotFound;
+    if (!ConnIsUp(aNetHandle))
+        return KErrNotReady;
+
+    RSocketServ* serv = NULL;
+    const TInt err = Serv(serv);
+    if (err != KErrNone)
+        return err;
+
+    aServHandle = serv->Handle();
+    aConn = conn;
+    return KErrNone;
+    }
+
 void ShimNetCleanup()
     {
     for (TInt i = 0; i < KMaxSockets; i++)

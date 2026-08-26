@@ -9,6 +9,60 @@
 //! Nothing here is safe. Safe wrappers belong a layer up; this crate exists so the
 //! unsafe surface is countable and in one file.
 //!
+//! # Safety
+//!
+//! Every function in this crate shares one contract, which is why each of them carries a
+//! one-line `# Safety` section pointing back here rather than a paragraph of its own: they
+//! are all the same door into the same C++ shim, and the invariants are properties of that
+//! door, not of any one function.
+//!
+//! * **Buffers are (pointer, length) pairs, and the length has to be the truth.** Strings
+//!   cross as `(*const u16, i32)` — UTF-16 code units, which `TPtrC16` wraps with no copy —
+//!   and output buffers as `(*mut T, i32 capacity, *mut i32 written)`. The shim wraps the
+//!   pointer in a descriptor whose *maximum length* is the number you passed, so a capacity
+//!   larger than the allocation is a write past the end of it, on the C++ side, where Rust's
+//!   bounds checks are not. A capacity smaller than the allocation is merely a short read.
+//!
+//! * **Null is usually an error rather than undefined behaviour, but do not lean on it.**
+//!   Most shim entry points open with a null check and return `SHIM_ERR_ARGUMENT` — see
+//!   `shim_file_read` or `shim_prop_get`. Not all of them do: `shim_cell_get` hands its five
+//!   out-pointers straight to the C++ object behind them. Nobody has swept the file for the
+//!   exceptions, so treat a null pointer as undefined and pass real ones.
+//!
+//! * **Handles are opaque `i32`, and a stale one is caught.** They are slots in a table, never
+//!   pointers, so a handle from a closed file, socket or statement returns
+//!   `SHIM_ERR_BAD_HANDLE` rather than reaching a freed C++ object. The file, image, audio and
+//!   SQL tables also tag the slot with a generation counter, so a handle whose slot has been
+//!   reused by something else is rejected too rather than silently addressing the new
+//!   occupant. Handles are the one thing here that a caller cannot misuse into UB.
+//!
+//! * **A leave never crosses back.** Every `shim_*` function is a TRAP barrier that returns
+//!   a Symbian error code. A Leave is a longjmp-style unwind that runs no destructors, and
+//!   letting one cross a Rust frame compiled `panic=abort` — which has no landing pads —
+//!   skips every `Drop`. The shim keeps the leaving work in a private `DoSomethingL()`.
+//!
+//! * **The GUI thread owns the screen.** `RWsSession` is not thread safe and window
+//!   operations must run on the thread that owns the window group, so everything touching
+//!   the framebuffer, the window server or Avkon has to be called from the thread the shim
+//!   pumps `rust_step` on. The worker thread ([`shim_work_submit`]) has its own heap, so
+//!   memory allocated there and freed on the GUI thread is a cross-heap free — silent
+//!   corruption rather than a clean failure.
+//!
+//! * **Nothing returned outlives the next call.** The pixel pointer from [`shim_fb_lock`] is
+//!   valid only until [`shim_fb_unlock`] — `CFbsBitmap::DataAddress()` has to be preceded by
+//!   `BeginDataAccess()` and the font-and-bitmap server's heap may compact in between — and
+//!   the cached tables some probes return are replaced on their next refresh. Copy what you
+//!   need; do not hold a pointer across another shim call.
+//!
+//! Whether a *particular* function must be on the GUI thread, and what it does with the
+//! buffers it is given, is documented on that function's declaration in the `extern` block
+//! below, which mirrors the comments in `shim/inc/symbian_shim.h` — that header is the
+//! contract, and this file is its Rust half.
+//!
+//! The per-function `# Safety` lines name parameters the way the header declares them, which is
+//! not always the way the host stub below spells them: the stub ignores most of its arguments and
+//! abbreviates them, and renaming 216 stubs to match would be a large diff for no reader.
+//!
 //! # Building for the host
 //!
 //! The externs only exist when linking against the shim, so on the host they are
@@ -90,6 +144,16 @@ pub const SHIM_EV_AUDIO_OPENED: i32 = 41;
 /// Playback ended. `status` is `SHIM_OK` at the natural end, `SHIM_ERR_CANCEL` when
 /// stopped, and a real error otherwise; `d` carries the platform's raw code.
 pub const SHIM_EV_AUDIO_DONE: i32 = 42;
+/// A position update completed. `status` is `SHIM_OK` for a fix and the platform's own code
+/// otherwise — `SHIM_ERR_TIMED_OUT` for a module that ran out of sky, `SHIM_ERR_ACCESS_DENIED`
+/// when the requestor was never declared. `a` is satellites used (-1 when not asked for or no
+/// fix), `b` the horizontal accuracy in whole metres (-1 when unknown), `c` 1 when satellite
+/// info was requested. The fix itself comes from `shim_gps_read` — latitude is a double.
+pub const SHIM_EV_GPS_FIX: i32 = 43;
+/// The serving cell tower was read. `status` is `SHIM_OK` or the platform's error; `a` is 1 when
+/// the modem said the location area is known. The identifiers come from `shim_cell_get` — an event
+/// carries four integers and a caller wants five with a parse behind two of them.
+pub const SHIM_EV_CELL: i32 = 44;
 /// A subscribed Publish & Subscribe property changed. `a` is the key within the app's
 /// category, `c` is the freshly read integer value. Emitted by `shim_prop`'s subscriber.
 /// A headless daemon uses this as its stop signal — whoever launched it sets the property,
@@ -104,7 +168,48 @@ pub const SHIM_EV_PROP: i32 = 53;
 /// an event nobody was listening for all the same recoverable case. Off until
 /// [`shim_msv_observe`].
 pub const SHIM_EV_MSV: i32 = 60;
+
+/// Response headers arrived for the HTTP transaction in flight. `a` is the HTTP status code.
+///
+/// Redirects are already followed by the time this fires — the platform stack follows them for
+/// GET without reporting it — so this is the status of the page that will actually load, not of
+/// the URL that was asked for.
+pub const SHIM_EV_HTTP_HEAD: i32 = 70;
+/// Body bytes arrived. `a` is the running total the stack has handed over.
+///
+/// Not the same as what is readable: [`shim_httpc_read`] drains a capped buffer, and the
+/// difference shows up as [`SHIM_HTTP_TRUNCATED`] rather than as two numbers quietly disagreeing.
+pub const SHIM_EV_HTTP_BODY: i32 = 71;
+/// The transaction ended. `status` is [`SHIM_OK`] or the platform error.
+///
+/// `a` is the HTTP status, `b` the total body bytes, `c` the [`SHIM_HTTP_*`](SHIM_HTTP_GZIP)
+/// flags, `d` how many body callbacks it took. The error is worth keeping rather than collapsing
+/// to a boolean: an untrusted certificate is only distinguishable from a dead server by its code.
+pub const SHIM_EV_HTTP_DONE: i32 = 72;
+
 pub const SHIM_EV_QUIT: i32 = 90;
+
+/// Another application asked this one to open a document — a URL, in practice.
+///
+/// `a` carries its length in UTF-16 units; the text is collected with
+/// [`shim_app_open_request`]. Arrives both on a cold start and on a warm one, and the receiver does
+/// not have to know which.
+pub const SHIM_EV_OPEN_URL: i32 = 91;
+
+/// The response said `Content-Encoding: gzip`.
+pub const SHIM_HTTP_GZIP: i32 = 1 << 0;
+/// The response said `Transfer-Encoding: chunked`.
+pub const SHIM_HTTP_CHUNKED: i32 = 1 << 1;
+/// The body starts `1f 8b` — so the stack handed over the *compressed* bytes and inflating them
+/// is ours to do. Together with [`SHIM_HTTP_GZIP`] this is the whole question F2 asks: the header
+/// alone says the server compressed, and only this flag says whether we get it decoded for free.
+pub const SHIM_HTTP_GZIP_MAGIC: i32 = 1 << 2;
+/// The caller fell so far behind draining that the shim dropped body bytes.
+///
+/// Not "the page was too big": the shim's buffer holds the *backlog* between the stack handing bytes
+/// over and [`shim_httpc_read`] taking them, and it releases what has been read. A caller that
+/// drains on every [`SHIM_EV_HTTP_BODY`] never sees this. The total in `b` is still the real size.
+pub const SHIM_HTTP_TRUNCATED: i32 = 1 << 3;
 
 /// The Publish & Subscribe key an app publishes its present-efficiency telemetry under, in
 /// its **own** UID3 category ([`shim_own_uid3`]). Writing your own category needs no
@@ -170,7 +275,24 @@ pub mod modifier {
     pub const SHIFT: i32 = 1;
     pub const CTRL: i32 = 2;
     /// The E72's Fn/Chr key, which is how digits and symbols are reached.
+    ///
+    /// Set for every way the layer can be engaged: held, tapped-to-arm, or locked. This is the bit
+    /// a *text field* wants — what matters there is which character the key produces, not how the
+    /// layer was turned on.
     pub const FUNC: i32 = 4;
+
+    /// The Fn key is physically down **right now**.
+    ///
+    /// The bit a *shortcut* wants, and a separate one because the two questions are different. Fn
+    /// has three states on this hardware — held, armed by a tap, and locked by two taps — and only
+    /// the first is a deliberate gesture happening at this instant. The other two are stored state
+    /// from some earlier press, which is fine for typing a digit and wrong for "and now close the
+    /// application".
+    ///
+    /// Split out after writing, in a browser, that a Fn-modified softkey "cannot be reached by
+    /// accident because it must be held" — which was not true of anything the app could actually
+    /// observe. A comment claiming a safety property the API could not express.
+    pub const FUNC_HELD: i32 = 8;
 }
 
 /// Fixed-size and POD so the C++ side can push one from inside a `CActive::RunL`
@@ -280,7 +402,7 @@ pub struct ShimDriveInfo {
 
 /// `RFs::Volume` — size, free space and the label of a mounted volume.
 #[repr(C)]
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, Default)]
 pub struct ShimVolumeInfo {
     pub size: i64,
     pub free: i64,
@@ -288,12 +410,6 @@ pub struct ShimVolumeInfo {
     pub unique_id: u32,
     pub name_len: i32,
     pub name: [u16; 32],
-}
-
-impl Default for ShimVolumeInfo {
-    fn default() -> Self {
-        Self { size: 0, free: 0, unique_id: 0, name_len: 0, name: [0; 32] }
-    }
 }
 
 /// One entry of the Message Server's MTM registry.
@@ -502,7 +618,7 @@ pub const SHIM_BT_VIA_CENREP: i32 = 2;
 /// that cares compares them, the way `symbian::msg` turns the same comparison into a
 /// `truncated` flag rather than losing it.
 #[repr(C)]
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, Default)]
 pub struct ShimBtDevice {
     pub addr: [u8; 6],
     pub pad: [u8; 2],
@@ -510,12 +626,6 @@ pub struct ShimBtDevice {
     pub flags: i32,
     pub name_len: i32,
     pub name: [u16; 32],
-}
-
-impl Default for ShimBtDevice {
-    fn default() -> Self {
-        Self { addr: [0; 6], pad: [0; 2], device_class: 0, flags: 0, name_len: 0, name: [0; 32] }
-    }
 }
 
 /// This handset's own Bluetooth record.
@@ -709,6 +819,61 @@ extern "C" {
         out: *mut u8,
         out_cap: i32,
     ) -> i32;
+    // http — the platform's own stack, asynchronous and safe from a GUI pump (shim_http.cpp).
+    // One transaction at a time; completion arrives as SHIM_EV_HTTP_DONE.
+    pub fn shim_httpc_open(net: i32) -> i32;
+    pub fn shim_httpc_get(url: *const u16, len: i32, want_gzip: i32) -> i32;
+    /// Arm the **next** GET to resume from a byte offset, as `Range: bytes=N-`.
+    ///
+    /// A one-shot rather than a parameter on every entry point: a resume is a property of one
+    /// request, and widening four existing signatures for what one caller wants is churn. Cleared by
+    /// the GET that consumes it — including a GET that fails — so a refused resume cannot leak into
+    /// an unrelated fetch and silently start it in the middle.
+    ///
+    /// The answer to a Range request is 206 with the remainder. A server that does not support it
+    /// answers 200 with the whole thing, which is also correct: the caller compares what it asked
+    /// for with what it got.
+    pub fn shim_httpc_range_from(offset: i64) -> i32;
+    // The conditional form. Either validator may be null/empty; given one, a server that agrees
+    // the copy is current answers 304 with no body.
+    pub fn shim_httpc_get_cond(
+        url: *const u16,
+        len: i32,
+        want_gzip: i32,
+        if_none_match: *const u16,
+        inm_len: i32,
+        if_modified_since: *const u16,
+        ims_len: i32,
+    ) -> i32;
+    // The response's ETag (want_etag != 0) or Last-Modified. Zero means the server sent none.
+    /// One POST with the body already in memory.
+    ///
+    /// `body` is bytes rather than UTF-16 on purpose: a JSON document is encoded by whoever built
+    /// it, and narrowing here would be the shim guessing at somebody else's charset. Both `body`
+    /// and `content_type` are copied inside the call, so neither has to outlive it — unlike the
+    /// buffers of `shim_net_send`.
+    pub fn shim_httpc_post(
+        url: *const u16,
+        len: i32,
+        content_type: *const u8,
+        ct_len: i32,
+        body: *const u8,
+        body_len: i32,
+    ) -> i32;
+    pub fn shim_httpc_validator(want_etag: i32, out: *mut u16, cap: i32) -> i32;
+    pub fn shim_httpc_read(out: *mut u8, cap: i32) -> i32;
+    pub fn shim_httpc_info(
+        status: *mut i32,
+        total: *mut i32,
+        held: *mut i32,
+        flags: *mut i32,
+        err: *mut i32,
+    ) -> i32;
+    // Where the bytes came from, after any redirect the stack followed. Read after
+    // SHIM_EV_HTTP_DONE; returns the count of UTF-16 units written.
+    pub fn shim_httpc_url(out: *mut u16, cap: i32) -> i32;
+    pub fn shim_httpc_cancel() -> i32;
+    pub fn shim_httpc_close();
     pub fn shim_dns_resolve(conn: i32, host: *const u16, len: i32, handle: *mut i32) -> i32;
     pub fn shim_dns_close(handle: i32);
     pub fn shim_tcp_open(conn: i32, handle: *mut i32) -> i32;
@@ -721,6 +886,18 @@ extern "C" {
     pub fn shim_udp_recv_from(handle: i32, buf: *mut u8, cap: i32) -> i32;
 
     // worker thread
+    // The same, with the worker's heap ceiling chosen by the caller. A crypto job wants 256 KB
+    // and a page layout wants megabytes; on Symbian a thread heap is reserved to its maximum and
+    // committed to its minimum, so a large ceiling costs address space and no memory.
+    pub fn shim_work_submit_ex(
+        opcode: i32,
+        input: *const u8,
+        in_len: i32,
+        out: *mut u8,
+        out_len: i32,
+        heap_max: i32,
+        stack: i32,
+    ) -> i32;
     pub fn shim_work_submit(
         opcode: i32,
         input: *const u8,
@@ -729,6 +906,14 @@ extern "C" {
         out_len: i32,
     ) -> i32;
     pub fn shim_work_busy() -> i32;
+    pub fn shim_work_exit_info(
+        ty: *mut i32,
+        reason: *mut i32,
+        cat: *mut u8,
+        cat_cap: i32,
+    ) -> i32;
+    pub fn shim_cleanup_probe() -> i32;
+    pub fn shim_cleanup_probe_bare() -> i32;
 
     // timers
     pub fn shim_sleep_ms(ms: i32);
@@ -764,6 +949,44 @@ extern "C" {
     ) -> i32;
     pub fn shim_image_describe(handle: i32, out: *mut i32, cap: i32) -> i32;
     pub fn shim_image_close(handle: i32);
+
+    // position
+    pub fn shim_gps_start(
+        interval_ms: i32,
+        timeout_ms: i32,
+        want_satellites: i32,
+        module_uid: i32,
+    ) -> i32;
+    pub fn shim_gps_stop();
+    pub fn shim_gps_read(
+        lat: *mut f64,
+        lon: *mut f64,
+        alt: *mut f64,
+        h_acc: *mut f64,
+        v_acc: *mut f64,
+        sats: *mut i32,
+        in_view: *mut i32,
+    ) -> i32;
+    pub fn shim_gps_module_count(out: *mut i32) -> i32;
+    pub fn shim_gps_module_info(
+        index: i32,
+        name: *mut u16,
+        name_cap: i32,
+        name_len: *mut i32,
+        out: *mut i32,
+        out_cap: i32,
+    ) -> i32;
+
+    // cell
+    pub fn shim_cell_read() -> i32;
+    pub fn shim_cell_get(
+        mcc: *mut i32,
+        mnc: *mut i32,
+        lac: *mut i32,
+        cid: *mut i32,
+        area_known: *mut i32,
+    ) -> i32;
+    pub fn shim_cell_stop();
 
     // audio
     pub fn shim_audio_open_file(path: *const u16, path_len: i32) -> i32;
@@ -858,6 +1081,9 @@ extern "C" {
     /// End send to background instead of closing. [`SHIM_ERR_NOT_READY`] before the window group
     /// exists. Needs SwEvent, granted at load on a ROM-patched handset.
     pub fn shim_set_resident(on: i32) -> i32;
+    pub fn shim_app_open_request(out: *mut u16, cap: i32) -> i32;
+    pub fn shim_cheap_stats(size: *mut i32, allocated: *mut i32);
+    pub fn shim_cheap_compress() -> i32;
     /// Drop this app behind the others without closing it.
     pub fn shim_app_to_background() -> i32;
     /// Bring this app back to the front, focus included.
@@ -1033,6 +1259,41 @@ extern "C" {
     /// `KErrNotSupported` means the handset does not implement that attribute, which is
     /// itself an answer about the hardware.
     pub fn shim_hal_get(attr: i32, out: *mut i32) -> i32;
+    /// One entry of the **phone's own theme** colour table, as `0x00RRGGBB` in `out`.
+    ///
+    /// `major`/`minor` are the two halves of a `TAknsItemID` and `index` is the entry within that
+    /// table — `AknsUtils::GetCachedColor`, out of `aknskins`, which is **not** in the base library
+    /// set: a build wanting this needs `USE_SKIN=1`.
+    ///
+    /// One generic accessor rather than a function per colour, for the reason [`shim_hal_get`] gives:
+    /// the ID table is *data* and belongs in Rust, where a host test can cover it, not as sixty
+    /// exported functions each able to be wrong in its own way. The names live in
+    /// `symbian::skin`.
+    ///
+    /// [`SHIM_ERR_NOT_READY`] from a headless process: the skin instance is the *application's*,
+    /// created by Avkon during app-UI construction, so a daemon has none.
+    pub fn shim_skin_color(major: i32, minor: i32, index: i32, out: *mut u32) -> i32;
+    /// Up to `cap` pixels of a themed **background bitmap**, on an even grid, as `0x00RRGGBB`.
+    ///
+    /// Returns the count written, and fills `width`/`height` with the bitmap's real size — which is
+    /// how a caller tells "no such bitmap" from "a bitmap of nothing".
+    ///
+    /// Not needed for a palette: the colour table does carry hue after all — see
+    /// `docs/reference/skinprobe.txt`, which also records the first reading of that data getting it
+    /// backwards. This is kept because "what does the theme's background look like" is still a
+    /// question worth asking, and because the answer on the E72 is itself a finding: all four
+    /// background IDs return NULL from `GetCachedBitmap`, which reads a cache nothing had filled.
+    ///
+    /// Samples rather than one average, because "what is the page colour" is a decision — mean,
+    /// median, corner — and decisions belong in Rust where a host test can pin them.
+    pub fn shim_skin_samples(
+        major: i32,
+        minor: i32,
+        out: *mut u32,
+        cap: i32,
+        width: *mut i32,
+        height: *mut i32,
+    ) -> i32;
 
     // drives and volumes (USE_FS_INFO)
     /// Bit N set means drive letter `'A' + N` exists.
@@ -1155,47 +1416,107 @@ mod host_stubs {
         };
     }
 
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. Nothing to uphold on the way in; the cell that comes
+    /// back is uninitialised and is only valid until it is passed to `shim_free`.
     pub unsafe fn shim_alloc(_size: u32) -> *mut c_void {
         nope!("shim_alloc")
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `p` must be a live cell from `shim_alloc` or
+    /// `shim_realloc`, and is invalid afterwards whether the call moved it or not.
     pub unsafe fn shim_realloc(_p: *mut c_void, _size: u32) -> *mut c_void {
         nope!("shim_realloc")
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `p` must be a live cell from `shim_alloc` or
+    /// `shim_realloc`, and nothing may touch it afterwards.
     pub unsafe fn shim_free(_p: *mut c_void) {
         nope!("shim_free")
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `p` must be a live cell from `shim_alloc` or
+    /// `shim_realloc`.
     pub unsafe fn shim_alloc_len(_p: *const c_void) -> u32 {
         nope!("shim_alloc_len")
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `out` must point to a writable `ShimEvent`.
     pub unsafe fn shim_poll_event(_out: *mut ShimEvent) -> i32 {
         0
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. No pointers cross here, so the shared contract is the
+    /// whole of it.
     pub unsafe fn shim_events_dropped() -> i32 {
         0
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. No pointers cross here, so the shared contract is the
+    /// whole of it.
     pub unsafe fn shim_request_exit() {}
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `out` must point to a writable `ShimFb`. The pixel
+    /// pointer it comes back with is valid only until `shim_fb_unlock`, and no other shim function may
+    /// be called while the lock is held.
     pub unsafe fn shim_fb_lock(_out: *mut ShimFb) -> i32 {
         SHIM_ERR_NOT_READY
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. No pointers cross here, so the shared contract is the
+    /// whole of it.
     pub unsafe fn shim_fb_unlock() {}
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. No pointers cross here, so the shared contract is the
+    /// whole of it.
     pub unsafe fn shim_present(_x: i32, _y: i32, _w: i32, _h: i32) -> i32 {
         SHIM_ERR_NOT_READY
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `w` must point to a writable `i32` and `h` must point
+    /// to a writable `i32`.
     pub unsafe fn shim_screen_size(_w: *mut i32, _h: *mut i32) -> i32 {
         SHIM_ERR_NOT_READY
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `format` must point to a writable `i32`.
     pub unsafe fn shim_screen_format(_f: *mut i32) -> i32 {
         SHIM_ERR_NOT_READY
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `out_word` must point to a writable `u32`.
     pub unsafe fn shim_probe_pixel_layout(_w: *mut u32) -> i32 {
         SHIM_ERR_NOT_READY
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `name` must be readable for `len` UTF-16 code units.
     pub unsafe fn shim_dll_present(_name: *const u16, _len: i32) -> i32 {
         SHIM_ERR_NOT_READY
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. No pointers cross here, so the shared contract is the
+    /// whole of it.
     pub unsafe fn shim_own_uid3() -> u32 {
         0
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `out` must be writable for `len` bytes.
     pub unsafe fn shim_entropy(out: *mut u8, len: i32) -> i32 {
         /* The host stub is the one place a fake entropy source is defensible, and it is
          * still worth being loud about: this is a counter, not entropy. Host tests must
@@ -1209,27 +1530,56 @@ mod host_stubs {
         }
         SHIM_OK
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `buf` must be writable for `cap` UTF-16 code units and
+    /// `len` must point to a writable `i32`.
     pub unsafe fn shim_private_path(_b: *mut u16, _c: i32, _l: *mut i32) -> i32 {
         SHIM_ERR_NOT_READY
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `path` must be readable for `len` UTF-16 code units and
+    /// `handle` must point to a writable `i32`.
     pub unsafe fn shim_file_open(_p: *const u16, _l: i32, _m: i32, _h: *mut i32) -> i32 {
         SHIM_ERR_NOT_READY
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `buf` must be writable for `cap` bytes and `got` must
+    /// point to a writable `i32`.
     pub unsafe fn shim_file_read(_h: i32, _b: *mut u8, _c: i32, _g: *mut i32) -> i32 {
         SHIM_ERR_NOT_READY
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `buf` must be readable for `len` bytes.
     pub unsafe fn shim_file_write(_h: i32, _b: *const u8, _l: i32) -> i32 {
         SHIM_ERR_NOT_READY
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `out` must point to a writable `i64`.
     pub unsafe fn shim_file_size(_h: i32, _o: *mut i64) -> i32 {
         SHIM_ERR_NOT_READY
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. No pointers cross here, so the shared contract is the
+    /// whole of it.
     pub unsafe fn shim_file_seek(_h: i32, _p: i64) -> i32 {
         SHIM_ERR_NOT_READY
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `path` must be readable for `len` UTF-16 code units.
     pub unsafe fn shim_file_delete(_p: *const u16, _l: i32) -> i32 {
         SHIM_ERR_NOT_READY
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `from` must be readable for `from_len` UTF-16 code
+    /// units and `to` must be readable for `to_len` UTF-16 code units.
     pub unsafe fn shim_file_rename(
         _f: *const u16,
         _fl: i32,
@@ -1238,20 +1588,43 @@ mod host_stubs {
     ) -> i32 {
         SHIM_ERR_NOT_READY
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. No pointers cross here, so the shared contract is the
+    /// whole of it.
     pub unsafe fn shim_file_close(_h: i32) {}
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. No pointers cross here, so the shared contract is the
+    /// whole of it.
     pub unsafe fn shim_net_connections() -> i32 {
         0
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `iap` must point to a writable `i32`.
     pub unsafe fn shim_net_connection_iap(_i: i32, iap: *mut i32) -> i32 {
         if !iap.is_null() {
             *iap = -1;
         }
         SHIM_ERR_NOT_FOUND
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `handle` must point to a writable `i32`.
     pub unsafe fn shim_net_start(_iap: i32, _h: *mut i32) -> i32 {
         SHIM_ERR_NOT_READY
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. No pointers cross here, so the shared contract is the
+    /// whole of it.
     pub unsafe fn shim_net_stop(_h: i32) {}
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `host` must be readable for `host_len` UTF-16 code
+    /// units, `path` must be readable for `path_len` UTF-16 code units and `out` must be writable for
+    /// `out_cap` bytes.
     pub unsafe fn shim_https_get(
         _host: *const u16,
         _host_len: i32,
@@ -1263,6 +1636,16 @@ mod host_stubs {
     ) -> i32 {
         SHIM_ERR_NOT_READY
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `host` must be readable for `host_len` UTF-16 code
+    /// units, `path` must be readable for `path_len` UTF-16 code units, `file` must be readable for
+    /// `file_len` UTF-16 code units, `status` must point to a writable `i32` and `gzipped` must point
+    /// to a writable `i32`.
+    // The arity is the C++ shim's, not ours: this mirrors a declaration in
+    // shim/inc/symbian_shim.h, and splitting the Rust side into a struct would leave the two
+    // halves of the ABI describing different functions.
+    #[allow(clippy::too_many_arguments)]
     pub unsafe fn shim_http_fetch_file(
         _host: *const u16,
         _host_len: i32,
@@ -1278,13 +1661,29 @@ mod host_stubs {
     ) -> i32 {
         SHIM_ERR_NOT_READY
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `path` must be readable for `len` UTF-16 code units and
+    /// `handle` must point to a writable `i32`.
     pub unsafe fn shim_gunzip_open(_p: *const u16, _l: i32, _h: *mut i32) -> i32 {
         SHIM_ERR_NOT_READY
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `out` must be writable for `cap` bytes.
     pub unsafe fn shim_gunzip_read(_h: i32, _out: *mut u8, _cap: i32) -> i32 {
         SHIM_ERR_NOT_READY
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. No pointers cross here, so the shared contract is the
+    /// whole of it.
     pub unsafe fn shim_gunzip_close(_h: i32) {}
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `host` must be readable for `host_len` UTF-16 code
+    /// units, `path` must be readable for `path_len` UTF-16 code units and `out` must be writable for
+    /// `out_cap` bytes.
     pub unsafe fn shim_http_get(
         _host: *const u16,
         _host_len: i32,
@@ -1296,6 +1695,106 @@ mod host_stubs {
     ) -> i32 {
         SHIM_ERR_NOT_READY
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. No pointers cross here, so the shared contract is the
+    /// whole of it.
+    pub unsafe fn shim_httpc_open(_net: i32) -> i32 {
+        SHIM_ERR_NOT_READY
+    }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. No pointers cross here, so the shared contract is the
+    /// whole of it.
+    pub unsafe fn shim_httpc_range_from(_offset: i64) -> i32 {
+        SHIM_ERR_NOT_READY
+    }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `url` must be readable for `len` UTF-16 code units.
+    pub unsafe fn shim_httpc_get(_url: *const u16, _len: i32, _gzip: i32) -> i32 {
+        SHIM_ERR_NOT_READY
+    }
+    #[allow(clippy::too_many_arguments)]
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `url` must be readable for `len` UTF-16 code units,
+    /// `if_none_match` must be readable for `inm_len` UTF-16 code units and `if_modified_since` must be
+    /// readable for `ims_len` UTF-16 code units.
+    pub unsafe fn shim_httpc_get_cond(
+        _url: *const u16,
+        _len: i32,
+        _gzip: i32,
+        _inm: *const u16,
+        _inm_len: i32,
+        _ims: *const u16,
+        _ims_len: i32,
+    ) -> i32 {
+        SHIM_ERR_NOT_READY
+    }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `url` must be readable for `len` UTF-16 code units,
+    /// `content_type` must be readable for `ct_len` bytes and `body` must be readable for `body_len`
+    /// bytes.
+    pub unsafe fn shim_httpc_post(
+        _url: *const u16,
+        _len: i32,
+        _ct: *const u8,
+        _ct_len: i32,
+        _body: *const u8,
+        _body_len: i32,
+    ) -> i32 {
+        SHIM_ERR_NOT_SUPPORTED
+    }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `out` must be writable for `cap` UTF-16 code units.
+    pub unsafe fn shim_httpc_validator(_want_etag: i32, _out: *mut u16, _cap: i32) -> i32 {
+        SHIM_ERR_NOT_READY
+    }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `out` must be writable for `cap` bytes.
+    pub unsafe fn shim_httpc_read(_out: *mut u8, _cap: i32) -> i32 {
+        SHIM_ERR_NOT_READY
+    }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `status` must point to a writable `i32`, `total` must
+    /// point to a writable `i32`, `held` must point to a writable `i32`, `flags` must point to a
+    /// writable `i32` and `err` must point to a writable `i32`.
+    pub unsafe fn shim_httpc_info(
+        _status: *mut i32,
+        _total: *mut i32,
+        _held: *mut i32,
+        _flags: *mut i32,
+        _err: *mut i32,
+    ) -> i32 {
+        SHIM_ERR_NOT_READY
+    }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `out` must be writable for `cap` UTF-16 code units.
+    pub unsafe fn shim_httpc_url(_out: *mut u16, _cap: i32) -> i32 {
+        SHIM_ERR_NOT_READY
+    }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. No pointers cross here, so the shared contract is the
+    /// whole of it.
+    pub unsafe fn shim_httpc_cancel() -> i32 {
+        SHIM_ERR_NOT_READY
+    }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. No pointers cross here, so the shared contract is the
+    /// whole of it.
+    pub unsafe fn shim_httpc_close() {}
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `host` must be readable for `len` UTF-16 code units and
+    /// `handle` must point to a writable `i32`.
     pub unsafe fn shim_dns_resolve(
         _c: i32,
         _host: *const u16,
@@ -1304,23 +1803,50 @@ mod host_stubs {
     ) -> i32 {
         SHIM_ERR_NOT_READY
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. No pointers cross here, so the shared contract is the
+    /// whole of it.
     pub unsafe fn shim_dns_close(_h: i32) {}
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `handle` must point to a writable `i32`.
     pub unsafe fn shim_tcp_open(_c: i32, _h: *mut i32) -> i32 {
         SHIM_ERR_NOT_READY
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. No pointers cross here, so the shared contract is the
+    /// whole of it.
     pub unsafe fn shim_tcp_connect(_h: i32, _ip: u32, _p: u16) -> i32 {
         SHIM_ERR_NOT_READY
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `buf` must be readable for `len` bytes.
     pub unsafe fn shim_tcp_send(_h: i32, _b: *const u8, _l: i32) -> i32 {
         SHIM_ERR_NOT_READY
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `buf` must be writable for `cap` bytes.
     pub unsafe fn shim_tcp_recv(_h: i32, _b: *mut u8, _c: i32) -> i32 {
         SHIM_ERR_NOT_READY
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. No pointers cross here, so the shared contract is the
+    /// whole of it.
     pub unsafe fn shim_tcp_close(_h: i32) {}
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `handle` must point to a writable `i32`.
     pub unsafe fn shim_udp_open(_c: i32, _h: *mut i32) -> i32 {
         SHIM_ERR_NOT_READY
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `buf` must be readable for `len` bytes.
     pub unsafe fn shim_udp_send_to(
         _h: i32,
         _b: *const u8,
@@ -1330,9 +1856,17 @@ mod host_stubs {
     ) -> i32 {
         SHIM_ERR_NOT_READY
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `buf` must be writable for `cap` bytes.
     pub unsafe fn shim_udp_recv_from(_h: i32, _b: *mut u8, _c: i32) -> i32 {
         SHIM_ERR_NOT_READY
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `input` must be readable for `in_len` bytes and `out`
+    /// writable for `out_len`, and both must stay alive and untouched until `SHIM_EV_WORK_DONE` arrives
+    /// — the worker thread is still holding them.
     pub unsafe fn shim_work_submit(
         _op: i32,
         _in: *const u8,
@@ -1342,29 +1876,141 @@ mod host_stubs {
     ) -> i32 {
         SHIM_ERR_NOT_READY
     }
+    #[allow(clippy::too_many_arguments)]
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `input` must be readable for `in_len` bytes and `out`
+    /// writable for `out_len`, and both must stay alive and untouched until `SHIM_EV_WORK_DONE` arrives
+    /// — the worker thread is still holding them.
+    pub unsafe fn shim_work_submit_ex(
+        _op: i32,
+        _in: *const u8,
+        _il: i32,
+        _out: *mut u8,
+        _ol: i32,
+        _heap: i32,
+        _stack: i32,
+    ) -> i32 {
+        SHIM_ERR_NOT_READY
+    }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. No pointers cross here, so the shared contract is the
+    /// whole of it.
     pub unsafe fn shim_work_busy() -> i32 {
         0
     }
+
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `ty` must point to a writable `i32`, `reason` must
+    /// point to a writable `i32` and `cat` must be writable for `cat_cap` bytes.
+    pub unsafe fn shim_work_exit_info(
+        _ty: *mut i32,
+        _reason: *mut i32,
+        _cat: *mut u8,
+        _cat_cap: i32,
+    ) -> i32 {
+        SHIM_ERR_NOT_READY
+    }
+
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. No pointers cross here, so the shared contract is the
+    /// whole of it.
+    pub unsafe fn shim_cleanup_probe() -> i32 {
+        0
+    }
+
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `out` must be writable for `cap` UTF-16 code units.
+    pub unsafe fn shim_app_open_request(_out: *mut u16, _cap: i32) -> i32 {
+        0
+    }
+
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `size` must point to a writable `i32` and `allocated`
+    /// must point to a writable `i32`.
+    pub unsafe fn shim_cheap_stats(size: *mut i32, allocated: *mut i32) {
+        if !size.is_null() {
+            *size = 0;
+        }
+        if !allocated.is_null() {
+            *allocated = 0;
+        }
+    }
+
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. No pointers cross here, so the shared contract is the
+    /// whole of it.
+    pub unsafe fn shim_cheap_compress() -> i32 {
+        0
+    }
+
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. No pointers cross here, so the shared contract is the
+    /// whole of it.
+    pub unsafe fn shim_cleanup_probe_bare() -> i32 {
+        0
+    }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. No pointers cross here, so the shared contract is the
+    /// whole of it.
     pub unsafe fn shim_sleep_ms(_ms: i32) {}
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `handle` must point to a writable `i32`.
     pub unsafe fn shim_timer_after(_ms: i32, _h: *mut i32) -> i32 {
         SHIM_ERR_NOT_SUPPORTED
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `handle` must point to a writable `i32`.
     pub unsafe fn shim_timer_every(_ms: i32, _h: *mut i32) -> i32 {
         SHIM_ERR_NOT_SUPPORTED
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. No pointers cross here, so the shared contract is the
+    /// whole of it.
     pub unsafe fn shim_timer_cancel(_h: i32) {}
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. No pointers cross here, so the shared contract is the
+    /// whole of it.
     pub unsafe fn shim_now_us() -> u64 {
         0
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. No pointers cross here, so the shared contract is the
+    /// whole of it.
     pub unsafe fn shim_unix_time() -> i64 {
         0
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. No pointers cross here, so the shared contract is the
+    /// whole of it.
     pub unsafe fn shim_utc_offset() -> i32 {
         0
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `path` must be readable for `path_len` UTF-16 code
+    /// units, `w` must point to a writable `i32` and `h` must point to a writable `i32`.
     pub unsafe fn shim_image_probe(_p: *const u16, _l: i32, _w: *mut i32, _h: *mut i32) -> i32 {
         SHIM_ERR_NOT_SUPPORTED
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `path` must be readable for `path_len` UTF-16 code
+    /// units and `handle` must point to a writable `i32`.
     pub unsafe fn shim_image_decode_start(
         _p: *const u16,
         _l: i32,
@@ -1374,6 +2020,10 @@ mod host_stubs {
     ) -> i32 {
         SHIM_ERR_NOT_SUPPORTED
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `data` must be readable for `len` bytes and `handle`
+    /// must point to a writable `i32`.
     pub unsafe fn shim_image_decode_start_mem(
         _d: *const u8,
         _l: i32,
@@ -1383,6 +2033,10 @@ mod host_stubs {
     ) -> i32 {
         SHIM_ERR_NOT_SUPPORTED
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `out` must be writable for `out_cap` UTF-16 code units,
+    /// `w` must point to a writable `i32` and `h` must point to a writable `i32`.
     pub unsafe fn shim_image_result(
         _h: i32,
         _o: *mut u16,
@@ -1392,83 +2046,258 @@ mod host_stubs {
     ) -> i32 {
         SHIM_ERR_NOT_SUPPORTED
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `out` must be writable for `cap` i32s.
     pub unsafe fn shim_image_describe(_h: i32, _o: *mut i32, _c: i32) -> i32 {
         SHIM_ERR_NOT_SUPPORTED
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. No pointers cross here, so the shared contract is the
+    /// whole of it.
     pub unsafe fn shim_image_close(_h: i32) {}
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. No pointers cross here, so the shared contract is the
+    /// whole of it.
+    pub unsafe fn shim_gps_start(_i: i32, _t: i32, _s: i32, _m: i32) -> i32 {
+        SHIM_ERR_NOT_SUPPORTED
+    }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. No pointers cross here, so the shared contract is the
+    /// whole of it.
+    pub unsafe fn shim_gps_stop() {}
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `lat` must point to a writable `f64`, `lon` must point
+    /// to a writable `f64`, `alt` must point to a writable `f64`, `h_acc` must point to a writable
+    /// `f64`, `v_acc` must point to a writable `f64`, `sats` must point to a writable `i32` and
+    /// `in_view` must point to a writable `i32`.
+    pub unsafe fn shim_gps_read(
+        _lat: *mut f64,
+        _lon: *mut f64,
+        _alt: *mut f64,
+        _ha: *mut f64,
+        _va: *mut f64,
+        _s: *mut i32,
+        _iv: *mut i32,
+    ) -> i32 {
+        SHIM_ERR_NOT_SUPPORTED
+    }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `out` must point to a writable `i32`.
+    pub unsafe fn shim_gps_module_count(_o: *mut i32) -> i32 {
+        SHIM_ERR_NOT_SUPPORTED
+    }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `name` must be writable for `name_cap` UTF-16 code
+    /// units, `name_len` must point to a writable `i32` and `out` must be writable for `out_cap` i32s.
+    pub unsafe fn shim_gps_module_info(
+        _i: i32,
+        _n: *mut u16,
+        _nc: i32,
+        _nl: *mut i32,
+        _o: *mut i32,
+        _oc: i32,
+    ) -> i32 {
+        SHIM_ERR_NOT_SUPPORTED
+    }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. No pointers cross here, so the shared contract is the
+    /// whole of it.
+    pub unsafe fn shim_cell_read() -> i32 {
+        SHIM_ERR_NOT_SUPPORTED
+    }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `mcc` must point to a writable `i32`, `mnc` must point
+    /// to a writable `i32`, `lac` must point to a writable `i32`, `cid` must point to a writable `i32`
+    /// and `area_known` must point to a writable `i32`.
+    pub unsafe fn shim_cell_get(
+        _mcc: *mut i32,
+        _mnc: *mut i32,
+        _lac: *mut i32,
+        _cid: *mut i32,
+        _ak: *mut i32,
+    ) -> i32 {
+        SHIM_ERR_NOT_SUPPORTED
+    }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. No pointers cross here, so the shared contract is the
+    /// whole of it.
+    pub unsafe fn shim_cell_stop() {}
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `path` must be readable for `path_len` UTF-16 code
+    /// units.
     pub unsafe fn shim_audio_open_file(_p: *const u16, _l: i32) -> i32 {
         SHIM_ERR_NOT_SUPPORTED
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. No pointers cross here, so the shared contract is the
+    /// whole of it.
     pub unsafe fn shim_audio_play() -> i32 {
         SHIM_ERR_NOT_SUPPORTED
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. No pointers cross here, so the shared contract is the
+    /// whole of it.
     pub unsafe fn shim_audio_pause() -> i32 {
         SHIM_ERR_NOT_SUPPORTED
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. No pointers cross here, so the shared contract is the
+    /// whole of it.
     pub unsafe fn shim_audio_stop() -> i32 {
         SHIM_ERR_NOT_SUPPORTED
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. No pointers cross here, so the shared contract is the
+    /// whole of it.
     pub unsafe fn shim_audio_position_ms() -> i32 {
         0
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. No pointers cross here, so the shared contract is the
+    /// whole of it.
     pub unsafe fn shim_audio_duration_ms() -> i32 {
         0
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. No pointers cross here, so the shared contract is the
+    /// whole of it.
     pub unsafe fn shim_audio_set_volume(_p: i32) -> i32 {
         SHIM_ERR_NOT_SUPPORTED
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. No pointers cross here, so the shared contract is the
+    /// whole of it.
     pub unsafe fn shim_audio_close() -> i32 {
         SHIM_ERR_NOT_SUPPORTED
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `file` must be readable for `file_len` bytes.
     pub unsafe fn shim_panic(_f: *const u8, _l: u32, _line: u32) -> ! {
         nope!("shim_panic")
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `text` must be readable for `len` UTF-16 code units.
     pub unsafe fn shim_debug(_t: *const u16, _l: i32) {}
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. No pointers cross here, so the shared contract is the
+    /// whole of it.
     pub unsafe fn shim_keyboard_mode(_mode: i32) -> i32 {
         0
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. No pointers cross here, so the shared contract is the
+    /// whole of it.
     pub unsafe fn shim_keyboard_mode_get() -> i32 {
         SHIM_KEYBOARD_SCAN
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `path` must be readable for `path_len` UTF-16 code
+    /// units.
     pub unsafe fn shim_mkdir(_p: *const u16, _pl: i32) -> i32 {
         SHIM_ERR_NOT_READY
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `path` must be readable for `path_len` UTF-16 code
+    /// units, `buf` must be writable for `cap` UTF-16 code units and `count` must point to a writable
+    /// `i32`.
     pub unsafe fn shim_dir_list(_p: *const u16, _pl: i32, _b: *mut u16, _c: i32, count: *mut i32) -> i32 {
         if !count.is_null() {
             core::ptr::write(count, 0);
         }
         SHIM_ERR_NOT_READY
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `path` must be readable for `path_len` UTF-16 code
+    /// units, `buf` must be writable for `cap` UTF-16 code units and `count` must point to a writable
+    /// `i32`.
     pub unsafe fn shim_dir_list_all(_p: *const u16, _pl: i32, _b: *mut u16, _c: i32, count: *mut i32) -> i32 {
         if !count.is_null() {
             core::ptr::write(count, 0);
         }
         SHIM_ERR_NOT_READY
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `path` must be readable for `path_len` UTF-16 code
+    /// units and `out` must point to a writable `ShimFileStat`.
     pub unsafe fn shim_file_stat(_p: *const u16, _pl: i32, out: *mut ShimFileStat) -> i32 {
         if !out.is_null() {
             core::ptr::write(out, ShimFileStat::default());
         }
         SHIM_ERR_NOT_READY
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `path` must be readable for `path_len` UTF-16 code
+    /// units.
     pub unsafe fn shim_process_spawn(_p: *const u16, _pl: i32) -> i32 {
         SHIM_ERR_NOT_READY
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `path` must be readable for `path_len` UTF-16 code
+    /// units.
     pub unsafe fn shim_process_start(_p: *const u16, _pl: i32) -> i32 {
         SHIM_ERR_NOT_READY
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `path` must be readable for `path_len` UTF-16 code
+    /// units.
     pub unsafe fn shim_process_start_timeout(_p: *const u16, _pl: i32, _ms: i32) -> i32 {
         SHIM_ERR_NOT_READY
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. No pointers cross here, so the shared contract is the
+    /// whole of it.
     pub unsafe fn shim_process_running(_uid3: u32) -> i32 {
         SHIM_ERR_NOT_READY
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. No pointers cross here, so the shared contract is the
+    /// whole of it.
     pub unsafe fn shim_process_kill(_uid3: u32) -> i32 {
         SHIM_ERR_NOT_READY
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. No pointers cross here, so the shared contract is the
+    /// whole of it.
     pub unsafe fn shim_set_resident(_on: i32) -> i32 {
         SHIM_ERR_NOT_READY
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `pattern` must be readable for `pattern_len` UTF-16
+    /// code units, `total_us` must point to a writable `i64` and `threads` must point to a writable
+    /// `i32`.
     pub unsafe fn shim_cpu_time(
         _pattern: *const u16,
         _pattern_len: i32,
@@ -1483,18 +2312,35 @@ mod host_stubs {
         }
         SHIM_ERR_NOT_READY
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `out` must be writable for `cap` UTF-16 code units and
+    /// `len` must point to a writable `i32`.
     pub unsafe fn shim_process_at(_index: i32, _out: *mut u16, _cap: i32, len: *mut i32) -> i32 {
         if !len.is_null() {
             core::ptr::write(len, 0);
         }
         SHIM_ERR_NOT_READY
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. No pointers cross here, so the shared contract is the
+    /// whole of it.
     pub unsafe fn shim_apps_refresh() -> i32 {
         SHIM_ERR_NOT_READY
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. No pointers cross here, so the shared contract is the
+    /// whole of it.
     pub unsafe fn shim_apps_count() -> i32 {
         0
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `uid3` must be writable for `cap` u32s, `hidden` must
+    /// be writable for `cap` bytes, `caption` must be writable for `cap` UTF-16 code units and
+    /// `caption_len` must point to a writable `i32`.
     pub unsafe fn shim_app_at(
         _index: i32,
         _uid3: *mut u32,
@@ -1508,24 +2354,49 @@ mod host_stubs {
         }
         SHIM_ERR_NOT_READY
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. No pointers cross here, so the shared contract is the
+    /// whole of it.
     pub unsafe fn shim_app_launch(_uid3: u32) -> i32 {
         SHIM_ERR_NOT_READY
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `msg` must be readable for `msg_len` bytes.
     pub unsafe fn shim_app_task_message(_uid3: u32, _msg: *const u8, _len: i32) -> i32 {
         SHIM_ERR_NOT_READY
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. No pointers cross here, so the shared contract is the
+    /// whole of it.
     pub unsafe fn shim_app_to_background() -> i32 {
         SHIM_ERR_NOT_READY
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. No pointers cross here, so the shared contract is the
+    /// whole of it.
     pub unsafe fn shim_app_to_foreground() -> i32 {
         SHIM_ERR_NOT_READY
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `text` must be readable for `len` UTF-16 code units.
     pub unsafe fn shim_clip_set_text(_text: *const u16, _len: i32) -> i32 {
         SHIM_ERR_NOT_READY
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `out` must be writable for `cap` UTF-16 code units and
+    /// `len` must point to a writable `i32`.
     pub unsafe fn shim_clip_get_text(_out: *mut u16, _cap: i32, _len: *mut i32) -> i32 {
         SHIM_ERR_NOT_READY
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `doc` must be readable for `doc_len` UTF-16 code units.
     pub unsafe fn shim_app_launch_doc(
         _uid3: u32,
         _doc: *const u16,
@@ -1534,18 +2405,38 @@ mod host_stubs {
     ) -> i32 {
         SHIM_ERR_NOT_READY
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. No pointers cross here, so the shared contract is the
+    /// whole of it.
     pub unsafe fn shim_app_kill(_uid3: u32) -> i32 {
         SHIM_ERR_NOT_READY
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. No pointers cross here, so the shared contract is the
+    /// whole of it.
     pub unsafe fn shim_app_end(_uid3: u32) -> i32 {
         SHIM_ERR_NOT_READY
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. No pointers cross here, so the shared contract is the
+    /// whole of it.
     pub unsafe fn shim_keylock() -> i32 {
         SHIM_ERR_NOT_READY
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `out` must be writable for `cap` u32s.
     pub unsafe fn shim_apps_running(_out: *mut u32, _cap: i32) -> i32 {
         SHIM_ERR_NOT_READY
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `rgb_out` must be writable for `cap` UTF-16 code units,
+    /// `mask_out` must be writable for `cap` bytes, `w` must point to a writable `i32` and `h` must
+    /// point to a writable `i32`.
     pub unsafe fn shim_app_icon(
         _uid3: u32,
         _size: i32,
@@ -1563,6 +2454,10 @@ mod host_stubs {
         }
         SHIM_ERR_NOT_READY
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `bars` must point to a writable `i32` and `dbm` must
+    /// point to a writable `i32`.
     pub unsafe fn shim_tele_signal(bars: *mut i32, dbm: *mut i32) -> i32 {
         if !bars.is_null() {
             core::ptr::write(bars, -1);
@@ -1572,6 +2467,10 @@ mod host_stubs {
         }
         SHIM_ERR_NOT_READY
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `buf` must be writable for `cap` UTF-16 code units and
+    /// `len` must point to a writable `i32`.
     pub unsafe fn shim_cenrep_get_string(
         _repo: u32,
         _key: u32,
@@ -1584,63 +2483,111 @@ mod host_stubs {
         }
         SHIM_ERR_NOT_READY
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. No pointers cross here, so the shared contract is the
+    /// whole of it.
     pub unsafe fn shim_cenrep_set(_repo: u32, _key: u32, _value: i32) -> i32 {
         SHIM_ERR_NOT_READY
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `text` must be readable for `len` UTF-16 code units.
     pub unsafe fn shim_cenrep_set_string(_repo: u32, _key: u32, _t: *const u16, _l: i32) -> i32 {
         SHIM_ERR_NOT_READY
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `out` must point to a writable `i32`.
     pub unsafe fn shim_cenrep_get(_repo: u32, _key: u32, out: *mut i32) -> i32 {
         if !out.is_null() {
             core::ptr::write(out, 0);
         }
         SHIM_ERR_NOT_READY
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `out_on` must point to a writable `i32`.
     pub unsafe fn shim_bt_power_get(out_on: *mut i32) -> i32 {
         if !out_on.is_null() {
             core::ptr::write(out_on, 0);
         }
         SHIM_ERR_NOT_READY
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `out_via` must point to a writable `i32`.
     pub unsafe fn shim_bt_power_set(_on: i32, out_via: *mut i32) -> i32 {
         if !out_via.is_null() {
             core::ptr::write(out_via, 0);
         }
         SHIM_ERR_NOT_READY
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `out` must point to a writable `ShimBtLocal`.
     pub unsafe fn shim_bt_local_get(out: *mut ShimBtLocal) -> i32 {
         if !out.is_null() {
             core::ptr::write(out, ShimBtLocal::default());
         }
         SHIM_ERR_NOT_READY
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. No pointers cross here, so the shared contract is the
+    /// whole of it.
     pub unsafe fn shim_bt_visibility_set(_scan_enable: i32) -> i32 {
         SHIM_ERR_NOT_READY
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `out_count` must point to a writable `i32`.
     pub unsafe fn shim_bt_paired_refresh(out_count: *mut i32) -> i32 {
         if !out_count.is_null() {
             core::ptr::write(out_count, 0);
         }
         SHIM_ERR_NOT_READY
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `out` must point to a writable `ShimBtDevice`.
     pub unsafe fn shim_bt_paired_get(_index: i32, out: *mut ShimBtDevice) -> i32 {
         if !out.is_null() {
             core::ptr::write(out, ShimBtDevice::default());
         }
         SHIM_ERR_NOT_FOUND
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `addr6` must point to the six readable bytes of a
+    /// Bluetooth address.
     pub unsafe fn shim_bt_set_trusted(_addr6: *const u8, _trusted: i32) -> i32 {
         SHIM_ERR_NOT_READY
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `addr6` must point to the six readable bytes of a
+    /// Bluetooth address.
     pub unsafe fn shim_bt_unpair(_addr6: *const u8) -> i32 {
         SHIM_ERR_NOT_READY
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `addr6` must point to the six readable bytes of a
+    /// Bluetooth address and `name` must be readable for `len` UTF-16 code units.
     pub unsafe fn shim_bt_rename(_addr6: *const u8, _name: *const u16, _len: i32) -> i32 {
         SHIM_ERR_NOT_READY
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. No pointers cross here, so the shared contract is the
+    /// whole of it.
     pub unsafe fn shim_bt_close() -> i32 {
         SHIM_ERR_NOT_READY
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `out_found` must point to a writable `i32`.
     pub unsafe fn shim_bt_inquiry_sync(
         _budget_ms: i32,
         _max_devices: i32,
@@ -1651,18 +2598,28 @@ mod host_stubs {
         }
         SHIM_ERR_NOT_READY
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `out` must point to a writable `ShimBtDevice`.
     pub unsafe fn shim_bt_found_get(_index: i32, out: *mut ShimBtDevice) -> i32 {
         if !out.is_null() {
             core::ptr::write(out, ShimBtDevice::default());
         }
         SHIM_ERR_NOT_FOUND
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `out` must point to a writable `ShimBtRfcommProbe`.
     pub unsafe fn shim_bt_rfcomm_probe(out: *mut ShimBtRfcommProbe) -> i32 {
         if !out.is_null() {
             core::ptr::write(out, ShimBtRfcommProbe::default());
         }
         SHIM_ERR_NOT_SUPPORTED
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `name` must be readable for `name_len` UTF-16 code
+    /// units and `out_channel` must point to a writable `i32`.
     pub unsafe fn shim_btrf_listen_start(
         _backlog: i32,
         _name: *const u16,
@@ -1674,21 +2631,44 @@ mod host_stubs {
         }
         SHIM_ERR_NOT_SUPPORTED
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. No pointers cross here, so the shared contract is the
+    /// whole of it.
     pub unsafe fn shim_btrf_accept() -> i32 {
         SHIM_ERR_NOT_SUPPORTED
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `buf` must be writable for `cap` bytes.
     pub unsafe fn shim_btrf_recv(_handle: i32, _buf: *mut u8, _cap: i32) -> i32 {
         SHIM_ERR_NOT_SUPPORTED
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `buf` must be readable for `len` bytes.
     pub unsafe fn shim_btrf_send(_handle: i32, _buf: *const u8, _len: i32) -> i32 {
         SHIM_ERR_NOT_SUPPORTED
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. No pointers cross here, so the shared contract is the
+    /// whole of it.
     pub unsafe fn shim_btrf_close(_handle: i32) -> i32 {
         SHIM_ERR_NOT_SUPPORTED
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. No pointers cross here, so the shared contract is the
+    /// whole of it.
     pub unsafe fn shim_btrf_listen_stop() -> i32 {
         SHIM_ERR_NOT_SUPPORTED
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `rgb_out` must be writable for `cap` UTF-16 code units,
+    /// `mask_out` must be writable for `cap` bytes, `w` must point to a writable `i32` and `h` must
+    /// point to a writable `i32`.
     pub unsafe fn shim_app_icon_b(
         _uid3: u32,
         _size: i32,
@@ -1706,6 +2686,15 @@ mod host_stubs {
         }
         SHIM_ERR_NOT_READY
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `rgb_out` must be writable for `cap` UTF-16 code units,
+    /// `mask_out` must be writable for `cap` bytes, `w` must point to a writable `i32` and `h` must
+    /// point to a writable `i32`.
+    // The arity is the C++ shim's, not ours: this mirrors a declaration in
+    // shim/inc/symbian_shim.h, and splitting the Rust side into a struct would leave the two
+    // halves of the ABI describing different functions.
+    #[allow(clippy::too_many_arguments)]
     pub unsafe fn shim_app_icon_c(
         _uid3: u32,
         _size: i32,
@@ -1724,6 +2713,10 @@ mod host_stubs {
         }
         SHIM_ERR_NOT_READY
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `out` must be writable for `cap` UTF-16 code units and
+    /// `len` must point to a writable `i32`.
     pub unsafe fn shim_app_icon_file(
         _uid3: u32,
         _out: *mut u16,
@@ -1735,91 +2728,219 @@ mod host_stubs {
         }
         SHIM_ERR_NOT_READY
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `out` must point to a writable `i32`.
     pub unsafe fn shim_hal_get(_attr: i32, _out: *mut i32) -> i32 {
         SHIM_ERR_NOT_READY
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `out` must point to a writable `u32`.
+    pub unsafe fn shim_skin_color(_major: i32, _minor: i32, _index: i32, _out: *mut u32) -> i32 {
+        SHIM_ERR_NOT_READY
+    }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `out` must be writable for `cap` u32s, `width` must
+    /// point to a writable `i32` and `height` must point to a writable `i32`.
+    pub unsafe fn shim_skin_samples(
+        _major: i32,
+        _minor: i32,
+        _out: *mut u32,
+        _cap: i32,
+        _width: *mut i32,
+        _height: *mut i32,
+    ) -> i32 {
+        SHIM_ERR_NOT_READY
+    }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `out_mask` must point to a writable `u32`.
     pub unsafe fn shim_drive_list(_out: *mut u32) -> i32 {
         SHIM_ERR_NOT_READY
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `out` must point to a writable `ShimDriveInfo`.
     pub unsafe fn shim_drive_info(_d: i32, _out: *mut ShimDriveInfo) -> i32 {
         SHIM_ERR_NOT_READY
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `out` must point to a writable `ShimVolumeInfo`.
     pub unsafe fn shim_volume_info(_d: i32, _out: *mut ShimVolumeInfo) -> i32 {
         SHIM_ERR_NOT_READY
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. No pointers cross here, so the shared contract is the
+    /// whole of it.
     pub unsafe fn shim_has_capability(_cap: i32) -> i32 {
         SHIM_ERR_NOT_READY
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `path` must be readable for `len` UTF-16 code units and
+    /// `out` must point to a writable `u32`.
     pub unsafe fn shim_fs_att(_p: *const u16, _l: i32, _out: *mut u32) -> i32 {
         SHIM_ERR_NOT_READY
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `out_handle` must point to a writable `i32`.
     pub unsafe fn shim_msv_open(_out: *mut i32) -> i32 {
         SHIM_ERR_NOT_READY
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `out` must point to a writable `i32`.
     pub unsafe fn shim_msv_mtm_count(_h: i32, _out: *mut i32) -> i32 {
         SHIM_ERR_NOT_READY
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. No pointers cross here, so the shared contract is the
+    /// whole of it.
     pub unsafe fn shim_msv_refresh_registry(_h: i32) -> i32 {
         SHIM_ERR_NOT_READY
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. No pointers cross here, so the shared contract is the
+    /// whole of it.
     pub unsafe fn shim_msv_can_instantiate(_h: i32, _u: u32) -> i32 {
         SHIM_ERR_NOT_READY
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `out` must point to a writable `ShimMtmInfo`.
     pub unsafe fn shim_msv_mtm_info(_h: i32, _i: i32, _out: *mut ShimMtmInfo) -> i32 {
         SHIM_ERR_NOT_READY
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `out` must point to a writable `i32`.
     pub unsafe fn shim_msv_folder_count(_h: i32, _f: i32, _out: *mut i32) -> i32 {
         SHIM_ERR_NOT_READY
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `out` must point to a writable `i32`.
     pub unsafe fn shim_msv_folder_unread(_h: i32, _f: i32, _out: *mut i32) -> i32 {
         SHIM_ERR_NOT_READY
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. No pointers cross here, so the shared contract is the
+    /// whole of it.
     pub unsafe fn shim_msv_close(_h: i32) {}
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `path` must be readable for `len` UTF-16 code units.
     pub unsafe fn shim_msv_install_mtm(_p: *const u16, _l: i32) -> i32 {
         SHIM_ERR_NOT_READY
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `path` must be readable for `len` UTF-16 code units.
     pub unsafe fn shim_msv_deinstall_mtm(_p: *const u16, _l: i32) -> i32 {
         SHIM_ERR_NOT_READY
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `name` must be readable for `name_len` UTF-16 code
+    /// units and `out_id` must point to a writable `i32`.
     pub unsafe fn shim_msv_create_service(_h: i32, _u: u32, _n: *const u16, _nl: i32, _o: *mut i32) -> i32 {
         SHIM_ERR_NOT_READY
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `msg` must point to a readable `ShimNewMessage` and
+    /// `out_id` must point to a writable `i32`.
     pub unsafe fn shim_msv_create_message(_h: i32, _m: *const ShimNewMessage, _o: *mut i32) -> i32 {
         SHIM_ERR_NOT_READY
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. No pointers cross here, so the shared contract is the
+    /// whole of it.
     pub unsafe fn shim_msv_delete_entry(_h: i32, _id: i32) -> i32 {
         SHIM_ERR_NOT_READY
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. No pointers cross here, so the shared contract is the
+    /// whole of it.
     pub unsafe fn shim_msv_delete_services(_h: i32, _u: u32) -> i32 {
         SHIM_ERR_NOT_READY
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `out` must point to a writable `ShimMsvEntry`.
     pub unsafe fn shim_msv_entry(_h: i32, _id: i32, _out: *mut ShimMsvEntry) -> i32 {
         SHIM_ERR_NOT_READY
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `out_ids` must be writable for `cap` i32s and
+    /// `out_count` must point to a writable `i32`.
     pub unsafe fn shim_msv_children(_h: i32, _f: i32, _o: *mut i32, _c: i32, _n: *mut i32) -> i32 {
         SHIM_ERR_NOT_READY
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `out_ids` must be writable for `cap` i32s and
+    /// `out_count` must point to a writable `i32`.
     pub unsafe fn shim_msv_services(_h: i32, _u: u32, _o: *mut i32, _c: i32, _n: *mut i32) -> i32 {
         SHIM_ERR_NOT_READY
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `out` must be writable for `cap` UTF-16 code units and
+    /// `out_len` must point to a writable `i32`.
     pub unsafe fn shim_msv_body(_h: i32, _id: i32, _o: *mut u16, _c: i32, _l: *mut i32) -> i32 {
         SHIM_ERR_NOT_READY
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. No pointers cross here, so the shared contract is the
+    /// whole of it.
     pub unsafe fn shim_msv_set_flags(_h: i32, _id: i32, _s: i32, _c: i32) -> i32 {
         SHIM_ERR_NOT_READY
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. No pointers cross here, so the shared contract is the
+    /// whole of it.
     pub unsafe fn shim_msv_move_entry(_h: i32, _id: i32, _p: i32) -> i32 {
         SHIM_ERR_NOT_READY
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. No pointers cross here, so the shared contract is the
+    /// whole of it.
     pub unsafe fn shim_msv_observe(_h: i32, _e: i32) -> i32 {
         SHIM_ERR_NOT_READY
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. No pointers cross here, so the shared contract is the
+    /// whole of it.
     pub unsafe fn shim_ncn_notify(_s: i32, _i: i32) -> i32 {
         SHIM_ERR_NOT_READY
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. No pointers cross here, so the shared contract is the
+    /// whole of it.
     pub unsafe fn shim_ncn_mark_unread(_s: i32) -> i32 {
         SHIM_ERR_NOT_READY
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `name` must be readable for `len` UTF-16 code units and
+    /// `out` must point to a writable `ShimDllProbe`.
     pub unsafe fn shim_dll_call_ordinal1(
         _n: *const u16,
         _l: i32,
@@ -1828,36 +2949,74 @@ mod host_stubs {
     ) -> i32 {
         SHIM_ERR_NOT_READY
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `name` must be readable for `len` UTF-16 code units.
     pub unsafe fn shim_dll_has_ordinal(_n: *const u16, _l: i32, _o: i32) -> i32 {
         SHIM_ERR_NOT_READY
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. No pointers cross here, so the shared contract is the
+    /// whole of it.
     pub unsafe fn shim_mem_free_kb() -> i32 {
         SHIM_ERR_NOT_READY
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. No pointers cross here, so the shared contract is the
+    /// whole of it.
     pub unsafe fn shim_mem_total_kb() -> i32 {
         SHIM_ERR_NOT_READY
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. No pointers cross here, so the shared contract is the
+    /// whole of it.
     pub unsafe fn shim_heap_used_kb() -> i32 {
         SHIM_ERR_NOT_READY
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. No pointers cross here, so the shared contract is the
+    /// whole of it.
     pub unsafe fn shim_prop_define_public(_c: u32, _k: u32) -> i32 {
         SHIM_ERR_NOT_READY
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. No pointers cross here, so the shared contract is the
+    /// whole of it.
     pub unsafe fn shim_prop_define(_c: u32, _k: u32) -> i32 {
         SHIM_ERR_NOT_READY
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. No pointers cross here, so the shared contract is the
+    /// whole of it.
     pub unsafe fn shim_prop_set(_c: u32, _k: u32, _v: i32) -> i32 {
         SHIM_ERR_NOT_READY
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `out` must point to a writable `i32`.
     pub unsafe fn shim_prop_get(_c: u32, _k: u32, out: *mut i32) -> i32 {
         if !out.is_null() {
             core::ptr::write(out, 0);
         }
         SHIM_ERR_NOT_READY
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. No pointers cross here, so the shared contract is the
+    /// whole of it.
     pub unsafe fn shim_prop_subscribe(_c: u32, _k: u32) -> i32 {
         SHIM_ERR_NOT_READY
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. No pointers cross here, so the shared contract is the
+    /// whole of it.
     pub unsafe fn shim_prop_unsubscribe(_c: u32, _k: u32) {}
 
     // The SQL stubs return NOT_READY rather than panicking, unlike the allocator's.
@@ -1865,98 +3024,179 @@ mod host_stubs {
     // mistake — but `symbian::sql` is written against a trait with an in-memory
     // implementation for exactly that case, so the useful failure is the error the
     // wrapper propagates, not an abort inside a stub nobody meant to call.
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `path` must be readable for `path_len` UTF-16 code
+    /// units and `handle` must point to a writable `i32`.
     pub unsafe fn shim_sql_open(_p: *const u16, _pl: i32, _c: i32, handle: *mut i32) -> i32 {
         if !handle.is_null() {
             core::ptr::write(handle, 0);
         }
         SHIM_ERR_NOT_READY
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. No pointers cross here, so the shared contract is the
+    /// whole of it.
     pub unsafe fn shim_sql_close(_db: i32) {}
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `path` must be readable for `path_len` UTF-16 code
+    /// units.
     pub unsafe fn shim_sql_delete(_p: *const u16, _pl: i32) -> i32 {
         SHIM_ERR_NOT_READY
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `sql` must be readable for `len` bytes and `changed`
+    /// must point to a writable `i32`.
     pub unsafe fn shim_sql_exec(_db: i32, _s: *const u8, _l: i32, changed: *mut i32) -> i32 {
         if !changed.is_null() {
             core::ptr::write(changed, 0);
         }
         SHIM_ERR_NOT_READY
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `out` must point to a writable `i32`.
     pub unsafe fn shim_sql_size(_db: i32, out: *mut i32) -> i32 {
         if !out.is_null() {
             core::ptr::write(out, 0);
         }
         SHIM_ERR_NOT_READY
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `buf` must be writable for `cap` UTF-16 code units and
+    /// `len` must point to a writable `i32`.
     pub unsafe fn shim_sql_last_error(_db: i32, _b: *mut u16, _c: i32, len: *mut i32) -> i32 {
         if !len.is_null() {
             core::ptr::write(len, 0);
         }
         SHIM_ERR_NOT_READY
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `sql` must be readable for `len` bytes and `stmt` must
+    /// point to a writable `i32`.
     pub unsafe fn shim_sql_prepare(_db: i32, _s: *const u8, _l: i32, stmt: *mut i32) -> i32 {
         if !stmt.is_null() {
             core::ptr::write(stmt, 0);
         }
         SHIM_ERR_NOT_READY
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. No pointers cross here, so the shared contract is the
+    /// whole of it.
     pub unsafe fn shim_sql_finalize(_stmt: i32) {}
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. No pointers cross here, so the shared contract is the
+    /// whole of it.
     pub unsafe fn shim_sql_reset(_stmt: i32) -> i32 {
         SHIM_ERR_NOT_READY
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. No pointers cross here, so the shared contract is the
+    /// whole of it.
     pub unsafe fn shim_sql_step(_stmt: i32) -> i32 {
         SHIM_ERR_NOT_READY
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `changed` must point to a writable `i32`.
     pub unsafe fn shim_sql_exec_stmt(_stmt: i32, changed: *mut i32) -> i32 {
         if !changed.is_null() {
             core::ptr::write(changed, 0);
         }
         SHIM_ERR_NOT_READY
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. No pointers cross here, so the shared contract is the
+    /// whole of it.
     pub unsafe fn shim_sql_bind_null(_stmt: i32, _i: i32) -> i32 {
         SHIM_ERR_NOT_READY
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. No pointers cross here, so the shared contract is the
+    /// whole of it.
     pub unsafe fn shim_sql_bind_int(_stmt: i32, _i: i32, _v: i64) -> i32 {
         SHIM_ERR_NOT_READY
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. No pointers cross here, so the shared contract is the
+    /// whole of it.
     pub unsafe fn shim_sql_bind_real(_stmt: i32, _i: i32, _v: f64) -> i32 {
         SHIM_ERR_NOT_READY
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `text` must be readable for `len` UTF-16 code units.
     pub unsafe fn shim_sql_bind_text(_stmt: i32, _i: i32, _t: *const u16, _l: i32) -> i32 {
         SHIM_ERR_NOT_READY
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `data` must be readable for `len` bytes.
     pub unsafe fn shim_sql_bind_blob(_stmt: i32, _i: i32, _d: *const u8, _l: i32) -> i32 {
         SHIM_ERR_NOT_READY
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `out` must point to a writable `i32`.
     pub unsafe fn shim_sql_column_type(_stmt: i32, _c: i32, out: *mut i32) -> i32 {
         if !out.is_null() {
             core::ptr::write(out, SHIM_SQL_NULL);
         }
         SHIM_ERR_NOT_READY
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `out` must point to a writable `i64`.
     pub unsafe fn shim_sql_column_int(_stmt: i32, _c: i32, out: *mut i64) -> i32 {
         if !out.is_null() {
             core::ptr::write(out, 0);
         }
         SHIM_ERR_NOT_READY
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `out` must point to a writable `f64`.
     pub unsafe fn shim_sql_column_real(_stmt: i32, _c: i32, out: *mut f64) -> i32 {
         if !out.is_null() {
             core::ptr::write(out, 0.0);
         }
         SHIM_ERR_NOT_READY
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `buf` must be writable for `cap` UTF-16 code units and
+    /// `len` must point to a writable `i32`.
     pub unsafe fn shim_sql_column_text(_stmt: i32, _c: i32, _b: *mut u16, _cap: i32, len: *mut i32) -> i32 {
         if !len.is_null() {
             core::ptr::write(len, 0);
         }
         SHIM_ERR_NOT_READY
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `buf` must be writable for `cap` bytes and `len` must
+    /// point to a writable `i32`.
     pub unsafe fn shim_sql_column_blob(_stmt: i32, _c: i32, _b: *mut u8, _cap: i32, len: *mut i32) -> i32 {
         if !len.is_null() {
             core::ptr::write(len, 0);
         }
         SHIM_ERR_NOT_READY
     }
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. `name` must be readable for `len` UTF-16 code units and
+    /// `out` must point to a writable `i32`.
     pub unsafe fn shim_sql_column_index(_stmt: i32, _n: *const u16, _l: i32, out: *mut i32) -> i32 {
         if !out.is_null() {
             core::ptr::write(out, -1);

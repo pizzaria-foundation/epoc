@@ -456,7 +456,7 @@ mod tests {
             index.push(0);
             index.extend_from_slice(&0i16.to_le_bytes()); // bearing_x
             index.extend_from_slice(&8i16.to_le_bytes()); // bearing_y
-            blob.extend(core::iter::repeat(0xFFu8).take(w as usize * h as usize));
+            blob.extend(core::iter::repeat_n(0xFFu8, w as usize * h as usize));
         }
 
         let mut out = header;

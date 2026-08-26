@@ -1296,7 +1296,7 @@ mod tests {
     /// A body longer than the 256-unit first buffer.
     #[test]
     fn body_grows_until_the_whole_text_fits() {
-        let long: String = core::iter::repeat('x').take(1000).collect();
+        let long: String = "x".repeat(1000);
         let mut fake = MemMsv::new();
         let id = fake.push_message(sys::SHIM_MSV_INBOX, 0xE1, 1, "Ana", &long, 0);
         let mut s = Session::with(fake).unwrap();
@@ -1329,7 +1329,7 @@ mod tests {
     /// documented cap, and a silently shortened one is a reply addressed to the wrong person.
     #[test]
     fn a_long_correspondent_is_reported_as_truncated() {
-        let long: String = core::iter::repeat('a').take(100).collect();
+        let long: String = "a".repeat(100);
         let mut fake = MemMsv::new();
         let id = fake.push_message(sys::SHIM_MSV_INBOX, 0xE1, 1, &long, "hi", 0);
         let mut s = Session::with(fake).unwrap();

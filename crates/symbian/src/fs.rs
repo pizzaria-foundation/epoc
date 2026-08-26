@@ -440,6 +440,59 @@ pub fn write_atomic<F: Fs>(fs: &mut F, path: &Utf16Path, data: &[u8]) -> Result<
     fs.rename(tmp.as_units(), path.as_units())
 }
 
+/// The chunk [`copy`] moves at a time. Small on purpose: the caller is a boot daemon with a modest
+/// heap copying a package that can be a third of a megabyte, and a copy that has to allocate the
+/// whole file is a copy that fails on the day it is needed most.
+pub const COPY_CHUNK: usize = 8 * 1024;
+
+/// Copy `from` to `to`, atomically at the destination and without holding the file in memory.
+///
+/// Same temp-and-rename as [`write_atomic`] and for the same reason, one step further: a package
+/// being promoted to "the version we can go back to" must never exist as a half-copy. Either the
+/// whole known-good `.sis` is there or the previous one still is; a truncated rollback package is a
+/// rollback that fails at the moment the phone has nothing else left.
+///
+/// [`Error::NotFound`] if the source is not there.
+pub fn copy<F: Fs>(fs: &mut F, from: &Utf16Path, to: &Utf16Path) -> Result<u64> {
+    let tmp = to.with_suffix(".tmp")?;
+    // Raw handles rather than two [`File`] values: `File` borrows the filesystem for as long as it
+    // lives, and a copy needs both ends open at once. The cost is that the closes are ours to get
+    // right, which is what the early-return dance below is.
+    let src = fs.open(from.as_units(), OpenMode::Read)?;
+    let dst = match fs.open(tmp.as_units(), OpenMode::Replace) {
+        Ok(h) => h,
+        Err(e) => {
+            fs.close(src);
+            return Err(e);
+        }
+    };
+
+    let mut buf = alloc::vec![0u8; COPY_CHUNK];
+    let mut total: u64 = 0;
+    let result = (|| -> Result<u64> {
+        loop {
+            let got = fs.read(src, &mut buf)?;
+            if got == 0 {
+                return Ok(total);
+            }
+            let mut sent = 0;
+            while sent < got {
+                let n = fs.write(dst, &buf[sent..got])?;
+                if n == 0 {
+                    return Err(Error::UnexpectedEof);
+                }
+                sent += n;
+            }
+            total += got as u64;
+        }
+    })();
+    fs.close(src);
+    fs.close(dst);
+    let total = result?;
+    fs.rename(tmp.as_units(), to.as_units())?;
+    Ok(total)
+}
+
 /// Append `data`, starting the file over first if it has passed `cap` bytes.
 ///
 /// The primitive under [`crate::applog`] and `symbian::log`. A log that grows without bound
@@ -485,6 +538,12 @@ pub struct MemFs {
     /// Every path passed to [`Fs::mkdir`], in order. The fake creates no directories —
     /// see the impl — so this is the only record that a caller asked.
     pub mkdirs: Vec<Vec<u16>>,
+}
+
+impl Default for MemFs {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl MemFs {
@@ -585,7 +644,7 @@ impl Fs for MemFs {
                 continue;
             }
             let name = &key[path.len()..];
-            if name.iter().any(|&u| u == sep) {
+            if name.contains(&sep) {
                 continue; // in a subdirectory, not an immediate child
             }
             if pos + name.len() + 1 > out.len() {
@@ -620,7 +679,7 @@ impl Fs for MemFs {
                     d
                 }
             };
-            if !names.iter().any(|x| *x == entry) {
+            if !names.contains(&entry) {
                 names.push(entry);
             }
         }
@@ -773,6 +832,34 @@ mod tests {
         let mut fs = MemFs::new();
         let path = Utf16Path::new("C:\\nope.bin").unwrap();
         assert!(read(&mut fs, &path).unwrap().is_none());
+    }
+
+    #[test]
+    fn copy_moves_a_file_larger_than_one_chunk_byte_for_byte() {
+        let mut fs_ = MemFs::new();
+        let src = Utf16Path::new("C:\\a.sis").unwrap();
+        let dst = Utf16Path::new("C:\\b.sis").unwrap();
+        // Deliberately not a multiple of the chunk: the last partial read is where a copy that
+        // trusts `read` to fill the buffer writes the previous chunk's tail a second time.
+        let data: Vec<u8> = (0..COPY_CHUNK * 2 + 37).map(|i| (i % 251) as u8).collect();
+        write_atomic(&mut fs_, &src, &data).unwrap();
+
+        assert_eq!(copy(&mut fs_, &src, &dst).unwrap(), data.len() as u64);
+        assert_eq!(read(&mut fs_, &dst).unwrap().unwrap(), data);
+        assert_eq!(read(&mut fs_, &src).unwrap().unwrap(), data, "the source is untouched");
+    }
+
+    #[test]
+    fn copying_a_file_that_is_not_there_fails_and_leaves_the_target_alone() {
+        let mut fs_ = MemFs::new();
+        let dst = Utf16Path::new("C:\\b.sis").unwrap();
+        write_atomic(&mut fs_, &dst, b"the known-good package").unwrap();
+        assert!(copy(&mut fs_, &Utf16Path::new("C:\\gone.sis").unwrap(), &dst).is_err());
+        assert_eq!(
+            read(&mut fs_, &dst).unwrap().unwrap(),
+            b"the known-good package",
+            "a failed copy must never be the reason a rollback has nothing to install"
+        );
     }
 
     #[test]

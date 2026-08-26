@@ -1,0 +1,17 @@
+[package]
+name = "symbian-dom"
+description = "HTML and CSS into a styled tree, through libhubbub, libdom and libcss"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+# The device target is `armv5te-symbian-eabi`, whose vendor cargo does not know about. The same
+# lint allowance every crate that checks for it carries.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_vendor, values("symbian"))'] }
+
+[dependencies]
+symbian-gfx = { workspace = true }
+symbian-layout = { workspace = true }

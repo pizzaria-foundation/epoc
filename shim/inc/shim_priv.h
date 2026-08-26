@@ -125,9 +125,27 @@ TInt ShimFsSession(RFs*& aOut);
 #ifdef SHIM_USE_NET
 void ShimNetCleanup();
 
+/* The socket server handle and the RConnection behind a bearer handle from shim_net_start.
+ *
+ * Exists for shim_http.cpp, which has to hand both to RHTTPSession's connection info so the HTTP
+ * stack goes out over the bearer this process already brought up instead of opening a second one.
+ * `aConn` comes back as a bare pointer because this header is included by every shim file and must
+ * not drag in es_sock.h for the two that need it; the caller casts. Fails with KErrNotReady while
+ * the bearer is still coming up, which is the honest answer — RHTTPSession bound to a connection
+ * that was never started is the same esock client panic that shim_net.cpp documents for sockets.
+ *
+ * Wait for a bearer handle to be up before calling. */
+TInt ShimNetBearer(TInt aNetHandle, TInt& aServHandle, TAny*& aConn);
+
 /* Wait for any running job and close the worker thread. Waiting is the point: the job
  * holds pointers into buffers the caller is about to free. */
 void ShimWorkCleanup();
+#endif
+
+/* Close the HTTP session and abandon any transaction in flight. Before ShimNetCleanup: the
+ * session holds the RConnection that cleanup is about to close. */
+#ifdef SHIM_USE_HTTP
+void ShimHttpCleanup();
 #endif
 
 /* Cancel every outstanding decode and free the bitmaps. Cancel before free, for the
@@ -146,6 +164,21 @@ void ShimImageCleanup();
  * should not import mediaclientaudio.dll. */
 #ifdef SHIM_USE_AUDIO
 void ShimAudioCleanup();
+#endif
+
+/* Cancel the position request and close the sub-session and the session, in that order — a
+ * positioner outliving its server is the same orphaned-handle panic as every other pair here.
+ *
+ * Guarded like the audio cleanup: an app that does not want a position should not import lbs.dll,
+ * and it should certainly not be holding a GPS subscription open past its own exit. */
+#ifdef SHIM_USE_LBS
+void ShimLbsCleanup();
+#endif
+
+/* Cancel any cell read and close the telephony session. Guarded like the rest: an app that never
+ * asks which tower it is on should not import etel3rdparty. */
+#ifdef SHIM_USE_CELL
+void ShimCellCleanup();
 #endif
 
 /* Finalise every open statement, then close every open database. Guarded like the audio

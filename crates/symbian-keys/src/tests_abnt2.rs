@@ -264,6 +264,13 @@ fn plus_can_be_typed() {
     let mut kb = Keyboard::new(Layout::Abnt2E72);
     let i = |func| Press { scan: 0x49, code: u16::from(b'i'), shift: false, func, ctrl: false };
     assert_eq!(kb.translate(i(false)), Stroke::One('i'));
+    // Fn+I is '+' and Fn+K is '-', the two symbols printed on those keycaps. The dump carried the
+    // plus and was silent about the minus, so nothing on this keyboard produced '-' at all until
+    // OVERLAY in tools/mkkeymap.py was given both.
+    assert_eq!(kb.translate(i(true)), Stroke::One('+'));
+    let k = |func| Press { scan: 0x4B, code: u16::from(b'k'), shift: false, func, ctrl: false };
+    assert_eq!(kb.translate(k(false)), Stroke::One('k'));
+    assert_eq!(kb.translate(k(true)), Stroke::One('-'));
     assert_eq!(kb.translate(i(true)), Stroke::One('+'), "Fn+I is `+` on this handset");
 }
 

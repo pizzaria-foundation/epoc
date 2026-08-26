@@ -56,6 +56,30 @@ static void stage(const char* tag)
     fs.Close();
     }
 
+/* The stack the TLS worker actually got, in KB, to C:\Data\tlsstack.txt.
+ *
+ * Separate from `stage` because they answer different questions and have different lifetimes: the
+ * stage is "where did it get to", overwritten as it goes, and this is "what was it given", written
+ * once and still there after a crash. */
+static void stackNote(TInt aKb)
+    {
+    RFs fs;
+    if (fs.Connect() != KErrNone) return;
+    _LIT(KDir, "C:\\Data\\");
+    _LIT(KFile, "C:\\Data\\tlsstack.txt");
+    fs.MkDirAll(KDir);
+    RFile f;
+    if (f.Replace(fs, KFile, EFileWrite) == KErrNone)
+        {
+        TBuf8<32> line;
+        line.AppendNum(aKb);
+        line.Append(_L8(" KB"));
+        f.Write(line);
+        f.Close();
+        }
+    fs.Close();
+    }
+
 namespace {
 
 /* Block on an async request WHILE dispatching active objects. CSecureSocket is a CActive-driven
@@ -556,9 +580,37 @@ static int32_t GetOverWorker(const uint16_t* host, int32_t hostLen, int32_t port
      *
      * NULL heap = share this process heap, so the worker's allocations and the shared `out` buffer
      * are the same heap we free from. */
-    const TInt KStack = 64 * 1024;
-    TInt cr = thr.Create(KName, TlsThreadEntry, KStack, NULL, &args);
+    /* Ask for the largest stack this handset will give, largest first.
+     *
+     * A ladder rather than a constant, because the number that matters is not knowable from here:
+     * `apps/domprobe` measured `RThread::Create` refusing anything above 80 KB — but that was the
+     * six-argument overload, which *creates a heap*. This call passes `RAllocator* = NULL` to share
+     * the process heap, which is a different path, and assuming the two ceilings are the same is
+     * exactly the kind of guess that cost six device round trips this week.
+     *
+     * The size matters because of what the comment above records: a stack overflow in this thread
+     * presents as `KERN-EXEC 3` *inside* `CSecureSocket::NewL`, indistinguishable at a glance from a
+     * broken TLS module. The mbedtls port's handshake buffers live on this stack, and a newer
+     * mbedtls with TLS 1.3 needs more of it than the port did when 64 KB was chosen.
+     *
+     * `stage` records which rung was taken, so a run that still crashes says whether it crashed with
+     * the stack it asked for or with a smaller one it settled for. */
+    static const TInt KStacks[] = { 256 * 1024, 128 * 1024, 96 * 1024, 80 * 1024, 64 * 1024 };
+    TInt cr = KErrNone;
+    TInt stackUsed = 0;
+    for (TUint i = 0; i < sizeof(KStacks) / sizeof(KStacks[0]); ++i)
+        {
+        cr = thr.Create(KName, TlsThreadEntry, KStacks[i], NULL, &args);
+        if (cr == KErrNone)
+            {
+            stackUsed = KStacks[i];
+            break;
+            }
+        }
     if (cr != KErrNone) { stage("thr_fail"); return -3800 + cr; }
+    /* Its own file, not `stage`: stage() replaces one file, so a later stage overwrites this and the
+     * rung is lost exactly in the run that crashes — which is the run that needs it. */
+    stackNote(stackUsed / 1024);
 
     args.file = toFile ? file : NULL;
     args.fileLen = toFile ? fileLen : 0;

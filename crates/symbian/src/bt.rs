@@ -655,10 +655,12 @@ mod tests {
 
     #[test]
     fn a_raw_device_becomes_one_with_an_owned_name() {
-        let mut raw = sys::ShimBtDevice::default();
-        raw.addr = [0x00, 0x1B, 0xAF, 0x12, 0x34, 0x56];
-        raw.device_class = 0x24_04_18; // major class 4: audio/video
-        raw.flags = sys::SHIM_BT_PAIRED | sys::SHIM_BT_TRUSTED | sys::SHIM_BT_FRIENDLY;
+        let mut raw = sys::ShimBtDevice {
+            addr: [0x00, 0x1B, 0xAF, 0x12, 0x34, 0x56],
+            device_class: 0x24_04_18, // major class 4: audio/video
+            flags: sys::SHIM_BT_PAIRED | sys::SHIM_BT_TRUSTED | sys::SHIM_BT_FRIENDLY,
+            ..Default::default()
+        };
         let name: Vec<u16> = "HS-16".encode_utf16().collect();
         raw.name[..name.len()].copy_from_slice(&name);
         raw.name_len = name.len() as i32;
@@ -676,8 +678,7 @@ mod tests {
     fn a_name_longer_than_the_shim_carries_says_so() {
         // The array is full and the length says there was more. Losing that would turn "we
         // showed the first 32 characters" into "the name is 32 characters long".
-        let mut raw = sys::ShimBtDevice::default();
-        raw.name_len = 200;
+        let raw = sys::ShimBtDevice { name_len: 200, ..Default::default() };
         let d = Device::from_raw(&raw);
         assert!(d.name_truncated);
         assert_eq!(d.name.len(), 32);

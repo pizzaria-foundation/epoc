@@ -31,6 +31,7 @@ pub mod agenda;
 pub mod daily;
 pub mod apps;
 pub mod backoff;
+pub mod blob;
 pub mod bt;
 pub mod cenrep;
 pub mod cache;
@@ -42,13 +43,17 @@ pub mod error;
 pub mod fs;
 pub mod hal;
 pub mod handlers;
+pub mod http;
 pub mod msg;
 pub mod image;
 pub mod intent;
+pub mod location;
 pub mod log;
 pub mod mem;
 pub mod net;
+pub mod pkg;
 pub mod process;
+pub mod skin;
 pub mod prop;
 pub mod random;
 pub mod tele;
@@ -192,6 +197,18 @@ pub const DATA_DIR: &str = "C:\\Data\\";
 ///
 /// [`ensure_log_dir`] creates it; a log path is useless if opening it fails on a fresh phone.
 pub const DATA_LOG_DIR: &str = "C:\\Data\\_logs\\";
+
+/// Where a package waits to be installed: `C:\Data\_app_install\`.
+///
+/// The folder `epoc sideload` and ADBian's `sideload` push a `.sis` into, and the one a person opens
+/// in **File mgr. > Phone memory > Data > _app_install** to tap it. The leading underscore is the
+/// same trick as [`DATA_LOG_DIR`] and for the same reason: it sorts to the top of `C:\Data\`,
+/// above somebody's photos.
+///
+/// Named here rather than in each tool because it stopped being only a drop box. `apps/bootctl`
+/// scans it for update candidates, so the path is now a contract between the host tooling, the
+/// remote shell and an application on the phone — three places that must not each spell it out.
+pub const APP_INSTALL_DIR: &str = "C:\\Data\\_app_install\\";
 
 /// Size at which a log file starts over. See [`fs::append_capped`].
 pub const LOG_MAX: u64 = 64 * 1024;

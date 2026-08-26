@@ -20,9 +20,21 @@ pub fn define(category: u32, key: u32) -> Result<()> {
     Error::check(unsafe { sys::shim_prop_define(category, key) })
 }
 
-/// Define an integer property with an **open read policy**, so a process in a *different* SID can
-/// read it. Still cap-free when `category` is the caller's own SecureId. For a bundled daemon that
-/// publishes a value (e.g. the inbox unread count) the launcher — a different UID — reads.
+/// Define an integer property whose policies are **open in both directions**, so a process in a
+/// *different* SID can read it — and write it. Still cap-free when `category` is the caller's own
+/// SecureId. For a bundled daemon that publishes a value (e.g. the inbox unread count) the launcher
+/// — a different UID — reads.
+///
+/// # It opens the write policy too, and this doc used to say otherwise
+///
+/// It read "an **open read policy**", which is what the *use* is, not what the call does.
+/// `shim_prop.cpp` passes `_LIT_SECURITY_POLICY_PASS(pass)` for both, and says so: *"Write stays
+/// open too; only the daemon ever writes."* So "only one process writes" is a **convention here,
+/// not a policy** — nothing stops a second writer, and nothing will tell you there was one.
+///
+/// Worth knowing before designing around it. A cross-process *setting* looks like a job for this and
+/// is not: a property does not survive a reboot. See [`crate::intent`] for the file-shaped channel,
+/// and `symbian_app::theme_pref` for a setting that needed to outlive one.
 pub fn define_public(category: u32, key: u32) -> Result<()> {
     // SAFETY: scalar arguments only.
     Error::check(unsafe { sys::shim_prop_define_public(category, key) })

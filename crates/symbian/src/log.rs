@@ -239,10 +239,7 @@ fn resolve() {
     crate::ensure_log_dir();
 
     let mut fs = ShimFs;
-    let data = match data_path(APP) {
-        Ok(p) => Some(p),
-        Err(_) => None,
-    };
+    let data = data_path(APP).ok();
 
     let mut candidates: [(Option<Utf16Path>, &'static str); 3] = [
         (data, "C:\\Data\\_logs\\<app>.txt"),

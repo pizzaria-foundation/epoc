@@ -70,11 +70,13 @@ pub const ROWS: &[KeyRow] = &[
     KeyRow { scan: 0x44, chars: ['d', 'D', '\0', '\0'], dead: 0b0000 },
     // 0x45: lower=0065 00E9 00EA 00E8 00EB; upper=0045 00C9 00CA 00C8 00CB
     KeyRow { scan: 0x45, chars: ['e', 'E', '\0', '\0'], dead: 0b0000 },
+    // 0x49: hardware-verified overlay, overrides the dump
     // 0x49: lower=0069 00ED 00EE 00EC 00EF; upper=0049 00CD 00CE 00CC 00CF
     // 0x49: chr=002B from numeric binding (case 4)
     KeyRow { scan: 0x49, chars: ['i', 'I', '+', '+'], dead: 0b0000 },
+    // 0x4B: hardware-verified overlay, overrides the dump
     // 0x4B: lower=006B; upper=004B
-    KeyRow { scan: 0x4B, chars: ['k', 'K', '\0', '\0'], dead: 0b0000 },
+    KeyRow { scan: 0x4B, chars: ['k', 'K', '-', '-'], dead: 0b0000 },
     // 0x4C: lower=006C; upper=004C
     KeyRow { scan: 0x4C, chars: ['l', 'L', '\0', '\0'], dead: 0b0000 },
     // 0x4F: lower=006F 00F3 00F5 00F4 00BA 00F2; upper=004F 00D3 00D5 00D4 00BA 00D2

@@ -108,9 +108,36 @@ pub const MAX_URL: usize = 1024;
 /// `Ok(())` means the request was *posted*, not that anything opened. Whether a handler exists is
 /// the launcher's question, and it is answered on the launcher's screen — this call has no way to
 /// wait for it and deliberately does not try.
+///
+/// Which is exactly why it also calls [`yield_screen`]: the answer appears on a screen the caller
+/// is standing in front of. The launcher is woken by a property, and a property does not raise a
+/// window group — so its question is drawn behind the application that asked, and the user sees a
+/// link that did nothing.
 pub fn request_open<F: Fs>(fs: &mut F, url: &str) -> Result<()> {
     write_request(fs, url)?;
-    signal()
+    signal()?;
+    yield_screen();
+    Ok(())
+}
+
+/// Get out of the way of the launcher's answer.
+///
+/// A caller that drives the channel by hand — [`write_request`] then [`signal`], because it has a
+/// fallback to run when the bell goes unheard — has to do this itself once it knows the launcher
+/// took the request. [`request_open`] does it for everyone else.
+///
+/// No `Result`, deliberately. Whether we managed to leave says nothing about whether the request
+/// will be answered, there is nothing a caller could do differently, and off the device it always
+/// fails — so a return value here would only be an error nobody can act on, in the one place a
+/// caller is least able to react.
+///
+/// The mechanism is [`crate::apps::to_background`], and the reason it is the right one is written
+/// down twice already on this platform: `shim_net.cpp` steps aside before the CommsDat access-point
+/// dialog for the same reason, having learned on the handset that S60 3rd Edition draws it behind
+/// the foreground application. Stepping aside also happens to reveal the launcher itself, since on
+/// this phone it *is* what is behind everything.
+pub fn yield_screen() {
+    let _ = crate::apps::to_background();
 }
 
 /// Write the payload, without ringing the bell.

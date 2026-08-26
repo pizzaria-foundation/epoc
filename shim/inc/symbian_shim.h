@@ -114,6 +114,26 @@ enum ShimEventKind {
      * `d` carries the platform's raw code, since "ended" and "ended by underflow" are
      * one outcome to a caller and two different facts in a probe report. */
     SHIM_EV_AUDIO_DONE = 42,
+    /* A position update completed. `status` is SHIM_OK for a fix and the platform's own code
+     * otherwise — SHIM_ERR_TIMED_OUT for a module that could not see the sky in time, and
+     * SHIM_ERR_ACCESS_DENIED for a client that never called SetRequestor, which is a precondition
+     * and not a capability. `a` is the number of satellites used (-1 when satellite info was not
+     * requested or no fix arrived), `b` the horizontal accuracy rounded to whole metres (-1 when
+     * unknown), `c` 1 when the request carried satellite info.
+     *
+     * The event is the notification; the fix itself is read with shim_gps_read, because latitude
+     * is a double and an event carries integers. With a non-zero update interval this repeats for
+     * the life of the subscription, errors included — a timeout in a tunnel is not a reason to
+     * stop asking. From shim_lbs.cpp. */
+    SHIM_EV_GPS_FIX = 43,
+    /* The serving cell tower was read. `status` is SHIM_OK or the platform's error; `a` is 1 when
+     * the modem said the location area is known, which is what decides whether the area code and
+     * cell id in shim_cell_get mean anything.
+     *
+     * The identifiers themselves are collected with shim_cell_get rather than carried here,
+     * because an event is four integers and a caller wants five with a parse behind two of them.
+     * From shim_cell.cpp. */
+    SHIM_EV_CELL = 44,
     /* A subscribed Publish & Subscribe property changed. `a` is the key, `c` the freshly
      * read integer value. From shim_prop; the daemon uses it as its stop signal. */
     SHIM_EV_PROP = 53,
@@ -127,8 +147,30 @@ enum ShimEventKind {
      * slot, a restarted daemon and a session event that arrived while nobody was listening
      * all the same recoverable case. See shim_msv_observe. */
     SHIM_EV_MSV = 60,
+    /* The response headers arrived for the HTTP transaction in flight. `a` is the HTTP status
+     * code. Redirects are already followed by then — the platform stack does that for GET without
+     * telling anyone — so this is the status of the page that will actually load. From
+     * shim_http.cpp. */
+    SHIM_EV_HTTP_HEAD = 70,
+    /* Body bytes arrived. `a` is the running total the stack has handed over, which is not the
+     * same as what is buffered: shim_httpc_read drains a capped buffer, and the difference is
+     * reported through the truncated flag rather than by the two numbers quietly disagreeing. */
+    SHIM_EV_HTTP_BODY = 71,
+    /* The transaction ended. `status` is SHIM_OK or the platform error — and a negative one is
+     * worth keeping, since an untrusted certificate is only distinguishable from a dead server by
+     * its code. `a` is the HTTP status, `b` the total body bytes, `c` the response flags, `d` the
+     * number of body callbacks it took. */
+    SHIM_EV_HTTP_DONE = 72,
     /* The app should exit; nothing may be queued after it. */
-    SHIM_EV_QUIT = 90
+    SHIM_EV_QUIT = 90,
+
+    /* Another application asked this one to open a document — a URL, in practice.
+     *
+     * `a` is its length in UTF-16 units; the text itself is collected with
+     * `shim_app_open_request`, because an event carries integers and a URL is not one. Arrives on
+     * a cold start (AppArc gave us a document name) and on a warm one (our task was sent a
+     * message), and the application does not need to know which. */
+    SHIM_EV_OPEN_URL = 91
 };
 
 /* Subtypes carried in `a` of SHIM_EV_APP_EVENT. */
@@ -433,6 +475,104 @@ int32_t shim_image_describe(int32_t handle, int32_t* out, int32_t cap);
  * slot and its bitmap leak. */
 void shim_image_close(int32_t handle);
 
+/* --------------------------------------------------------------- position --
+ * The Location Acquisition API: RPositionServer onto the framework, RPositioner onto whichever
+ * module it picks. Behind USE_LBS, because lbs.dso is an import an app that does not want a
+ * position has no reason to carry.
+ *
+ * Needs the Location capability, which is protected. This handset grants it (measured — see
+ * apps/devdump's caps probe), and a stock phone would not install an unsigned package that
+ * declares it.
+ *
+ * Nothing here blocks. A fix takes seconds to minutes, so every route to one is an event. */
+
+/* Subscribe to position updates. Completions arrive as SHIM_EV_GPS_FIX.
+ *
+ * `interval_ms` 0 is a single fix and the subscription then goes quiet; any positive value is a
+ * stream at that cadence, paced by the framework rather than by us. `timeout_ms` 0 lets the module
+ * take as long as it takes — which for a cold GPS start is minutes, so a foreground app wants a
+ * bound and a logger does not.
+ *
+ * `want_satellites` asks for TPositionSatelliteInfo instead of TPositionInfo, which adds the
+ * satellite counts. Whether a given module accepts it is a property of that module; this is a
+ * parameter rather than a guess so a probe can measure the answer.
+ *
+ * `module_uid` 0 lets the framework choose. A named module is chosen instead, and the reason that
+ * is worth a parameter is that the modules are not interchangeable — this handset reports the
+ * integrated GPS at 80 s and 10 m, and the network module at 12 s and 200 m. "Roughly where, very
+ * soon" and "exactly where, eventually" are different questions and only one of them can be asked
+ * at a time. Use shim_gps_module_info to find a UID.
+ *
+ * SHIM_ERR_ALREADY_EXISTS when a subscription is already running: there is one device position and
+ * a second subscription would pay the GPS's power cost twice. Switching modules therefore means
+ * shim_gps_stop followed by another start. */
+int32_t shim_gps_start(int32_t interval_ms, int32_t timeout_ms, int32_t want_satellites,
+                       int32_t module_uid);
+
+/* Cancel the subscription and close the session. Safe when nothing is running. */
+void shim_gps_stop(void);
+
+/* The last completed update. Any pointer may be NULL.
+ *
+ * SHIM_ERR_NOT_READY before the first completion — which is the honest answer, and the reason this
+ * is not a struct full of zeroes a caller would draw at latitude 0, longitude 0. When the last
+ * update was an error, that error is returned rather than a stale fix.
+ *
+ * `alt`, `h_acc` and `v_acc` come back NaN when the module does not report them; check for it. */
+int32_t shim_gps_read(double* lat, double* lon, double* alt,
+                      double* h_acc, double* v_acc, int32_t* sats, int32_t* in_view);
+
+/* How many positioning modules the framework knows about. Answerable without starting anything,
+ * which is what lets a caller decide not to. */
+int32_t shim_gps_module_count(int32_t* out);
+
+/* One module's entry, by index in 0..count. `name` receives the module name in UTF-16 and may be
+ * NULL; SHIM_ERR_OVERFLOW means the name was cut, and the values below are still filled.
+ *
+ * `out` receives, needing cap >= 10:
+ *   0  module UID          1  1 when available now
+ *   2  technology type (1 terminal, 2 terminal-assisted, 4 network)
+ *   3  device location (1 internal, 2 external)
+ *   4  cost indicator      5  power consumption
+ *   6  horizontal accuracy in mm, or -1     7  vertical accuracy in mm, or -1
+ *   8  time to first fix in ms              9  time to next fix in ms
+ *
+ * Entry 8 is the number that decides a map's UI: a module whose cold start is minutes cannot be
+ * something the first frame waits on. */
+int32_t shim_gps_module_info(int32_t index, uint16_t* name, int32_t name_cap,
+                             int32_t* name_len, int32_t* out, int32_t out_cap);
+
+/* ------------------------------------------------------------------- cell --
+ * The serving tower's identifiers, through CTelephony. Behind USE_CELL, which adds etel3rdparty —
+ * an import gated on its own because an app that wants a GPS fix has no use for it.
+ *
+ * Why this exists at all: on this handset there is no other route to a position indoors. The
+ * platform's own network positioning module answers KErrGeneral, and both satellite modules time
+ * out under a roof — measured, see docs/reference/gpsprobe.txt. A tower id and a public database
+ * is what every other phone does instead.
+ *
+ * Asynchronous, like everything else here. See the header of shim_cell.cpp for what waiting on it
+ * would cost. */
+
+/* Ask for the serving cell. Completion arrives as SHIM_EV_CELL. Safe to call again; a read already
+ * in flight is left alone rather than restarted. */
+int32_t shim_cell_read(void);
+
+/* The identifiers from the last completed read. Any pointer may be NULL.
+ *
+ * SHIM_ERR_NOT_READY before the first completion, and the platform's error when the last read
+ * failed. SHIM_ERR_ARGUMENT when the modem gave a country or network code that is not decimal
+ * digits — refused rather than partially parsed, because a query built from half an MNC returns a
+ * confident answer about the wrong place.
+ *
+ * `area_known` is the modem's own flag. When it is 0 the area code and cell id are whatever was in
+ * the struct and mean nothing. */
+int32_t shim_cell_get(int32_t* mcc, int32_t* mnc, int32_t* lac, int32_t* cid,
+                      int32_t* area_known);
+
+/* Cancel any read in flight and release the telephony session. */
+void shim_cell_stop(void);
+
 /* ---------------------------------------------------------------- sockets --
  * Every ESock operation is asynchronous — there are no synchronous variants of
  * Connect, Send or Recv. Each call here returns immediately and the completion
@@ -542,6 +682,64 @@ int32_t shim_work_submit(int32_t opcode, const uint8_t* in, int32_t in_len,
 
 /* Non-zero while a job is running. */
 int32_t shim_work_busy(void);
+
+/* Why the last worker thread ended, for a job that never answered.
+ *
+ * A Symbian thread that dies leaves an exit type, an exit reason and an exit category behind, and
+ * that triple is a diagnosis: `KERN-EXEC 3` is a bad pointer, `E32USER-CBase 69` is a PushL with no
+ * cleanup stack, `KERN-EXEC 0` is a panic raised by the code itself. Different bugs, different
+ * fixes.
+ *
+ * This exists because that triple was on the floor for six device round trips. A job that never
+ * answers was the only symptom available, and "never answered" was read as five different causes in
+ * a row, each wrong, each costing a Bluetooth push of nearly a megabyte. The kernel knew the answer
+ * the whole time; nothing was asking it.
+ *
+ * `type` is a TExitType: 0 kill, 1 terminate, 2 panic, 3 pending (still running). `reason` is the
+ * panic number or the exit code. `cat` receives the category as NUL-terminated ASCII, which is the
+ * half that names the subsystem.
+ *
+ * Valid only while the previous thread's handle is still open — that is, after a job that never
+ * completed and before the next submit. Returns 0 on success, SHIM_ERR_NOT_READY if there is no
+ * thread to ask about. */
+int32_t shim_work_exit_info(int32_t* type, int32_t* reason, uint8_t* cat, int32_t cat_cap);
+
+/* Push and pop one frame on the calling thread's cleanup stack.
+ *
+ * The narrowest possible test of one thing: whether platform C++ can allocate through the cleanup
+ * stack on this thread. It exists because `iconv_open` on a worker panics `E32USER-CBase 66` — which
+ * the SDK's own headers gloss as "a stack frame for the next PushL() cannot be allocated" — *after* a
+ * CTrapCleanup was installed and confirmed created. Two very different bugs fit that: the cleanup
+ * stack we install is not the one PushL finds, or charconv's allocation fails for a reason of its
+ * own. A bare PushL separates them, and a bare PushL involves no charset conversion at all.
+ *
+ * Returns 0 if the push and pop completed, the leave code if it left. A panic returns nothing, and
+ * `shim_work_exit_info` names it. */
+int32_t shim_cleanup_probe(void);
+
+/* Collect the document another application asked this one to open, if any.
+ *
+ * Writes UTF-16 into `out` and returns the number of units, 0 when there is nothing pending, or
+ * SHIM_ERR_OVERFLOW when the buffer is too small — in which case the request is *kept*, so a caller
+ * with a bigger buffer can still get it.
+ *
+ * Consumed by reading: the request has been delivered once it is in the caller's hands, and leaving
+ * it behind is how a link from a previous run opens by itself on the next one. */
+int32_t shim_app_open_request(uint16_t* out, int32_t cap);
+
+/* The C libraries' heap: bytes committed, and bytes live. See shim_alloc.cpp for why this is not
+ * the same question as `shim_heap_used_kb`, which reads the calling thread's allocator. */
+void shim_cheap_stats(int32_t* size, int32_t* allocated);
+
+/* Return the C heap's unused tail to the system; the bytes recovered. */
+int32_t shim_cheap_compress(void);
+
+/* The same push with no TRAP of its own — the shape of every call into platform C++ from a job.
+ *
+ * A cleanup stack is not a cleanup stack *frame*: frames come from TRAP, and `CleanupStack::PushL`
+ * with none panics `E32USER-CBase 66`. This is the direct test of whether the caller established
+ * one, which the version above hides by supplying its own. */
+int32_t shim_cleanup_probe_bare(void);
 
 /* Implemented by the application, called on the worker thread. See the allocation
  * rule above; `symbian_app::entry!` wires this up and defaults it to a stub. */

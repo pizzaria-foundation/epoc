@@ -41,3 +41,29 @@ fn read(rc: i32) -> Result<u32> {
         Ok(rc as u32)
     }
 }
+
+/// The C libraries' heap: bytes committed to the process, and bytes live inside it.
+///
+/// A separate reading from [`heap_used_kb`], and the distinction matters: that one reads the
+/// *calling thread's* allocator, which is the process heap, while the five vendored NetSurf
+/// libraries allocate on a chunk heap of their own. Every memory figure this project logged was
+/// therefore blind to the code most likely to be growing.
+///
+/// Returns `(committed, live)`. Both zero before anything has parsed.
+pub fn c_heap() -> (u32, u32) {
+    let mut size = 0i32;
+    let mut allocated = 0i32;
+    // SAFETY: two out-pointers into locals; the shim writes both or neither.
+    unsafe { sys::shim_cheap_stats(&mut size, &mut allocated) };
+    (size.max(0) as u32, allocated.max(0) as u32)
+}
+
+/// Give the C heap's unused tail back to the system, and report the bytes recovered.
+///
+/// `RHeap::Compress` cannot move live cells, so one allocation near the top pins everything under
+/// it. The return value is what was actually recovered rather than a claim of success — which is
+/// the difference between "the page was freed" and "the page was freed and the memory came back".
+pub fn compress_c_heap() -> u32 {
+    // SAFETY: no arguments; the shim is a no-op when the heap does not exist.
+    unsafe { sys::shim_cheap_compress().max(0) as u32 }
+}

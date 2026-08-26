@@ -88,7 +88,7 @@ pub fn installed() -> Result<Vec<AppInfo>> {
     // Sort at the source so every consumer — the menu grid and the shortcut picker alike — sees one
     // stable alphabetical order. AppArc returns entries in registration/scan order, which reads as
     // random on screen; case-insensitive by caption is what a user expects a program list to be.
-    out.sort_by(|a, b| a.caption.to_lowercase().cmp(&b.caption.to_lowercase()));
+    out.sort_by_key(|a| a.caption.to_lowercase());
     Ok(out)
 }
 
@@ -351,15 +351,40 @@ pub fn task_message(uid3: u32, msg: &[u8]) -> Result<()> {
 ///
 /// Only useful from a binary built with `USE_LAUNCH_DOC=1`; elsewhere the routes answer
 /// [`Error::NotSupported`] and this degrades to a plain launch.
+///
+/// # It also steps aside
+///
+/// On success this calls [`to_background`], because a hand-off that keeps the screen is not a
+/// hand-off. The application being asked to open the address will put something in front of the
+/// user — a page, a connection prompt, a "which access point" query — and on S60 3rd Edition that
+/// something arrives *behind* whatever is already in front. `shim_net.cpp` learned this on the
+/// handset for the CommsDat dialog and fixes it the same way; there is no reason for every caller
+/// to learn it again.
+///
+/// The step aside happens only when something accepted the URL. A failed hand-off leaves the
+/// caller in front, which is where it has to be to tell the user that nothing opened.
 pub fn open_at(uid3: u32, url: &str) -> Result<()> {
     // `4` is the S60 browser's own command for "open this URL". It is the browser's convention and
     // not the platform's, which is why it is built here at the call rather than inside the shim.
     let cmd = alloc::format!("4 {url}");
 
-    match task_message(uid3, cmd.as_bytes()) {
-        Ok(()) => return Ok(()),
-        // NotFound is the ordinary case: it simply is not running yet.
-        Err(_) => {}
+    let accepted = accept_url(uid3, url, &cmd);
+    if accepted.is_ok() {
+        // Whether we manage to leave says nothing about whether the URL opened, so it is not the
+        // caller's error to handle: off-device it is always NotReady, and on a handset the worst
+        // case is the symptom this exists to remove rather than a new one.
+        let _ = to_background();
+    }
+    accepted
+}
+
+/// The routes, in the order the handset taught. Split out of [`open_at`] so the step aside has one
+/// answer to act on rather than four returns to intercept.
+fn accept_url(uid3: u32, url: &str, cmd: &str) -> Result<()> {
+    // NotFound is the ordinary case here: the app simply is not running yet, so a failure is not
+    // worth reporting — it only means the routes below still have work to do.
+    if task_message(uid3, cmd.as_bytes()).is_ok() {
+        return Ok(());
     }
     for route in [
         LaunchDoc::BrowserTail,
@@ -370,7 +395,7 @@ pub fn open_at(uid3: u32, url: &str) -> Result<()> {
         // The prefixed form for the routes that reach the browser's own command parsing, the bare
         // URL for the ones that do not.
         let doc = match route {
-            LaunchDoc::DocumentName | LaunchDoc::StartDocument => cmd.as_str(),
+            LaunchDoc::DocumentName | LaunchDoc::StartDocument => cmd,
             _ => url,
         };
         if launch_doc(uid3, doc, route).is_ok() {
@@ -486,6 +511,24 @@ impl Apps for ShimApps {
     fn launch(&mut self, uid3: u32) -> Result<()> {
         launch(uid3)
     }
+}
+
+/// The document another application asked this one to open, if any.
+///
+/// A URL, in practice: the launcher routes a link to whichever application the user set for that
+/// scheme, and this is the receiving end of every route it tries — the document name of a cold
+/// start and the task message sent to an application already running. The caller does not have to
+/// know which happened.
+///
+/// Reading it consumes it. A request left behind is a link from a previous run opening by itself on
+/// the next one, which is the kind of thing that looks like the phone is haunted.
+pub fn open_request() -> Option<alloc::string::String> {
+    let mut buf = [0u16; 1024];
+    let n = unsafe { sys::shim_app_open_request(buf.as_mut_ptr(), buf.len() as i32) };
+    if n <= 0 {
+        return None;
+    }
+    alloc::string::String::from_utf16(&buf[..n as usize]).ok()
 }
 
 #[cfg(test)]

@@ -73,7 +73,7 @@ impl Defaults {
     pub fn set(&mut self, scheme: &str, uid3: Option<u32>) {
         self.entries.retain(|(s, _)| !s.eq_ignore_ascii_case(scheme));
         if let Some(uid) = uid3 {
-            self.entries.push((scheme.to_ascii_lowercase().into(), uid));
+            self.entries.push((scheme.to_ascii_lowercase(), uid));
         }
     }
 

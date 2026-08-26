@@ -141,6 +141,19 @@ const TInt KKeyMapCount = sizeof(KKeyMap) / sizeof(KKeyMap[0]);
 TBool gFnArmed = EFalse;
 TBool gFnLocked = EFalse;
 
+/* Whether the Fn key is physically down right now.
+ *
+ * Separate from armed and locked, and the piece that was missing. Fn arrived here as a *latch*:
+ * every key-down toggled armed -> locked -> off, and holding the key auto-repeats key-downs, so
+ * where the latch ended up depended on how long it was held. Holding Fn and pressing something —
+ * which is what a person does, and what the E72's own printing on the keys suggests — landed
+ * anywhere.
+ *
+ * With this, a hold is a hold: the modifier is on for as long as the key is down and for every key
+ * pressed meanwhile, and it is not spent by them. Tapping Fn still arms it for one keystroke, and
+ * tapping twice still locks. */
+TBool gFnDown = EFalse;
+
 void FnKeyPressed()
     {
     if (gFnLocked)
@@ -161,7 +174,7 @@ void FnKeyPressed()
 
 TBool FnActive()
     {
-    return gFnArmed || gFnLocked;
+    return gFnDown || gFnArmed || gFnLocked;
     }
 
 } /* namespace */
@@ -493,12 +506,24 @@ TKeyResponse CShimControl::OfferKeyEventL(const TKeyEvent& aKeyEvent, TEventCode
     /* The Fn key never produces an EEventKey — it is a modifier, so it only ever
      * arrives as down/up. Catch it here, before the EEventKey filter that used to
      * hide it. */
-    if (aType == EEventKeyDown
-        && (aKeyEvent.iScanCode == EStdKeyLeftFunc
-            || aKeyEvent.iScanCode == EStdKeyRightFunc))
+    if (aKeyEvent.iScanCode == EStdKeyLeftFunc || aKeyEvent.iScanCode == EStdKeyRightFunc)
         {
-        FnKeyPressed();
-        return EKeyWasConsumed;
+        if (aType == EEventKeyDown)
+            {
+            /* Only the first down of a press. Auto-repeat while held would otherwise walk the
+             * latch through its states, which is the bug this guard exists for. */
+            if (!gFnDown)
+                {
+                gFnDown = ETrue;
+                FnKeyPressed();
+                }
+            return EKeyWasConsumed;
+            }
+        if (aType == EEventKeyUp)
+            {
+            gFnDown = EFalse;
+            return EKeyWasConsumed;
+            }
         }
 
     /* Resident launcher key handling — the whole reason the app is a launcher and not just an
@@ -604,6 +629,10 @@ TKeyResponse CShimControl::OfferKeyEventL(const TKeyEvent& aKeyEvent, TEventCode
     /* Our own Fn state counts as Func: the app should not have to know that the
      * platform's Fn key is invisible to it and ours is synthesized. */
     if ((aKeyEvent.iModifiers & EModifierFunc) || FnActive()) mods |= 4;
+    /* And, separately, whether it is being held *now*. Armed and locked are stored state from an
+     * earlier press; only a hold is a gesture happening at this instant, and a shortcut wants that
+     * one. See `sys::modifier::FUNC_HELD`. */
+    if (gFnDown || (aKeyEvent.iModifiers & EModifierFunc)) mods |= 8;
 
     for (TInt i = 0; i < KKeyMapCount; i++)
         {
@@ -666,7 +695,7 @@ TKeyResponse CShimControl::OfferKeyEventL(const TKeyEvent& aKeyEvent, TEventCode
         e.d = aKeyEvent.iScanCode;
         e.native = aKeyEvent.iModifiers;
         ShimPushEvent(e);
-        /* One press of Fn covers one character. A lock survives. */
+        /* One press of Fn covers one keystroke; the raw-key branch below spends it too. A lock survives. */
         gFnArmed = EFalse;
         return EKeyWasConsumed;
         }
@@ -685,6 +714,23 @@ TKeyResponse CShimControl::OfferKeyEventL(const TKeyEvent& aKeyEvent, TEventCode
     e.native = aKeyEvent.iModifiers;
     ShimPushEvent(e);
 
+    /* An armed Fn is spent here too, and not only by a printable character.
+     *
+     * A *held* Fn is not spent by anything — see gFnDown. Only the tap-to-arm form is one-shot.
+     *
+     * "One press of Fn covers one character" was the rule, and the code below the printable gate
+     * implemented exactly that — so a key that is not a character never spent it. Arrow keys are
+     * exactly those: `EKeyUpArrow` and friends live above `0xF800` and land in this branch. One
+     * touch of Fn therefore stuck to *every* arrow press that followed, indefinitely.
+     *
+     * That was invisible while no app read the Fn bit on an arrow. The browser began reading it —
+     * Fn+up/down for a page at a time — and the D-pad stopped scrolling line by line and stopped
+     * moving the link cursor at all, because every plain arrow was arriving pre-modified.
+     *
+     * A keystroke is a keystroke. The lock (a double press) is deliberate and survives, which is
+     * the whole difference between arming and locking. */
+    gFnArmed = EFalse;
+
     /* A Ctrl chord is ours, and this is the one place that can say so.
      *
      * Ctrl+C, Ctrl+V and the rest arrive here rather than above, because the control character
@@ -701,6 +747,72 @@ TKeyResponse CShimControl::OfferKeyEventL(const TKeyEvent& aKeyEvent, TEventCode
 
 /* -------------------------------------------------------------------- appui -- */
 
+/* Which delivery route actually fired, appended to C:\Data\browser_open.txt.
+ *
+ * A log and not a stage file: the two routes are mutually exclusive per launch but a session sees
+ * several launches, and the question being answered is "which one does this handset use", which
+ * needs the history rather than the last value. Four wrong guesses about delivery routes were made
+ * before anyone looked. */
+void OpenLog(const TDesC8& aWhat)
+    {
+    RFs fs;
+    if (fs.Connect() != KErrNone)
+        return;
+    _LIT(KDir, "C:\\Data\\");
+    _LIT(KFile, "C:\\Data\\browser_open.txt");
+    fs.MkDirAll(KDir);
+    RFile f;
+    TInt pos = 0;
+    if (f.Open(fs, KFile, EFileWrite) == KErrNone)
+        f.Seek(ESeekEnd, pos);
+    else if (f.Replace(fs, KFile, EFileWrite) != KErrNone)
+        {
+        fs.Close();
+        return;
+        }
+    f.Write(aWhat);
+    f.Write(_L8("\r\n"));
+    f.Close();
+    fs.Close();
+    }
+
+/* A document handed to us and not yet collected by the application.
+ *
+ * A single slot, overwritten: a second link arriving before the first was read means the reader
+ * asked for the second one, and a queue would open both. */
+HBufC* gOpenRequest = NULL;
+
+/* Record `aDoc` as the document to open, and wake the pump if the app is already running.
+ *
+ * The S60 browser's command convention is `4 <url>`, and the launcher sends it on the routes that
+ * reach a browser's own parser. Stripped here rather than in the application: the prefix is a fact
+ * about how the request travelled, not about what was asked for. */
+void SetOpenRequest(const TDesC& aDoc)
+    {
+    TPtrC doc(aDoc);
+    if (doc.Length() > 2 && doc[0] == '4' && doc[1] == ' ')
+        doc.Set(doc.Mid(2));
+    if (doc.Length() == 0)
+        return;
+
+    HBufC* copy = doc.Alloc();
+    if (!copy)
+        return;
+    delete gOpenRequest;
+    gOpenRequest = copy;
+
+    ShimEvent e;
+    e.kind = SHIM_EV_OPEN_URL;
+    e.handle = 0;
+    e.status = SHIM_OK;
+    e.a = doc.Length();
+    e.b = 0;
+    e.c = 0;
+    e.d = 0;
+    e.native = 0;
+    ShimPushEvent(e);
+    }
+
 class CShimAppUi : public CAknAppUi
     {
 public:
@@ -709,6 +821,16 @@ public:
 
     void HandleCommandL(TInt aCommand);
     void HandleForegroundEventL(TBool aForeground);
+
+    /* The two ways another application hands this one a document to open.
+     *
+     * `ProcessCommandParametersL` is the cold start: the launcher asked AppArc to start us with a
+     * document name, and this is where it arrives. `ProcessMessageL` is the warm one: we are
+     * already running and somebody sent our task a message instead. The launcher tries the warm
+     * route first and falls back to the cold one, so an application that implements only one of
+     * them opens links exactly half the time — which is worse to diagnose than opening none. */
+    TBool ProcessCommandParametersL(CApaCommandLine& aCommandLine);
+    void ProcessMessageL(TUid aUid, const TDesC8& aParams);
 
 private:
     void HandleResourceChangeL(TInt aType);
@@ -781,6 +903,56 @@ void CShimAppUi::ConstructL()
     iPump->Start(TCallBack(&CShimAppUi::PumpCallback, this));
     }
 
+TBool CShimAppUi::ProcessCommandParametersL(CApaCommandLine& aCommandLine)
+    {
+    /* Two places a URL can arrive, and the launcher uses both.
+     *
+     * `DocumentName` is the obvious one and the only one the first attempt read. The route the
+     * handset actually took is the other: `SetTailEndL("4 <url>")` with `EApaCommandRun`, which is
+     * the S60 browser's own convention — measured in the launcher's log as `BrowserTail accepted`.
+     * Reading only the document name meant the cold start silently opened the home page, which
+     * looks exactly like the link having been ignored.
+     *
+     * The tail is 8-bit; the document name is 16. Both end up in the same slot. */
+    OpenLog(_L8("cmdline"));
+    const TPtrC doc = aCommandLine.DocumentName();
+    if (doc.Length() > 0)
+        {
+        OpenLog(_L8("doc"));
+        SetOpenRequest(doc);
+        }
+    else
+        {
+        const TPtrC8 tail = aCommandLine.TailEnd();
+        if (tail.Length() > 0)
+            {
+            OpenLog(_L8("tail"));
+            HBufC* wide = HBufC::NewLC(tail.Length());
+            TPtr w = wide->Des();
+            for (TInt i = 0; i < tail.Length(); i++)
+                w.Append((TChar) tail[i]);
+            SetOpenRequest(w);
+            CleanupStack::PopAndDestroy(wide);
+            }
+        }
+    /* EFalse: "this is not a document to open in the ordinary sense", which stops the framework
+     * trying to load it as a file. The application reads the request itself. */
+    return EFalse;
+    }
+
+void CShimAppUi::ProcessMessageL(TUid /*aUid*/, const TDesC8& aParams)
+    {
+    OpenLog(_L8("message"));
+    /* The message is 8-bit; the URL inside it is ASCII by construction (a URL with anything else
+     * has been percent-encoded long before here). Widened rather than reinterpreted. */
+    HBufC* wide = HBufC::NewLC(aParams.Length());
+    TPtr w = wide->Des();
+    for (TInt i = 0; i < aParams.Length(); i++)
+        w.Append((TChar) aParams[i]);
+    SetOpenRequest(w);
+    CleanupStack::PopAndDestroy(wide);
+    }
+
 void CShimAppUi::HandleForegroundEventL(TBool aForeground)
     {
     /* Push a focus event so Rust knows whether we are in the foreground.
@@ -824,6 +996,17 @@ CShimAppUi::~CShimAppUi()
     /* Before the files for the same reason: the media framework keeps the clip open. */
     ShimAudioCleanup();
 #endif
+#ifdef SHIM_USE_CELL
+    /* Owns no file handle either; what matters is that the telephony session does not outlive the
+     * process, for the same reason as every other server handle here. */
+    ShimCellCleanup();
+#endif
+#ifdef SHIM_USE_LBS
+    /* Order does not matter against the files — the location framework holds none of ours. That it
+     * runs at all does: a subscription left open past process exit keeps the module powered on the
+     * server's side until it notices, and the GPS is the most expensive thing on this handset. */
+    ShimLbsCleanup();
+#endif
 #ifdef SHIM_USE_SQL
     /* Before the files only for tidiness — the SQL server owns its own file handles and
      * none of ours. What does matter is that it runs at all: a connection left open past
@@ -838,6 +1021,11 @@ CShimAppUi::~CShimAppUi()
     ShimFilesCleanup();
 #ifdef SHIM_USE_FEP
     ShimFepCleanup();
+#endif
+#ifdef SHIM_USE_HTTP
+    /* Before the net cleanup, not after: the HTTP session holds the RConnection that
+     * ShimNetCleanup is about to close. */
+    ShimHttpCleanup();
 #endif
 #ifdef SHIM_USE_NET
     /* Compiled in only when the app opted into networking, because shim_net.cpp is
@@ -996,6 +1184,20 @@ extern "C" int32_t shim_app_to_foreground(void)
         return SHIM_ERR_NOT_READY;
     ShimRaiseSelf();
     return SHIM_OK;
+    }
+
+/* See symbian_shim.h. */
+extern "C" int32_t shim_app_open_request(uint16_t* out, int32_t cap)
+    {
+    if (!gOpenRequest)
+        return 0;
+    const TInt n = gOpenRequest->Length();
+    if (!out || cap < n)
+        return SHIM_ERR_OVERFLOW;   /* kept, not dropped: a bigger buffer can still collect it */
+    Mem::Copy(out, gOpenRequest->Ptr(), n * 2);
+    delete gOpenRequest;
+    gOpenRequest = NULL;
+    return n;
     }
 
 extern "C" int32_t shim_set_resident(int32_t on)

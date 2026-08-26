@@ -600,8 +600,8 @@ mod tests {
     /// judgement, but a *missing* one would be a service that never polls at all.
     #[test]
     fn the_default_poll_interval_is_set_and_sane() {
-        assert!(DESC.poll_interval_ms >= 1_000, "would hammer the Message Server");
-        assert!(DESC.poll_interval_ms <= 15_000, "a reply would feel lost");
+        const { assert!(DESC.poll_interval_ms >= 1_000, "would hammer the Message Server") };
+        const { assert!(DESC.poll_interval_ms <= 15_000, "a reply would feel lost") };
     }
 
     #[test]

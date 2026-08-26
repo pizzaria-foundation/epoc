@@ -38,6 +38,13 @@
  * `iFrameCoordsInPixels.Size()`, `EColor16M`, no options, `EPriorityStandard`. The exact
  * fit to the screen happens afterwards in Rust, where there are no codec constraints.
  *
+ * IT NEEDS A FONT AND BITMAP SERVER SESSION, AND A GUI APP HIDES THAT
+ *
+ * Every decode this file did until August 2026 ran inside an application whose CCoeEnv had already
+ * connected FBS, so the dependency was satisfied by something nobody here wrote. The first
+ * headless caller found it the hard way — see FbsSession below for the measurement. The session is
+ * opened here now, which is where it belongs: the facility that needs a server opens it.
+ *
  * UNDERFLOW IS NOT A FAILURE
  *
  * Convert may complete with KErrUnderflow meaning "call ContinueConvert", including for
@@ -87,6 +94,52 @@ const TInt KMaxContinues = 16;
  * neither shipped example uses it. An unconfirmed variable is worse than no variable:
  * it costs a thread per decode and it made the next measurement harder to read. */
 const CImageDecoder::TOptions KDecodeOptions = CImageDecoder::EOptionNone;
+
+/* The font and bitmap server session, opened on first use.
+ *
+ * WHY THIS EXISTS, AND WHAT IT COST TO FIND
+ *
+ * A CFbsBitmap lives in the font and bitmap server's shared heap, so creating one needs a session
+ * with that server. A GUI application never asks for it: CCoeEnv connects FBS during its own
+ * construction, and every decode this file has ever done happened underneath one. The dependency
+ * was therefore real, invisible, and written down nowhere.
+ *
+ * A headless daemon has no CCoeEnv. Measured on the E72, 25 August 2026: apps/tileprobe fetched a
+ * tile (HTTP 200, 30633 bytes, 2759 ms), called Decoder::memory, and the process was gone — no
+ * further log line, no report, and no panic.txt, because an FBS client panic is a kernel panic and
+ * the Rust handler never runs. The last thing the log shows is the line before the bitmap.
+ *
+ * Connecting here rather than in the daemon entry keeps the rule this file already follows: the
+ * facility that needs a server opens it. RFbsSession::Connect is reference-counted per thread, so
+ * in a GUI build this is a second reference on a session CONE already holds and changes nothing.
+ *
+ * Lazily rather than at startup, for the same reason as shim_file.cpp's RFs: an app that decodes
+ * nothing should not hold a session with a server the whole device shares. */
+TBool gFbsOpen = EFalse;
+
+TInt FbsSession()
+    {
+    if (gFbsOpen)
+        return KErrNone;
+    const TInt err = RFbsSession::Connect();
+    /* KErrAlreadyExists is success with a different name: this thread already has a session,
+     * which is exactly the GUI case, and treating it as a failure would break the one
+     * configuration that was working before this function existed. */
+    if (err != KErrNone && err != KErrAlreadyExists)
+        return err;
+    gFbsOpen = ETrue;
+    return KErrNone;
+    }
+
+void FbsDisconnect()
+    {
+    if (!gFbsOpen)
+        return;
+    /* Balances the Connect above. In a GUI build CONE still holds its own reference, so the
+     * session survives this and the framework closes it at the usual time. */
+    RFbsSession::Disconnect();
+    gFbsOpen = EFalse;
+    }
 
 class CShimDecode;
 CShimDecode* gSlots[KMaxDecodes];
@@ -320,6 +373,9 @@ void CShimDecode::StartL(TInt aMaxW, TInt aMaxH)
         User::Leave(KErrTooBig);
 
     iMode = EColor16M;
+    /* Before the bitmap, not after: Create with no session is the kernel panic described at
+     * FbsSession above, and a leave here is an error the caller can read. */
+    User::LeaveIfError(FbsSession());
     iBitmap = new (ELeave) CFbsBitmap();
     User::LeaveIfError(iBitmap->Create(dest, iMode));
     iSize = dest;
@@ -493,6 +549,9 @@ void ShimImageCleanup()
         if (gSlots[i])
             Release(i);
         }
+    /* After the decodes, never before: every one of them owns a CFbsBitmap that belongs to this
+     * session. Same ordering rule as sockets before bearers, and files before their server. */
+    FbsDisconnect();
     }
 #endif
 

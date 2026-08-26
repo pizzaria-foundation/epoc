@@ -345,7 +345,10 @@ pub fn fit(w: i32, h: i32, max_w: i32, max_h: i32) -> (i32, i32) {
 /// close the handle, does it match the event to the right message, does it resample to
 /// the right box. Whether the codec is asynchronous is not something a host test can
 /// or should reproduce.
-#[derive(Debug, Default)]
+// `Clone` because a caller that hands its `Images` to a `Decoder` by value needs to keep one for
+// the next decode, and the real `ShimImages` is a unit struct for which that is free. A fake that
+// could not be cloned would make the host test need a different shape from the device code.
+#[derive(Clone, Debug, Default)]
 pub struct MemImages {
     /// Handed out in order, one per `start_*` call.
     pub queued: Vec<Image>,

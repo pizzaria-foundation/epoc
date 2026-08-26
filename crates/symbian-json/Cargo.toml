@@ -1,0 +1,10 @@
+[package]
+name = "symbian-json"
+description = "A small JSON reader: enough to read a GitHub release, and bounded on purpose"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_vendor, values("symbian"))'] }

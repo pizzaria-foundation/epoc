@@ -95,7 +95,28 @@ void MainL()
 #ifdef SHIM_USE_BTSOCK
     ShimBtsockCleanup();
 #endif
+#ifdef SHIM_USE_IMAGE
+    /* Before the files, and this line was missing until a headless decoder needed it: a decode
+     * holds an RFile subsession on the shim's file server session, so closing the session first
+     * orphans a handle whose close then panics naming the file server. The GUI build has had this
+     * ordering since the decoder existed; a daemon that decodes is newer than the list. */
+    ShimImageCleanup();
+#endif
+#ifdef SHIM_USE_CELL
+    /* Owns no file handle either; what matters is that the telephony session does not outlive the
+     * process, for the same reason as every other server handle here. */
+    ShimCellCleanup();
+#endif
+#ifdef SHIM_USE_LBS
+    /* Owns no file handle, so the position against the files is free — but a subscription left
+     * open past exit keeps the module powered until the location server notices. */
+    ShimLbsCleanup();
+#endif
     ShimFilesCleanup();
+#ifdef SHIM_USE_HTTP
+    /* Before the net cleanup: the session holds the RConnection. */
+    ShimHttpCleanup();
+#endif
 #ifdef SHIM_USE_NET
     ShimNetCleanup();
     ShimWorkCleanup();

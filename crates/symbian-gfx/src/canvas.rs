@@ -510,6 +510,11 @@ pub enum Align {
 }
 
 #[cfg(test)]
+// `row * width + col` is how every index in here is written, including when the row is 0. The
+// multiplication is what says *which pixel* is being asserted about; collapsing `6 * 0 + 3` to `3`
+// would save three characters and lose the only thing that makes the assertion readable next to the
+// `6 * 5 + 5` on the line above it.
+#[allow(clippy::erasing_op, clippy::identity_op)]
 mod tests {
     use super::*;
     use crate::color::Rgb565;
@@ -524,7 +529,6 @@ mod tests {
         let mut c = Canvas::from_slice(&mut buf, size);
         c.clip_to(Rect::from_xywh(2, 2, 4, 4));
         c.fill_rect(Rect::from_size(size), Color::WHITE);
-        drop(c);
 
         for y in 0..8 {
             for x in 0..8 {
@@ -543,7 +547,6 @@ mod tests {
             // Local (0,0) must land at surface (4,4), and the overspill clipped.
             c.fill_rect(Rect::from_xywh(0, 0, 100, 100), Color::WHITE);
         });
-        drop(c);
         assert_ne!(buf[(4 * 8 + 4) as usize], 0);
         assert_ne!(buf[(5 * 8 + 5) as usize], 0);
         assert_eq!(buf[(6 * 8 + 6) as usize], 0);
@@ -555,7 +558,6 @@ mod tests {
         let (mut buf, size) = surface(8, 8);
         let mut c = Canvas::from_slice(&mut buf, size);
         c.fill_rect(Rect::new(-100, -100, 2, 2), Color::WHITE);
-        drop(c);
         assert_ne!(buf[0], 0);
         assert_ne!(buf[(1 * 8 + 1) as usize], 0);
         assert_eq!(buf[(2 * 8 + 2) as usize], 0);
@@ -569,7 +571,6 @@ mod tests {
         let mut buf = alloc::vec![0u16; 6 * 4];
         let mut c = Canvas::new(&mut buf, Size::new(4, 4), 6);
         c.fill_rect(Rect::from_xywh(0, 0, 4, 4), Color::WHITE);
-        drop(c);
         for y in 0..4usize {
             for x in 0..6usize {
                 let expect_set = x < 4;
@@ -585,7 +586,6 @@ mod tests {
         let mut c = Canvas::from_slice(&mut buf, size);
         c.blit(Point::new(-2, -2), &src, Size::new(4, 4), 4);
         c.blit(Point::new(4, 4), &src, Size::new(4, 4), 4);
-        drop(c);
         assert_ne!(buf[0], 0, "top-left corner should be covered");
         assert_ne!(buf[6 * 5 + 5], 0, "bottom-right corner should be covered");
         assert_eq!(buf[6 * 0 + 3], 0, "middle should be untouched");
@@ -597,7 +597,6 @@ mod tests {
         let mask = [0u8, 255, 0, 255];
         let mut c = Canvas::from_slice(&mut buf, size);
         c.blit_mask(Point::ZERO, &mask, Size::new(4, 1), 4, Color::WHITE);
-        drop(c);
         assert_eq!(buf[0], 0);
         assert_ne!(buf[1], 0);
         assert_eq!(buf[2], 0);
@@ -615,7 +614,6 @@ mod tests {
         let (mut buf, size) = surface(4, 4);
         let mut c = Canvas::from_slice(&mut buf, size);
         c.blit_icon(Rect::from_xywh(0, 0, 4, 4), &src, &mask, Size::new(2, 2), 2);
-        drop(c);
         // Each source pixel expands to a 2x2 block; colours are preserved (not tinted).
         assert_eq!(buf[0 * 4 + 0], r, "top-left quadrant is the red source pixel");
         assert_eq!(buf[0 * 4 + 3], g, "top-right quadrant is the green source pixel");
@@ -642,7 +640,6 @@ mod tests {
         let (mut buf, size) = surface(4, 4);
         let mut c = Canvas::from_slice(&mut buf, size);
         c.blit_icon(Rect::from_xywh(-2, -2, 4, 4), &src, &mask, Size::new(2, 2), 2);
-        drop(c);
         assert_eq!(buf[0], w, "visible (0,0) samples the source bottom-right pixel");
         assert_eq!(buf[1], w, "visible (1,0) too — the whole quarter is that one pixel");
         assert_eq!(buf[4], w, "visible (0,1) too");
@@ -656,7 +653,6 @@ mod tests {
         let mut c = Canvas::from_slice(&mut buf, size);
         // Radius/width larger than the rect must degrade gracefully.
         c.stroke_rect_width(Rect::from_xywh(0, 0, 3, 3), Color::WHITE, 10);
-        drop(c);
         for y in 0..3 {
             for x in 0..3 {
                 assert_ne!(buf[(y * 4 + x) as usize], 0, "at {x},{y}");
@@ -669,7 +665,6 @@ mod tests {
         let (mut buf, size) = surface(16, 16);
         let mut c = Canvas::from_slice(&mut buf, size);
         c.fill_round_rect(Rect::from_size(size), 5, Color::WHITE);
-        drop(c);
         assert_eq!(buf[0], 0, "corner pixel should be outside the shape");
         assert_ne!(buf[16 * 8 + 8], 0, "centre should be filled");
         assert_ne!(buf[16 * 8], 0, "middle of the left edge should be filled");
@@ -680,7 +675,6 @@ mod tests {
         let (mut buf, size) = surface(4, 4);
         let mut c = Canvas::from_slice(&mut buf, size);
         c.fill_rect(Rect::from_size(size), Color::WHITE.with_alpha(0));
-        drop(c);
         assert!(buf.iter().all(|&p| p == 0));
     }
 

@@ -153,9 +153,11 @@ fn sub_assign(a: &mut [u32], b: &[u32], len: usize) -> u32 {
 /// `a = (a * 2) mod n`, over `len` limbs. Used to build R² without a division.
 fn double_mod(a: &mut [u32], n: &[u32], len: usize) {
     let mut carry = 0u32;
-    for i in 0..len {
-        let hi = a[i] >> 31;
-        a[i] = (a[i] << 1) | carry;
+    // Sliced to `len` rather than indexed, which keeps the same bounds check the index form had:
+    // a caller passing fewer limbs than it claims still panics here instead of quietly doing less.
+    for limb in &mut a[..len] {
+        let hi = *limb >> 31;
+        *limb = (*limb << 1) | carry;
         carry = hi;
     }
     // The doubling may have overflowed past `len` limbs, in which case a subtraction is
@@ -234,7 +236,7 @@ impl Modulus {
     }
 
     pub fn byte_len(&self) -> usize {
-        (self.bits() + 7) / 8
+        self.bits().div_ceil(8)
     }
 
     /// `out = a * b * R^-1 mod n`, the Montgomery product. CIOS: the multiply and the
@@ -243,9 +245,9 @@ impl Modulus {
         let s = self.len;
         let mut t = [0u32; MAX_LIMBS + 2];
 
-        for i in 0..s {
-            // t += a * b[i]
-            let bi = b[i] as u64;
+        for &limb in &b[..s] {
+            // t += a * that limb of b
+            let bi = limb as u64;
             let mut carry = 0u64;
             for j in 0..s {
                 let sum = (t[j] as u64) + (a[j] as u64) * bi + carry;

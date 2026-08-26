@@ -107,7 +107,14 @@ fn nav_key(k: MKey) -> Option<Key> {
 
 struct Sim<A: App> {
     app: A,
-    /// Index into `Palette::ALL`, cycled with Tab so a theme can be judged against the
+    /// A palette the simulator was handed to stand in for the phone's own.
+    ///
+    /// The device reads it from the skin server; there is no skin server here, so a host that wants to
+    /// look at a theme it measured passes it in. `None` is the ordinary case and means the offer is
+    /// exactly the built-ins.
+    phone: Option<Palette>,
+    /// Index into the palette offer — the built-ins plus [`phone`](Self::phone) — cycled with Tab so a
+    /// theme can be judged against the
     /// real UI rather than against a swatch sheet.
     palette: usize,
     /// Frame buffer in RGB565, exactly as on the device.
@@ -132,6 +139,7 @@ impl<A: App> Sim<A> {
         Sim {
             app,
             palette: 0,
+            phone: None,
             canvas: vec![0u16; n],
             xrgb: vec![0u32; n],
             out: vec![0u32; n * SCALE * SCALE],
@@ -141,7 +149,7 @@ impl<A: App> Sim<A> {
     }
 
     fn theme<'a>(&self, fonts: Fonts<'a>) -> Theme<'a> {
-        Theme::new(Palette::ALL[self.palette].1, fonts)
+        Theme::new(Palette::at(self.palette, self.phone).1, fonts)
     }
 
     /// Draw into the RGB565 canvas, then expand into the window buffer.
@@ -233,7 +241,12 @@ keys
 
         let ctrl = window.is_key_down(MKey::LeftCtrl) || window.is_key_down(MKey::RightCtrl);
         let shift = window.is_key_down(MKey::LeftShift) || window.is_key_down(MKey::RightShift);
-        let mods = Modifiers { shift, ctrl, func: false };
+        // Alt stands in for the E72's Fn on a desktop keyboard, and it is a held key there — so
+        // both bits carry the same value. The handset's arm-with-a-tap form has no equivalent here
+        // and is not simulated: pretending to have it would let a shortcut be tested against a
+        // state the simulator cannot actually produce.
+        let func = window.is_key_down(MKey::LeftAlt) || window.is_key_down(MKey::RightAlt);
+        let mods = Modifiers { shift, ctrl, func, func_held: func };
 
         if ctrl && window.is_key_pressed(MKey::Q, KeyRepeat::No) {
             break;
@@ -242,7 +255,10 @@ keys
             save_png(&sim.canvas);
         }
         if window.is_key_pressed(MKey::Tab, KeyRepeat::No) {
-            sim.palette = (sim.palette + 1) % Palette::ALL.len();
+            // `Palette::count`, never `Palette::ALL.len()`. A palette outside the const array — the
+        // phone's own theme — is one this key could never reach if it stepped by the array's length,
+        // and nothing would fail: the key would simply skip it for ever.
+        sim.palette = (sim.palette + 1) % Palette::count(sim.phone);
             sim.dirty = true;
         }
 
@@ -319,9 +335,9 @@ keys
         let title = format!(
             "{} — E72 320x240 — {} ({}/{})",
             sim.app.title(),
-            Palette::ALL[sim.palette].0,
+            Palette::at(sim.palette, sim.phone).0,
             sim.palette + 1,
-            Palette::ALL.len()
+            Palette::count(sim.phone)
         );
         if title != last_title {
             window.set_title(&title);
