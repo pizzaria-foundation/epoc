@@ -121,7 +121,7 @@ TInt WorkerMain(TAny* aPtr)
      * panics it immediately — the thread dies, and since a dying thread completes no request, the
      * GUI side sees a job that never answered.
      *
-     * That was not a theoretical worry. Measured by `apps/domprobe`, walking one call at a time:
+     * That was not a theoretical worry. Measured by the DOM probe, walking one call at a time:
      * malloc, snprintf, strtod and lwc_intern_string all ran here, and `iconv_open` killed the
      * thread — which is `charconv` underneath, Symbian C++ allocating through the cleanup stack.
      * libhubbub reaches it via libparserutils' input filter, so the whole HTML parser was
@@ -394,7 +394,7 @@ const TInt KDefaultWorkerStack = 64 * 1024;
 /* And the largest this will ask for.
  *
  * A thread stack is committed rather than reserved, so it is real memory per job. And the platform
- * has its own ceiling far below what looks reasonable. Measured on the E72 by `apps/domprobe`,
+ * has its own ceiling far below what looks reasonable. Measured on the E72 by the DOM probe,
  * asking `RThread::Create` for a descending series:
  *
  *     128 KB, 112 KB, 96 KB, 88 KB  ->  KErrTooBig (-40)

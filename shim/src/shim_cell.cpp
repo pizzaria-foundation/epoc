@@ -3,14 +3,14 @@
  * `CTelephony::GetCurrentNetworkInfo` fills a TNetworkInfoV1 with the country code (MCC), the
  * network identity (MNC), the location area code and the cell id — which together are the key a
  * public tower database is looked up by. That is how a phone with no view of the sky still knows
- * which city it is in, and it is the only route to a position on this handset: apps/gpsprobe
+ * which city it is in, and it is the only route to a position on this handset: the GPS probe
  * measured the platform's own network positioning module answering KErrGeneral, and both satellite
  * modules timing out indoors.
  *
  * ITS OWN FILE AND ITS OWN FLAG, NOT PART OF USE_LBS
  *
  * The obvious place was shim_lbs.cpp, which already owns "where am I". It is the wrong place for
- * two reasons. This adds etel3rdparty.dso, an import apps/gpsprobe has no use for — and an import
+ * two reasons. This adds etel3rdparty.dso, an import the GPS probe has no use for — and an import
  * that does not resolve makes an application vanish with no panic and no log, so folding it into
  * USE_LBS would put that risk into a binary that was already working. And it is not the location
  * framework at all: it is telephony, and a caller may well want one without the other.

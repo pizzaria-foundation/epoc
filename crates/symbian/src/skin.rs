@@ -27,7 +27,7 @@
 //! # `USE_SKIN=1`
 //!
 //! `aknskins` is not in the base library set. A build that omits the flag does not fail to compile —
-//! it fails to *load*, silently, which is why `tools/symbuild` gates it and why `apps/skinprobe`
+//! it fails to *load*, silently, which is why `tools/symbuild` gates it and why the skin probe
 //! exists to take that risk first.
 
 use crate::error::{Error, Result};
@@ -69,7 +69,7 @@ pub enum Table {
 /// E72 actually fills, and with what, is a measurement — and naming a role after a comment before
 /// measuring it is how a palette ends up derived from an index nobody populates.
 ///
-/// `apps/skinprobe` dumps every index of every table with its return code. The names go here once
+/// The skin probe dumps every index of every table with its return code. The names go here once
 /// that has run, and each will cite the measurement rather than the header.
 pub fn color(table: Table, index: i32) -> Result<u32> {
     let mut out: u32 = 0;

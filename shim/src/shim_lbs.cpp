@@ -37,7 +37,7 @@
  *
  * TPositionSatelliteInfo carries the satellite counts and DoP; TPositionInfo carries only the
  * position. Which one a given module accepts is a property of that module, and this file does not
- * guess: `want_satellites` is a parameter, and apps/gpsprobe exists to measure which one this
+ * guess: `want_satellites` is a parameter, and the GPS probe exists to measure which one this
  * handset answers. A shim that silently retried with a different class would hide exactly the
  * answer the probe is for.
  */
@@ -145,7 +145,7 @@ void CShimGps::ConstructL(TInt aTimeoutMs, TInt aModuleUid)
      * am I, roughly, in the next few seconds".
      *
      * The distinction is worth an ABI parameter because this handset reports four modules with
-     * wildly different bargains — measured by apps/gpsprobe:
+     * wildly different bargains — measured by the GPS probe:
      *
      *   Integrated GPS  0x101fe98a   80 s to a first fix, 10 m
      *   Network based   0x10206915   12 s,               200 m

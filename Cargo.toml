@@ -28,22 +28,12 @@ members = [
     "examples/sqlprobe",
     "apps/cpuprobe",
     "apps/devdump",
-    "apps/urlprobe",
-    "apps/cenrepdump",
-    "apps/httpprobe",
-    "apps/ghprobe",
-    "apps/startprobe",
-    "apps/domprobe",
-    "apps/gpsprobe",
-    "apps/tileprobe",
     "apps/uigallery",
-    "apps/skinprobe",
-    "tools/preview",
-]
+    "tools/preview"]
 # Every app's device crate is deliberately absent: a no_std staticlib carrying a
 # #[panic_handler] collides with std's when cargo builds the test harness, so each one is its
 # own workspace root, built only for the ARM target. See any device/Cargo.toml.
-exclude = ["apps/skinprobe/device", "apps/uigallery/device", "apps/gpsprobe/device", "apps/tileprobe/device", "apps/domprobe/device", "apps/startprobe/device", "apps/httpprobe/device", "apps/ghprobe/device", "apps/tlsprobe/device", "apps/cenrepdump/device", "apps/urlprobe/device", 
+exclude = ["apps/uigallery/device", 
     "examples/selftest/device",
     "examples/netprobe/device",
     "apps/cpuprobe/device",
@@ -57,8 +47,7 @@ exclude = ["apps/skinprobe/device", "apps/uigallery/device", "apps/gpsprobe/devi
     "apps/devdump/probes/fs/device",
     "apps/devdump/probes/msg/device",
     "apps/devdump/probes/mtm/device",
-    "apps/devdump/probes/ncn/device",
-]
+    "apps/devdump/probes/ncn/device"]
 
 [workspace.package]
 version = "0.1.0"

@@ -115,7 +115,7 @@ to skip a file is a target build that will one day forget to.
 
 Two of the four are tables, and that is a specific hazard: a build that silently lost `aliases.inc`
 or `entities.inc` would still compile and still link, and would answer "unknown charset" and
-"unknown entity" to everything. `apps/netsurfprobe` therefore checks a *known* charset and the
+"unknown entity" to everything. The NetSurf probe therefore checks a *known* charset and the
 *length* of a known element name, not just that a call returned.
 
 `gperf` also needed one non-obvious step: upstream's Makefile pipes its output through
@@ -158,7 +158,7 @@ and patching a *header* is the worst place to keep a divergence from upstream.
 So the rule is: **C++ never includes a NetSurf header.** `tools/symbuild` grew a `C_SOURCES` key
 beside `CXX_SOURCES` — a separate compiler and a separate header set, not a convenience — and an
 app that needs both worlds is two files with a hand-written C ABI between them.
-`apps/netsurfprobe` is the worked example: `src/netsurf_probe.c` includes the libraries and knows
+The NetSurf probe is the worked example: `src/netsurf_probe.c` includes the libraries and knows
 nothing of Symbian, `src/netsurfprobe.cpp` owns `E32Main` and the report and knows nothing of
 NetSurf, and `inc/netsurf_probe.h` is 53 lines — mostly comment — around one struct of two
 `const char *` and two `int`.
@@ -194,7 +194,7 @@ README and our prefix header — and `tools/build-netsurf` turns them back into 
 tools/build-netsurf fetch      # the five at their pinned commits
 tools/build-netsurf regen      # the four generated files (perl, gperf, cc)
 tools/build-netsurf            # 444 objects -> five archives
-tools/symbuild apps/netsurfprobe
+tools/symbuild the NetSurf probe
 ```
 
 Verified by deleting `libwapcaplet` and `libdom` from the vendored tree and refetching: both came
@@ -225,7 +225,7 @@ Build time: **16.7 s cold**, **0.34 s warm** (mtime-incremental, `tools/build-ne
 
 ### The probe image
 
-`apps/netsurfprobe`, an EXE that links all five archives and calls into each:
+the NetSurf probe, an EXE that links all five archives and calls into each:
 
 | | |
 |---|---|

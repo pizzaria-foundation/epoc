@@ -116,7 +116,7 @@ impl Choice {
 /// It would be tidier to store just the choice and let each application derive the phone's theme
 /// for itself. It does not work, and the failure is a link error rather than a subtle one: reading
 /// the skin needs `shim_skin_color`, which only exists behind `USE_SKIN=1`, and that flag pulls in
-/// `aknskins` — a library `apps/skinprobe/app.conf` says *"nothing resident gets"* lightly, because
+/// `aknskins` — a library the skin probe's own app.conf said *"nothing resident gets"* lightly, because
 /// an import that does not resolve makes an image silently never load.
 ///
 /// `symbian::skin`'s own doc had already written the answer: *"A headless daemon has none, so every

@@ -276,7 +276,7 @@ pub fn launch(uid3: u32) -> Result<()> {
 ///
 /// There is no `OpenUrl` on S60. A native browser is asked to open an address by a *convention*,
 /// and which convention a given firmware honours is a question only that firmware answers — so this
-/// is a dial, not a choice made in the SDK. `apps/urlprobe` turns the dial on a real handset and the
+/// is a dial, not a choice made in the SDK. The URL probe turns the dial on a real handset and the
 /// answer becomes a note in `docs/device-notes.md`.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 #[repr(i32)]

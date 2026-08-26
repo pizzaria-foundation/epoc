@@ -1,17 +1,18 @@
 # epoc — a Rust SDK for Symbian S60 3rd Edition
 
-**Write applications in Rust for a 2009 Nokia. They run on the phone.**
+**Write applications in Rust for Symbian S60. They run on the phone.**
 
-Not an emulator and not a toy: the binaries below are installed on a Nokia E72 and
-running on its own ARM11, drawn by a rasterizer written here, talking over its radio.
+Not an emulator and not a toy: the binaries below install from a `.sis`, run on the
+handset's own ARM11, are drawn by a rasterizer written here, and talk over its radio.
 
 | | | |
 |:---:|:---:|:---:|
 | <img src="docs/screenshots/tg-chats.png" width="260"> | <img src="docs/screenshots/home.png" width="260"> | <img src="docs/screenshots/bootctl.png" width="260"> |
 | A Telegram client | A home screen | A boot manager |
 
-    Target   Nokia E72 — Symbian OS 9.3, S60 3rd Ed FP2, ARM1136JF-S at 600 MHz,
-             320x240 landscape QVGA, hardware QWERTY, no touchscreen, ~45 MB free RAM
+    Target   Symbian OS 9.x, S60 3rd Edition FP1/FP2 — ARMv5, no touchscreen
+    Measured Nokia E72: ARM1136JF-S at 600 MHz, 320x240 landscape QVGA, hardware
+             QWERTY, ~45 MB free RAM. Every "confirmed" below was confirmed there
     Host     aarch64 Linux. No Wine, no x86 emulation, no Windows, anywhere in the chain
 
 EPOC is what this operating system was called before it was called Symbian.
@@ -39,7 +40,7 @@ is inverted:
 Everything that can *Leave* — Symbian's error mechanism, which on 9.x is a C++ throw —
 stays on the C++ side of that boundary, because a throw crossing a Rust frame compiled
 `panic=abort` skips every destructor. Everything above it is ordinary safe Rust, and
-almost all of it runs on the host too, which is why there are 685 tests and no phone in
+almost all of it runs on the host too, which is why there are 2157 tests and no phone in
 the loop.
 
 There is no platform UI in any of that. Every pixel — the surfaces, the icons, the
@@ -56,8 +57,8 @@ boundary. `epoc preview` renders the whole design system to PNG without a phone:
 
 ## Projects
 
-Full applications built on this SDK. Each lives in its own repository and pins this one
-by revision.
+Full applications built on this SDK. Each lives in its own repository, and each publishes
+`.sis` packages as GitHub releases — which `my-epoc` reads back, so a handset updates itself.
 
 <table>
 <tr>
@@ -79,19 +80,53 @@ the reason this SDK exists.
 <img src="docs/screenshots/home-light.png" width="280">
 
 **A home screen.** An app grid, a status bar, configurable shortcuts, hardware-button
-remapping, and two daemons behind it. Runs resident, alongside the platform's own idle
+remapping, and four daemons behind it. Runs resident, alongside the platform's own idle
 rather than replacing it.
 
 </td>
 <td width="33%" valign="top">
 
-### boot manager
+### [my-epoc](https://github.com/pizzaria-foundation/my-epoc)
 
 <img src="docs/screenshots/bootctl-status.png" width="280">
 
-**Boot order and restart policy** — neither of which S60 has. The codec and the screens are here
-(`crates/symbian-bootcfg`, `crates/symbian-bootctl`); the two binaries moved to the home repo,
-where the system they supervise lives.
+**Package and boot manager.** Installs from GitHub releases, supervises the install with a
+journal that resumes after a power cut, and holds the boot order S60 has no field for. The
+codec and the screens are here (`symbian-bootcfg`, `symbian-bootctl`, `symbian-pkgui`).
+
+</td>
+</tr>
+<tr>
+<td valign="top">
+
+### [cal](https://github.com/pizzaria-foundation/cal)
+
+**A calendar and to-do list**, with Google Calendar sync over real HTTPS.
+
+</td>
+<td valign="top">
+
+### [map](https://github.com/pizzaria-foundation/map)
+
+**OpenStreetMap tiles**, positioned from the cell tower — none of the handset's four LBS
+modules returns a fix indoors.
+
+</td>
+<td valign="top">
+
+### [mini-browser](https://github.com/pizzaria-foundation/mini-browser)
+
+**A web browser**: HTML and CSS laid out and rendered on the device.
+
+</td>
+</tr>
+<tr>
+<td valign="top" colspan="3">
+
+### [ADBian](https://github.com/pizzaria-foundation/ADBian)
+
+**A remote shell over Bluetooth RFCOMM** — list, read and write files, run commands, and push
+packages for installation. `epoc sh`, `epoc logs` and `epoc sideload` are front ends to it.
 
 </td>
 </tr>
@@ -166,12 +201,26 @@ and 283 of the 292 libraries asked about load, Open C among them.
                                             nothing depends on the answer
     Native new-message notification blocked MNcnNotification kills the caller; the Avkon
                                             classes have no public header in this SDK
-    HTTP                            todo    nothing yet; TCP is there to build it on — but the
-                                            handset has http.dll, so porting may be unnecessary
-    TLS                             todo    nothing yet, and two routes exist on the device:
-                                            securesocket.dll, and Open C's OpenSSL 0.9.8a
+    HTTP                            done    symbian::http, over the handset's own RHTTPSession.
+                                            Runs while a window is on screen, off the drawing
+                                            thread — which is what a browser needs
+    TLS / HTTPS                     done    symbian::tls, over the platform's CSecureSocket on a
+                                            worker thread. The wall is not the cipher: the
+                                            certificate store predates the 2021 Let's Encrypt
+                                            root change, so read the issuer before theorising
+    The phone's own theme           done    symbian::skin reads the S60 theme's colours and
+                                            symbian_app::theme_pref publishes them, so every
+                                            application follows the handset's theme or overrides
+                                            it. Which indices a theme actually moves is measured
+                                            in docs/reference/skin/themes.md
+    Declarative UI                  done    symbian-decl-ui: 45 widgets over the toolkit, each
+                                            with a parity harness against the imperative screen
+                                            it replaced. docs/ui-catalog.md is the index
+    Releases                        done    tools/symrelease cuts a version, writes the changelog
+                                            and publishes it. crates/symbian-bootcfg reads
+                                            GitHub releases back, so a phone updates itself
 
-685 tests, all on the host.
+2157 tests, all on the host.
 
 
 ## How to use it
@@ -189,13 +238,16 @@ One front door for everything:
     epoc preview                  render the SDK's contact sheets to preview-out/
     epoc serve                    serve out/ over the LAN so the phone can fetch a .sis
 
+    tools/symrelease <x.y.z>      from an application repository: cut a version, write
+                                  the changelog, and publish the .sis as a GitHub release
+
 `new` and `build` front `tools/symnew` and `tools/symbuild`, which still work when called
 directly. `sideload`, `sh`, `rshell`, `logs` and `pull` front ADBian, the remote shell that
 runs on the phone — a sibling checkout, not part of this SDK.
 
 ### From your own project
 
-The SDK is consumed as a git dependency, pinned by revision:
+The SDK can be consumed as a git dependency, pinned by revision:
 
     [dependencies]
     symbian = { git = "ssh://git@github.com/pizzaria-foundation/epoc", rev = "..." }
@@ -204,14 +256,12 @@ The SDK is consumed as a git dependency, pinned by revision:
     [dev-dependencies]
     symbian-sim = { git = "ssh://git@github.com/pizzaria-foundation/epoc", rev = "..." }
 
-SSH rather than HTTPS while this repository is private: an https git dependency to
-a private repo fails with "revision not found", which is a permission problem
-wearing the wrong hat. Cargo's built-in git client may also fail ssh-agent
-authentication where the `git` CLI succeeds, so a consuming project wants:
-
-    # .cargo/config.toml
-    [net]
-    git-fetch-with-cli = true
+Most of the applications above use a **path** to a sibling checkout instead, because the
+pin is what broke: this repository's HEAD is routinely ahead of what has been pushed, so a
+workspace would refuse to resolve against a revision that existed on one machine only. A
+path is the honest description when the two are developed in the same sitting. The cost is
+stated rather than hidden — a clone of an application alone does not build; it wants this
+repository beside it as `../SDK`.
 
 The **device build needs a checkout**, not just the crates: the toolchain, the C++
 shim and the packaging live here and no crate can carry them. Clone this repository
@@ -234,14 +284,17 @@ exercise or serve the SDK itself.
       mtmdemo      A Client MTM the Message Server actually loads, plus the UI Data and
                    UI MTM components: our icon in Nokia's Inbox, our viewer opening our
                    message, reply from Nokia's own menu. Builds a .dll, not a .sis
-      iconprobe    The app-icon fetch, isolated in a non-resident app because bisecting it
-                   inside a resident home screen kept taking the home screen with it.
-                   Resolved on the E72: reading the app's registered icon FILE through
-                   AknIconUtils works (right size, real mask, MIF included); the
-                   CApaMaskedBitmap route cannot work here. docs/device-notes.md has the
-                   measurements and the journal the probe keeps to survive a panic
+      uigallery    Every widget in the catalogue, on a handset, in every palette. Not a
+                   probe: it stays. Several colour bugs were only ever visible here —
+                   a host render at the wrong palette shows the geometry and not the ink
+      cpuprobe     Does this handset account for thread CPU time? The one open question
+                   left: RThread::GetCpuTime links, and whether the kernel-side accounting
+                   is compiled in is a build option nothing here documents. Written, never
+                   run. Nothing should draw a CPU figure until it has been
       killhome     Escape hatch: stop a resident home screen that captures the Menu key
                    and will not close on End
+      recoglaunch  An ECom recogniser, to start our code earlier in boot than the
+                   platform's startup list allows
       dlltest      A minimal polymorphic DLL, built to prove the toolchain can
 
     examples/
@@ -259,6 +312,12 @@ exercise or serve the SDK itself.
 
 Every one of these exists because a question could not be answered from a document.
 
+**Thirteen more used to.** Each was one binary asking one thing — the skin, GPS, TLS, HTTP,
+the DOM, map tiles, app icons, opening a URL, the GitHub API, the Central Repository, boot
+timing, ECom recognisers, and the NetSurf libraries. They answered, and the answers are in
+[`docs/device-notes.md`](docs/device-notes.md); the binaries are gone. An instrument kept
+after its question is answered suggests the question is open.
+
 
 ## The map
 
@@ -271,6 +330,17 @@ Every one of these exists because a question could not be answered from a docume
       symbian-app      the device entry points as one macro
       symbian-audio    Ogg/Opus in, playable RIFF/WAVE out - codecs the handset lacks
       symbian-crypto   hashes and ciphers the platform does not ship
+      symbian-decl-ui  45 declarative widgets over the toolkit, each with a parity
+                       harness against the imperative screen it replaced
+      symbian-bootcfg  boot order, restart policy, the supervised install, and the
+                       GitHub release reader a handset updates itself from
+      symbian-bootctl  the boot manager's screens
+      symbian-pkgui    the package manager's screens: installed, available, repos, queue
+      symbian-mtm      a two-method trait for putting a service in the native Inbox
+      symbian-json     a no_std JSON reader, small enough for a 4 MB heap
+      symbian-dom      HTML into a document tree
+      symbian-layout   the box model over that tree
+      symbian-report   host-side reports from device dumps
       symbian-preview  host-side contact sheets: any screen to a PNG
       symbian-sim      the host simulator, generic over any App
       opus             the vendored libopus, and the only unsafe in the audio path
@@ -279,7 +349,8 @@ Every one of these exists because a question could not be answered from a docume
     tools/             epoc (new, build, preview, sideload, logs, serve), and the pieces
                        behind it: symbuild, symnew, mkfont, mkkeymap, e32dump, e32prep,
                        sisdump, sisextract, btrecv
-    apps/              what ships with the SDK: devdump, mtmdemo, bootctl/bootd, and probes
+    apps/              what ships with the SDK: devdump (reconnaissance), uigallery (the
+                       widget catalogue on a handset), mtmdemo, and three small tools
     examples/          device diagnostics and the C++ comparison — see "What is in here"
     docs/              start with getting-started.md
 
@@ -336,7 +407,7 @@ It was still made with care, and the way to check that is not to take our word f
 - The comments say **why**, not what. Where a decision looks strange, the comment names
   the failure that produced it - a truncating append, a socket that panics esock, a
   contact sheet that lied about its own pixels.
-- **685 tests, all on the host**, because the interesting bugs are in loops and edge cases
+- **2157 tests, all on the host**, because the interesting bugs are in loops and edge cases
   and a phone is a terrible place to find them.
 - Nothing here is claimed to work that has not run on a real E72.
 

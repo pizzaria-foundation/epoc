@@ -1,7 +1,7 @@
 # Which skin indices a theme actually repaints
 
 Measured on the Nokia E72-2 by applying three themes in turn and reading every index back with
-`apps/skinprobe`. One log, seven runs, two theme switches inside it — so the comparisons below are
+the skin probe. One log, seven runs, two theme switches inside it — so the comparisons below are
 the same instrument on the same phone, not two dumps from two builds.
 
 ## Why this document exists

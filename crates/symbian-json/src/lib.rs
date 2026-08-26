@@ -521,7 +521,7 @@ mod tests {
         assert!(matches!(&v, Json::Obj(p) if p.len() == 2));
     }
 
-    /// A release payload this handset actually fetched, saved by `apps/ghprobe` and pulled off the
+    /// A release payload this handset actually fetched, saved by the GitHub probe and pulled off the
     /// phone. `rust-lang/rust` 1.98.0: 10012 bytes, 21 keys, **zero assets**, and an 8014-byte body
     /// of release notes — four fifths of the payload is prose full of escapes and punctuation.
     const REAL_NOTES: &[u8] = include_bytes!("../tests/ghprobe.json");

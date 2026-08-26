@@ -76,7 +76,7 @@ source "$APP/app.conf"
 #
 # So the rule this key enforces is: C++ never includes a NetSurf header. A file that wants
 # both worlds is two files with a hand-written C ABI between them, which is the same
-# boundary the eventual Rust binding will use. apps/netsurfprobe is the worked example.
+# boundary the eventual Rust binding will use. The NetSurf probe is the worked example.
 : "${C_SOURCES:=}"
 # Off by default: the dev handset has a patched installserver.
 : "${SIGN:=0}"
@@ -209,7 +209,7 @@ if [ "${USE_SHIM:-0}" = 1 ]; then
     # for the same reason: NOT in the base set, no other feature needs it, and an import that does not
     # resolve makes the image vanish silently rather than fail. aknskins.dll is present on the E72
     # (measured, docs/device-dump.txt) and the mangled GetCachedColor export was read out of
-    # aknskins.dso, but the gate stays so the risk is taken by apps/skinprobe first.
+    # aknskins.dso, but the gate stays so the risk is taken by the skin probe first.
     SYMBIAN_LIBS="$SYMBIAN_LIBS aknskins"
   fi
   if [ "${USE_CLIPBOARD:-0}" = 1 ]; then
@@ -239,7 +239,7 @@ if [ "${USE_SHIM:-0}" = 1 ]; then
     # to install an unsigned package declaring it.
     #
     # lbs.dll loads on this handset -- the devdump sweep says so -- which is a stronger statement
-    # than the DLL merely being present. See apps/gpsprobe for whether it also answers.
+    # than the DLL merely being present. See the GPS probe for whether it also answers.
     SYMBIAN_LIBS="$SYMBIAN_LIBS lbs"
   fi
   if [ "${USE_SQL:-0}" = 1 ]; then

@@ -583,7 +583,7 @@ static int32_t GetOverWorker(const uint16_t* host, int32_t hostLen, int32_t port
     /* Ask for the largest stack this handset will give, largest first.
      *
      * A ladder rather than a constant, because the number that matters is not knowable from here:
-     * `apps/domprobe` measured `RThread::Create` refusing anything above 80 KB — but that was the
+     * The DOM probe measured `RThread::Create` refusing anything above 80 KB — but that was the
      * six-argument overload, which *creates a heap*. This call passes `RAllocator* = NULL` to share
      * the process heap, which is a different path, and assuming the two ceilings are the same is
      * exactly the kind of guess that cost six device round trips this week.

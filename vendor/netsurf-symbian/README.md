@@ -82,7 +82,7 @@ having to know to skip it.
 Two of the four are load-bearing in a way that is easy to miss: `aliases.inc` (52 KB) and
 `entities.inc` (333 KB) are *tables*, so a build that silently lost one would still compile and
 still link — it would just answer "unknown charset" and "unknown entity" to everything.
-`apps/netsurfprobe` checks a known charset and the length of a known element name for that
+The NetSurf probe checks a known charset and the length of a known element name for that
 reason.
 
 ## `include/dom/bindings` is a symlink
@@ -110,7 +110,7 @@ thing standing between a fresh clone and a buildable tree. `regen` is needed aft
 and at no other time.
 
 An app opts in with `USE_NETSURF=1` in its `app.conf`; `tools/symbuild` then calls the above,
-adds the five archives to the link and adds `libc` to the imports. `apps/netsurfprobe` is the
+adds the five archives to the link and adds `libc` to the imports. The NetSurf probe is the
 worked example and the link test.
 
 ## The GPL line, and where it is

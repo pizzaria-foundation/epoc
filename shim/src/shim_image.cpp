@@ -104,7 +104,7 @@ const CImageDecoder::TOptions KDecodeOptions = CImageDecoder::EOptionNone;
  * construction, and every decode this file has ever done happened underneath one. The dependency
  * was therefore real, invisible, and written down nowhere.
  *
- * A headless daemon has no CCoeEnv. Measured on the E72, 25 August 2026: apps/tileprobe fetched a
+ * A headless daemon has no CCoeEnv. Measured on the E72, 25 August 2026: the tile probe fetched a
  * tile (HTTP 200, 30633 bytes, 2759 ms), called Decoder::memory, and the process was gone — no
  * further log line, no report, and no panic.txt, because an FBS client panic is a kernel panic and
  * the Rust handler never runs. The last thing the log shows is the line before the bitmap.

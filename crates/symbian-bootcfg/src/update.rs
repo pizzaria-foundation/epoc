@@ -125,7 +125,7 @@ pub enum Proof {
     /// anything either.
     ///
     /// The second half sounds wrong and is the honest reading. A headless package has no AppArc
-    /// registration at all — `apps/tileprobe` declares `HEADLESS=1` and ships no `_reg.rsc` — so
+    /// registration at all — the tile probe declares `HEADLESS=1` and ships no `_reg.rsc` — so
     /// `apps::launch` by UID3 can *never* succeed for it, however perfectly the install went. Failing
     /// there would report a working install as a failure, roll back if it could, and count the boot
     /// against safe mode. **Measured on the handset**, twice: first for a package that never stamps,
@@ -1024,7 +1024,7 @@ mod tests {
 
     #[test]
     fn a_headless_package_commits_even_though_it_can_never_be_launched() {
-        // Measured on the handset. `apps/tileprobe` is HEADLESS=1 and ships no registration
+        // Measured on the handset. The tile probe is HEADLESS=1 and ships no registration
         // resource, so `apps::launch` by UID3 fails every time however well the install went.
         // Reporting that as a failed update — and spending a safe-mode strike on it — was the same
         // mistake as demanding a version stamp from something that does not stamp.

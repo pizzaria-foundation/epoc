@@ -1744,3 +1744,32 @@ The probe reads its target from `C:\Data\ghprobe.txt` (one line, `owner/repo`, a
 `https://github.com/owner/repo` is trimmed), and saves the decoded body to `C:\Data\ghprobe.json` —
 so the parser's fixture is a real payload with real `author` blocks and `node_id`s rather than one
 written by the same person who writes the parser.
+
+## Fourteen questions, and what the instruments that asked them found
+
+Each of these was a separate binary in `apps/`, built to ask one thing, because an instrument that
+also does something else cannot tell you which half failed. They did their job. The binaries are
+gone and the answers are here, which is the right way round: a probe kept after its question is
+answered suggests the question is open.
+
+`apps/devdump` remains, because it is the unified shape rather than a leftover — one package, a
+launcher, and a dozen binaries isolated from each other. `apps/uigallery` remains because it is not
+a probe at all: it is the widget catalogue running on a handset, and it keeps finding colour bugs
+that host renders do not show.
+
+| the question | the answer |
+|---|---|
+| **skin** — does the phone's theme expose colours we can read? | Yes, through `AknsUtils::GetCachedColor`, gated behind `USE_SKIN=1` because `aknskins` is not in the base link set. *Which* indices a theme moves is the part that mattered, and it is in [`reference/skin/themes.md`](reference/skin/themes.md) |
+| **start** — when does boot finish, and where is our code born? | The startup state is P&S `0x101F8766`/`0x41`, an enum based at 100: 107 loading, 109 normal, 117 shutting down. Decoded in [`boot-states.md`](boot-states.md) |
+| **recog** — does an ECom recogniser run at boot, and how early? | It runs. The finding that cost the most is what it displaced: this platform ignores the *legacy* polymorphic recogniser (UID2 `0x10003a19`) entirely and loads only ECom ones (`0x10009d8d`) |
+| **cenrep** — which Central Repository key names the idle application? | **None that can be written.** The idle is not chosen by a setting; the active idle brings *itself* to the front in `StartupUiPhase`. Central Repository was the wrong tree, and the P&S property above is the one that answers |
+| **gps** — does this handset give a position, and how fast? | Four LBS modules, and **none returns a fix indoors** — which is why `map` positions from the cell tower instead. The module inventory and the six API traps are worth reading before anyone tries again |
+| **url** — can the phone be told to open a URL? | Yes, and it takes **two calls**, the second being the one that surprises: an application that is *already open* ignores `StartDocument` |
+| **icon** — can we read another application's icon? | Yes: `GetAppIcon` plus `GetScanLine`. `GetPixel` is absent from this firmware, and creating a `CApaMaskedBitmap` panics for reasons never resolved — the recipe that works avoids it |
+| **tls** — does HTTPS complete on this handset? | Yes, and **not** the way this probe assumed. It was written around a vendored mbedTLS; what works is the platform's own `CSecureSocket` on a worker thread. The certificate store is the real wall: it predates the 2021 Let's Encrypt root change, so read the `issuer=` before theorising about ciphers |
+| **http** — does a fetch run while a window is on screen? | Yes. `RHTTPSession` completes without blocking the thread that draws, which is what a browser needs and what the headless TLS probe could not show |
+| **dom** — does the DOM bridge run here, and where does it stop? | It runs. Tables, entities and inline script all parse to nodes with no error. It stopped nowhere, which is the answer that was least expected |
+| **tile** — does a map tile survive the trip from web to pixels? | Yes. This is also the first thing that ever executed `symbian::image` on hardware — it had been written, reviewed and never run |
+| **gh** — can this handset talk to `api.github.com`? | Yes, TLS 1.2 and a JSON payload. `symbian_bootcfg::github` is built on that answer |
+| **netsurf** — do the NetSurf libraries cross-compile and link for armv5? | Recorded separately, in [`f5-netsurf-crosscompile.md`](f5-netsurf-crosscompile.md) |
+| **cpu** — does this handset account for thread CPU time? | **Unanswered.** `RThread::GetCpuTime` links, and whether the kernel-side accounting is compiled in is a build option this firmware does not document. The probe was written and never run. Nothing should draw a CPU figure until it has been |
