@@ -140,14 +140,23 @@ pub fn parse_release(
     let version = Version::parse(tag).ok_or(RepoError::NoVersion)?;
     // The repository's own name for itself, for grouping rows. `name` on a release is its title,
     // which is prose; the tag is not a name either. So: the asset's stem, decided per row below.
-    let out = collect_assets(repo_id, &doc, version, filter);
+    // The notes ride along: they are in this payload already, and a second request to read what a
+    // release says about itself would be a request per row.
+    let notes = doc.get("body").and_then(|b| b.as_str()).unwrap_or_default();
+    let out = collect_assets(repo_id, &doc, version, filter, notes);
     if out.is_empty() {
         return Err(RepoError::NoPackages);
     }
     Ok(out)
 }
 
-fn collect_assets(repo_id: u16, doc: &Json, version: Version, filter: &str) -> Vec<CatEntry> {
+fn collect_assets(
+    repo_id: u16,
+    doc: &Json,
+    version: Version,
+    filter: &str,
+    notes: &str,
+) -> Vec<CatEntry> {
     let mut out = Vec::new();
     for a in doc.get("assets").map(|a| a.items()).unwrap_or_default() {
         let Some(name) = a.get("name").and_then(|n| n.as_str()) else { continue };
@@ -169,6 +178,9 @@ fn collect_assets(repo_id: u16, doc: &Json, version: Version, filter: &str) -> V
             version,
             url: String::from(url),
             size: a.get("size").and_then(|s| s.as_u64()).unwrap_or(0),
+            // The same notes on every asset of one release, because they describe the release and
+            // not the file. Two packages published together share what was said about them.
+            notes: String::from(notes),
         });
     }
     out

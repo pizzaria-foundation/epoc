@@ -78,6 +78,7 @@ pub fn catalog() -> CatalogDb {
                 version: Version::new(0, 3, 0),
                 url: "https://github.com/pizzaria-foundation/home/releases/download/v0.3.0/launcher.sisx".into(),
                 size: 331_204,
+                notes: String::new(),
             },
             CatEntry {
                 repo_id: 1,
@@ -86,6 +87,7 @@ pub fn catalog() -> CatalogDb {
                 version: Version::new(0, 3, 1),
                 url: "https://github.com/pizzaria-foundation/home/releases/download/v0.3.0/cal.sis".into(),
                 size: 215_472,
+                notes: String::new(),
             },
         ],
     }

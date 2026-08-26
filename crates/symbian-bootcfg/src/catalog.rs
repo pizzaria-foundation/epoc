@@ -26,13 +26,18 @@ use crate::pkg::Version;
 
 /// `b"BTCT"` read as a little-endian u32.
 pub const MAGIC: u32 = 0x5443_5442;
-pub const VERSION: u16 = 1;
+/// 2 since the release notes joined an entry.
+///
+/// A reader refuses a version above its own and reads `entry_size` from the header for everything
+/// below, so a file written by either build is safe with either — a v1 file simply has no notes,
+/// which is the same as a release that published none.
+pub const VERSION: u16 = 2;
 pub const HEADER_SIZE: usize = 16;
 /// Bytes per record: repo id, three version numbers, the size, and an offset/length pair for each of
 /// the three strings. Exactly what the encoder writes — a record size larger than that puts the
 /// string blob's offsets past where the strings are, which is how this file first failed to decode
 /// its own output.
-pub const ENTRY_SIZE: u16 = 28;
+pub const ENTRY_SIZE: u16 = 32;
 /// Refused above this. A phone is not a package archive, and a repository that offers three hundred
 /// downloads is one we have misread.
 pub const MAX_ENTRIES: usize = 64;
@@ -53,6 +58,15 @@ pub struct CatEntry {
     pub url: String,
     /// What the service said it weighs, for the progress bar to have a denominator.
     pub size: u64,
+    /// The release notes, as the release published them.
+    ///
+    /// This is what somebody looking at an update actually wants to know: not that 0.3.0 exists, but
+    /// what is in it. It travels with the entry because it arrives in the same payload — GitHub puts
+    /// it in `body` — so keeping it costs one field and no request.
+    ///
+    /// Empty for a release that published none, and for anything the catalogue learned some other
+    /// way. Empty is an answer: there is nothing to read, not that reading failed.
+    pub notes: String,
 }
 
 impl CatEntry {
@@ -108,6 +122,7 @@ impl CatalogDb {
             let asset = push_str(&mut blob, &e.asset);
             let name = push_str(&mut blob, &e.name);
             let url = push_str(&mut blob, &e.url);
+            let notes = push_str(&mut blob, &e.notes);
 
             out.extend_from_slice(&e.repo_id.to_le_bytes());
             out.extend_from_slice(&e.version.major.to_le_bytes());
@@ -120,6 +135,8 @@ impl CatalogDb {
             out.extend_from_slice(&name.1.to_le_bytes());
             out.extend_from_slice(&url.0.to_le_bytes());
             out.extend_from_slice(&url.1.to_le_bytes());
+            out.extend_from_slice(&notes.0.to_le_bytes());
+            out.extend_from_slice(&notes.1.to_le_bytes());
         }
 
         for u in &blob {
@@ -183,6 +200,14 @@ impl CatalogDb {
                 asset: take_str(&blob, r, 16).ok_or(DecodeError::BadLayout)?,
                 name: take_str(&blob, r, 20).ok_or(DecodeError::BadLayout)?,
                 url: take_str(&blob, r, 24).ok_or(DecodeError::BadLayout)?,
+                // Only where the record is long enough to hold it. A v1 file stops at 28 bytes, and
+                // reading past that would take two bytes of the next entry as a string offset —
+                // which decodes to something, which is the worst kind of wrong.
+                notes: if entry_size >= 32 {
+                    take_str(&blob, r, 28).unwrap_or_default()
+                } else {
+                    String::new()
+                },
             });
         }
         Ok(Self { entries })
@@ -217,6 +242,7 @@ mod tests {
             version: Version::new(v.0, v.1, v.2),
             url: alloc::format!("https://github.com/x/y/releases/download/v1/{asset}"),
             size: 320_484,
+            notes: String::new(),
         }
     }
 
@@ -235,6 +261,7 @@ mod tests {
                 version: Version::new(0, 0, i),
                 url: String::new(),
                 size: 0,
+                notes: String::new(),
             });
         }
         assert_eq!(d.encode().len(), HEADER_SIZE + 3 * ENTRY_SIZE as usize);

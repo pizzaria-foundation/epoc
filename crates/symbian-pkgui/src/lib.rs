@@ -82,13 +82,7 @@ const TAB_DOWNLOADS: usize = 2;
 pub enum PkgRequest {
     /// Install a package already on disk, by its candidate index.
     Install(usize),
-    /// Read the tail of this package's log and hand it back through [`PkgScreen::show_log`].
-    ///
-    /// A request rather than a read, for the same reason every other one here is: this crate is
-    /// handed its data and does no I/O, which is what lets the whole screen be tested on a host with
-    /// no phone. The *tail* rather than the file, because a log on this handset reached 61 KB and
-    /// the answer somebody wants after an install is at the end of it.
-    ShowLog(u32),
+
     /// Fetch this, then install it.
     Download(CatEntry),
     /// Register `owner/repo`, or whatever the person pasted — the app parses it.
@@ -244,10 +238,13 @@ pub struct PkgScreen {
     sheet: Option<Sheet>,
     /// Which package the open sheet is about, so its actions can be attributed.
     sheet_uid: u32,
-    /// The log tail, once the application has fetched it. `None` means nobody asked; an empty string
-    /// means asked and there was nothing — and the screen says which, because "no log" and "a log
-    /// that is empty" are different answers about whether the application ever ran.
-    log: Option<String>,
+    /// The release notes on show, or `None` when they are not.
+    ///
+    /// A *changelog*, and it is worth saying what this is not: it was a viewer for the application's
+    /// debug log for one build, which was the wrong thing in the right place. This screen is a store.
+    /// What somebody looking at 0.3.0 wants is what is in 0.3.0, not what the running copy printed
+    /// to a file.
+    notes: Option<String>,
     /// Whether the update scan has run yet.
     ///
     /// It is deferred by a millisecond so the screen appears before a 400 ms scan of every `.sis`
@@ -295,7 +292,7 @@ impl PkgScreen {
             queue,
             sheet: None,
             sheet_uid: 0,
-            log: None,
+            notes: None,
             scanned: true,
             sheet_pick: 0,
             menu: None,
@@ -865,9 +862,18 @@ impl PkgScreen {
             "Hold at this version"
         });
         s = s.action("Reopen after install");
-        // Last, because it is the one that answers "what happened" rather than "what should
-        // happen" — and it is the one somebody reaches for when the three above did not work.
-        s = s.action("Log");
+        // Only when there is something to read. A release that published no notes, or a copy that
+        // came off the card rather than from a repository, has nothing to say — and an action that
+        // opens an empty page is worse than an action that is not there.
+        if picked
+            .and_then(|(_, src)| match src {
+                Source::Remote(i) => self.cat.entries.get(i),
+                Source::Local(_) => None,
+            })
+            .is_some_and(|e| !e.notes.trim().is_empty())
+        {
+            s = s.action("What\u{2019}s new");
+        }
 
         self.sheet_uid = p.uid3;
         self.sheet = Some(s);
@@ -882,12 +888,6 @@ impl PkgScreen {
     /// [`Self::refresh`] clears it: fresh data is the answer this was waiting for.
     pub fn mark_scanning(&mut self) {
         self.scanned = false;
-    }
-
-    /// Hand back what [`PkgRequest::ShowLog`] asked for. An empty string is an answer, not a
-    /// failure: it means the file was read and had nothing in it.
-    pub fn show_log(&mut self, tail: String) {
-        self.log = Some(tail);
     }
 
     fn on_sheet_action(&mut self, index: usize) {
@@ -914,46 +914,51 @@ impl PkgScreen {
             },
             1 => Some(PkgRequest::TogglePin(uid)),
             2 => Some(PkgRequest::StepReopen(uid)),
-            // The sheet stays open behind the log, so closing the log comes back to the package
-            // rather than to the list — which is where somebody reading a log after an install
-            // wants to end up.
-            _ => Some(PkgRequest::ShowLog(uid)),
+            // The notes are already here — they arrived with the catalogue — so this asks the
+            // application for nothing. The sheet stays open behind them, so closing comes back to
+            // the package rather than to the list.
+            _ => {
+                self.notes = picked
+                    .and_then(|(_, src)| match src {
+                        Source::Remote(i) => self.cat.entries.get(i),
+                        Source::Local(_) => None,
+                    })
+                    .map(|e| e.notes.clone());
+                None
+            }
         };
-        if !matches!(self.request, Some(PkgRequest::ShowLog(_))) {
+        if self.notes.is_none() {
             self.sheet = None;
         }
     }
 
-    /// The tail of a package's log, as a page you read and leave.
+    /// What a release said about itself, as a page you read and leave.
     ///
-    /// Plain lines and no list widget: there is nothing to select here, and a cursor on a log is a
-    /// cursor that suggests pressing it does something. It draws from the **end** — the last lines
-    /// that fit — because the question after an install is what happened last, and a page that
-    /// opened at the top of a 61 KB file would answer it by making somebody scroll for a minute.
-    fn draw_log(&self, c: &mut Canvas<'_>, screen: Rect, theme: &Theme<'_>, tail: &str) {
+    /// From the **top**, and that is the difference from the debug-log viewer this replaced for one
+    /// build: release notes lead with what matters, and a changelog read backwards is not a
+    /// changelog. Plain lines and no list widget, because there is nothing to select and a cursor
+    /// suggests pressing it does something.
+    fn draw_notes(&self, c: &mut Canvas<'_>, screen: Rect, theme: &Theme<'_>, text: &str) {
         chrome::clear(c, theme);
         let name = self.pkgs.get(self.sheet_uid).map(|p| p.name.clone()).unwrap_or_default();
         let f = chrome::Frame::split(screen, theme, true, true);
-        chrome::title_bar(c, f.title, theme, &name, Some("log"));
+        chrome::title_bar(c, f.title, theme, &name, Some("what\u{2019}s new"));
         chrome::softkey_bar(c, f.softkeys, theme, [None, None, Some("Back")]);
 
-        if tail.trim().is_empty() {
-            chrome::placeholder(c, f.content, theme, "Nothing logged. It may never have run.");
+        if text.trim().is_empty() {
+            chrome::placeholder(c, f.content, theme, "This release said nothing about itself.");
             return;
         }
-        let small = theme.fonts.small;
-        let step = small.line_height();
+        let body = theme.fonts.body;
+        let step = body.line_height();
         let rows = (f.content.height() / step).max(1) as usize;
-        let mut y = f.content.y0 + small.ascent();
-        // The last `rows` lines, in order. Taking from the end and then drawing forwards, rather
-        // than drawing backwards, so a line that wraps does not push the newest one off the screen.
-        let lines: Vec<&str> = tail.lines().collect();
-        for l in lines.iter().skip(lines.len().saturating_sub(rows)) {
+        let mut y = f.content.y0 + body.ascent();
+        for l in text.lines().take(rows) {
             c.draw_text(
                 symbian_gfx::Point::new(f.content.x0 + theme.metrics.pad, y),
                 l,
-                small,
-                theme.palette.dim,
+                body,
+                theme.palette.text,
             );
             y += step;
         }
@@ -1084,9 +1089,9 @@ impl PkgScreen {
         // The log is over the sheet, which is over the list, so it answers first. Anything closes
         // it — there is nothing on it to operate, and a reader who has finished reading presses
         // whatever is under their thumb.
-        if self.log.is_some() {
+        if self.notes.is_some() {
             if matches!(ev.key, Key::Softkey(Softkey::Right) | Key::Select) {
-                self.log = None;
+                self.notes = None;
             }
             return Handled::Consumed;
         }
@@ -1426,8 +1431,8 @@ impl PkgScreen {
         // A sheet is a screen of its own: it takes the whole frame rather than sitting inside this
         // one, because it is a different question and a panel over a list would keep asking the old
         // one behind it.
-        if let Some(tail) = self.log.as_deref() {
-            self.draw_log(c, screen, theme, tail);
+        if let Some(text) = self.notes.as_deref() {
+            self.draw_notes(c, screen, theme, text);
             return;
         }
         if let Some(s) = self.sheet.as_mut() {
@@ -1623,6 +1628,7 @@ mod tests {
                 version: Version::new(0, 3, 0),
                 url: "https://github.com/p/h/releases/download/v0.3.0/launcher.sisx".to_string(),
                 size: 330_000,
+                notes: String::new(),
             }],
         }
     }
@@ -1843,33 +1849,45 @@ mod tests {
     }
 
     #[test]
-    fn the_log_action_asks_and_the_answer_opens_over_the_sheet() {
+    fn whats_new_shows_the_release_notes_over_the_sheet() {
+        // A store answers "what is in this version", and the notes travel with the catalogue entry
+        // — they arrive in the same payload the version does, so nothing is fetched to read them.
         let mut s = screen();
         press(&mut s, Key::Select);
-        // Install, Hold, Reopen, Log — the fourth, and it is last because it answers "what
-        // happened" rather than "what should happen".
+        assert_eq!(
+            s.sheet.as_ref().unwrap().action_label(),
+            Some("Get"),
+            "the sheet opens on the catalogue's version, which is the one with notes"
+        );
+        // Install/Get, Hold, Reopen, What's new.
         s.on_sheet_action(3);
-        assert_eq!(s.take_request(), Some(PkgRequest::ShowLog(LAUNCHER)));
-        assert!(s.sheet.is_some(), "the sheet stays behind it, so Back returns to the package");
+        assert!(s.notes.is_some(), "the notes opened");
+        assert!(s.take_request().is_none(), "and asked the application for nothing");
+        assert!(s.sheet.is_some(), "the sheet stays behind, so Back returns to the package");
 
-        s.show_log("61020  update committed at 0.2.0".to_string());
         draw(&mut s);
         press(&mut s, Key::Select);
-        assert!(s.log.is_none(), "anything closes it");
+        assert!(s.notes.is_none(), "anything closes them");
         assert!(s.sheet.is_some(), "and leaves the sheet where it was");
     }
 
     #[test]
-    fn an_empty_log_is_an_answer_rather_than_a_blank_page() {
-        // "No log" and "a log with nothing in it" are different facts about whether the application
-        // ever ran, and a blank screen states neither. The placeholder is the difference.
-        let mut s = screen();
+    fn a_version_with_nothing_to_say_does_not_offer_to_say_it() {
+        // An action that opens an empty page is worse than an action that is not there. A local
+        // file has no notes at all — it came off a card, not from a release.
+        let mut s = PkgScreen::new(
+            pkgs(),
+            vec![cand(LAUNCHER, (0, 9, 0), "launcher-0.9.0.sisx")],
+            CatalogDb::default(),
+            repos(),
+            Queue::default(),
+        );
         press(&mut s, Key::Select);
-        s.show_log(String::new());
-        let before = draw(&mut s);
-        s.log = None;
-        let sheet = draw(&mut s);
-        assert_ne!(before, sheet, "an empty log draws something, and not the sheet");
+        let sheet = s.sheet.as_ref().unwrap();
+        assert_eq!(sheet.action_label(), Some("Install"), "bytes are already here");
+        // Three actions, not four: Install, Hold, Reopen.
+        s.on_sheet_action(3);
+        assert!(s.notes.is_none(), "there was no fourth action to reach");
     }
 
     #[test]
