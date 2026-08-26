@@ -12,6 +12,11 @@ rust-version.workspace = true
 [dependencies]
 symbian = { workspace = true }
 symbian-ui = { workspace = true }
+# The rows are declared rather than painted. This screen is otherwise imperative and stays that way —
+# what it borrows is `ListItem`, so a boot entry's name, its policy and its state stop being one
+# string with middots in it and become the three facts they are. See `row_node`.
+symbian-decl-ui = { workspace = true }
+symbian-gfx = { workspace = true }
 symbian-bootcfg = { workspace = true }
 
 [dev-dependencies]
@@ -22,3 +27,18 @@ symbian-gfx = { workspace = true }
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_vendor, values("symbian"))'] }
+
+# Both examples are registered, and both with `test = true`.
+#
+# `preview` was not registered at all, and the cost of that is written down in its own source: three
+# scenes named `52-boot-entry`, `53-boot-policy` and `54-boot-status` rendered the *same picture* for
+# months, because the key sequence that was supposed to open the entry detail hit a tab strip that
+# clamps. Nothing failed, because nothing was asserting. `preview`'s own test now requires the sheets
+# to differ from one another, which is the assertion that would have caught it.
+[[example]]
+name = "preview"
+test = true
+
+[[example]]
+name = "parity"
+test = true

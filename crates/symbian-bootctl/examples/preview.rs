@@ -18,6 +18,8 @@ use symbian_ui::App as _;
 use symbian::apps::AppInfo;
 use symbian_bootcfg::status::{EntryStatus, Mode, State};
 use symbian_bootcfg::{BootConfig, BootStatus, Entry, Policy};
+use symbian_bootcfg::pkg::PkgDb;
+use symbian_bootctl::settings::SettingsScreen;
 use symbian_bootctl::BootScreen;
 use symbian_gfx::{Rect, E72_SCREEN};
 use symbian_preview::{Atlases, Sheet};
@@ -148,18 +150,26 @@ fn render(dark: &Theme<'_>, light: &Theme<'_>) {
     let mut s = screen(dark, &[Key::Softkey(symbian_ui::Softkey::Left)]);
     sheet("51-boot-move", &mut |c| s.draw(c, dark));
 
-    let mut s = screen(dark, &[Key::Right]);
+    // The entry detail, reached the way a person reaches it: the centre key on a row. It used to be
+    // driven with `Key::Right`, from when this screen had five tabs and the detail was one of them.
+    // The strip has had two tabs for a long time and it clamps, so `Right` just landed on "Last
+    // boot" — and so did `[Right, Down, Select]` and `[Right, Right]`. Three scenes, three names,
+    // one picture, and nobody noticed until somebody diffed them.
+    let mut s = screen(dark, &[Key::Select]);
     sheet("52-boot-entry", &mut |c| s.draw(c, dark));
 
-    // The policy dropdown open over the rows beneath it.
-    let mut s = screen(dark, &[Key::Right, Key::Down, Key::Select]);
+    // The policy dropdown open over the rows beneath it. `Down` walks from the switch to the policy
+    // row; the second `Select` opens it.
+    let mut s = screen(dark, &[Key::Select, Key::Down, Key::Select]);
     sheet("53-boot-policy", &mut |c| s.draw(c, dark));
 
-    let mut s = screen(dark, &[Key::Right, Key::Right]);
-    sheet("54-boot-setup", &mut |c| s.draw(c, dark));
+    // The Last boot report. One `Right`, because there are two tabs.
+    let mut s = screen(dark, &[Key::Right]);
+    sheet("54-boot-status", &mut |c| s.draw(c, dark));
 
-    let mut s = screen(dark, &[Key::Right, Key::Right, Key::Right]);
-    sheet("55-boot-status", &mut |c| s.draw(c, dark));
+    // The question Backspace asks before removing a row.
+    let mut s = screen(dark, &[Key::Backspace]);
+    sheet("55-boot-confirm", &mut |c| s.draw(c, dark));
 
     // The picker that adds an entry, over the list.
     let mut s = screen(dark, &[Key::Down, Key::Down, Key::Down, Key::Down, Key::Select]);
@@ -167,4 +177,89 @@ fn render(dark: &Theme<'_>, light: &Theme<'_>) {
 
     let mut s = screen(light, &[]);
     sheet("57-boot-list-light", &mut |c| s.draw(c, light));
+
+    // The settings screen had no sheet at all, which is how a screen goes unlooked-at: it is a
+    // section in the drawer rather than a tab here, so nothing in this file reached it.
+    // No theme argument: `SettingsScreen::handle_key` takes none, because nothing on that screen
+    // routes a key by where something was drawn.
+    let settings = |keys: &[Key]| {
+        let mut s = SettingsScreen::new(config(), PkgDb::default());
+        for k in keys {
+            s.handle_key(KeyEvent::new(*k));
+        }
+        s
+    };
+    let mut s = settings(&[]);
+    sheet("58-boot-settings", &mut |c| s.draw(c, dark));
+    // The dropdown open over the rows: the fourth row is the only one on either screen that is still
+    // hand-drawn, so it is the one worth looking at.
+    let mut s = settings(&[Key::Down, Key::Down, Key::Down, Key::Select]);
+    sheet("59-boot-settings-refresh", &mut |c| s.draw(c, dark));
+    let mut s = settings(&[]);
+    sheet("60-boot-settings-light", &mut |c| s.draw(c, light));
+}
+
+/// No two sheets are the same picture.
+///
+/// This example was not registered in `Cargo.toml` at all, so `cargo test` never compiled it and
+/// nothing here could assert anything. The cost is recorded a few lines above: `52-boot-entry`,
+/// `53-boot-policy` and `54-boot-status` were three names over one picture for months, because the
+/// `Key::Right` meant to open the entry detail landed on a tab strip that clamps. A sheet whose key
+/// sequence does not reach the state it is named for is not a weaker preview — it is a *wrong* one,
+/// and it is wrong silently.
+///
+/// The scenes are rebuilt here rather than shared with `render`, because `render` writes files and a
+/// test that writes `preview-out/` on every `cargo test` is a test with a side effect. What is shared
+/// is the thing that matters: the same key sequences, against the same fixtures.
+#[test]
+fn no_two_preview_sheets_are_the_same_picture() {
+    let atlases = Atlases::load();
+    atlases.with_themes(|dark, light| {
+        let rect = Rect::from_size(E72_SCREEN);
+        let shot = |theme: &Theme<'_>, keys: &[Key]| {
+            let mut s = BootScreen::new(config(), Some(status()), roster());
+            for k in keys {
+                s.handle_key(KeyEvent::new(*k), theme, rect);
+            }
+            let mut sheet = symbian_preview::Sheet::new(E72_SCREEN);
+            s.draw(&mut sheet.canvas(), theme);
+            sheet.pixels().to_vec()
+        };
+
+        let settings_shot = |theme: &Theme<'_>, keys: &[Key]| {
+            let mut s = SettingsScreen::new(config(), PkgDb::default());
+            for k in keys {
+                s.handle_key(KeyEvent::new(*k));
+            }
+            let mut sheet = symbian_preview::Sheet::new(E72_SCREEN);
+            s.draw(&mut sheet.canvas(), theme);
+            sheet.pixels().to_vec()
+        };
+
+        let sheets: [(&str, Vec<u16>); 11] = [
+            ("50-boot-list", shot(dark, &[])),
+            ("51-boot-move", shot(dark, &[Key::Softkey(symbian_ui::Softkey::Left)])),
+            ("52-boot-entry", shot(dark, &[Key::Select])),
+            ("53-boot-policy", shot(dark, &[Key::Select, Key::Down, Key::Select])),
+            ("54-boot-status", shot(dark, &[Key::Right])),
+            ("55-boot-confirm", shot(dark, &[Key::Backspace])),
+            (
+                "56-boot-picker",
+                shot(dark, &[Key::Down, Key::Down, Key::Down, Key::Down, Key::Select]),
+            ),
+            ("57-boot-list-light", shot(light, &[])),
+            ("58-boot-settings", settings_shot(dark, &[])),
+            (
+                "59-boot-settings-refresh",
+                settings_shot(dark, &[Key::Down, Key::Down, Key::Down, Key::Select]),
+            ),
+            ("60-boot-settings-light", settings_shot(light, &[])),
+        ];
+
+        for (i, (name, px)) in sheets.iter().enumerate() {
+            for (other, opx) in sheets.iter().take(i) {
+                assert_ne!(px, opx, "{name} drew the same pixels as {other}");
+            }
+        }
+    });
 }

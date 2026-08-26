@@ -1,0 +1,40 @@
+[package]
+name = "symbian-pkgui"
+description = "The packages screen: installed, available, repositories, downloads"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+# Every example is registered by hand, and the discovery that would have registered them for me is
+# off. Two reasons: `examples/fixtures.rs` is shared code rather than an example, and — the reason
+# that cost time — an unregistered example is one `cargo test` never builds, which is how a preview
+# rendered three identical sheets under three different names for months.
+autoexamples = false
+
+[dependencies]
+symbian = { workspace = true }
+# The rows are declared rather than painted; everything else on this screen stays imperative. See
+# `PkgScreen::draw_rows_declared` and `examples/parity.rs`.
+symbian-decl-ui = { workspace = true }
+symbian-gfx = { workspace = true }
+symbian-ui = { workspace = true }
+symbian-bootcfg = { workspace = true }
+
+[dev-dependencies]
+symbian-ui = { workspace = true, features = ["testing"] }
+symbian-gfx = { workspace = true }
+symbian-preview = { workspace = true }
+
+# Both examples run under `cargo test`. `parity` carries the assertions; `preview` carries a
+# distinctness check of its own, so a scene that stops reaching the state it is named for fails
+# rather than quietly writing the previous scene's picture again.
+[[example]]
+name = "preview"
+test = true
+
+[[example]]
+name = "parity"
+test = true
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_vendor, values("symbian"))'] }

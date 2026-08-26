@@ -13,10 +13,14 @@ members = [
     "crates/symbian-audio",
     "crates/symbian-preview",
     "crates/symbian-crypto",
+    "crates/symbian-layout",
+    "crates/symbian-dom",
     "crates/symbian-report",
     "crates/symbian-mtm",
+    "crates/symbian-json",
     "crates/symbian-bootcfg",
     "crates/symbian-bootctl",
+    "crates/symbian-pkgui",
     "examples/netprobe",
     "examples/selftest",
     "examples/imgprobe",
@@ -26,12 +30,20 @@ members = [
     "apps/devdump",
     "apps/urlprobe",
     "apps/cenrepdump",
+    "apps/httpprobe",
+    "apps/ghprobe",
+    "apps/startprobe",
+    "apps/domprobe",
+    "apps/gpsprobe",
+    "apps/tileprobe",
+    "apps/uigallery",
+    "apps/skinprobe",
     "tools/preview",
 ]
 # Every app's device crate is deliberately absent: a no_std staticlib carrying a
 # #[panic_handler] collides with std's when cargo builds the test harness, so each one is its
 # own workspace root, built only for the ARM target. See any device/Cargo.toml.
-exclude = ["apps/tlsprobe/device", "apps/cenrepdump/device", "apps/urlprobe/device", 
+exclude = ["apps/skinprobe/device", "apps/uigallery/device", "apps/gpsprobe/device", "apps/tileprobe/device", "apps/domprobe/device", "apps/startprobe/device", "apps/httpprobe/device", "apps/ghprobe/device", "apps/tlsprobe/device", "apps/cenrepdump/device", "apps/urlprobe/device", 
     "examples/selftest/device",
     "examples/netprobe/device",
     "apps/cpuprobe/device",
@@ -67,10 +79,14 @@ symbian-app = { path = "crates/symbian-app" }
 symbian-audio = { path = "crates/symbian-audio" }
 symbian-preview = { path = "crates/symbian-preview" }
 symbian-crypto = { path = "crates/symbian-crypto" }
+symbian-layout = { path = "crates/symbian-layout", default-features = false }
+symbian-dom = { path = "crates/symbian-dom", default-features = false }
 symbian-report = { path = "crates/symbian-report" }
 symbian-mtm = { path = "crates/symbian-mtm" }
+symbian-json = { path = "crates/symbian-json" }
 symbian-bootcfg = { path = "crates/symbian-bootcfg" }
 symbian-bootctl = { path = "crates/symbian-bootctl" }
+symbian-pkgui = { path = "crates/symbian-pkgui" }
 devdump = { path = "apps/devdump" }
 opus = { path = "crates/opus" }
 selftest = { path = "examples/selftest" }

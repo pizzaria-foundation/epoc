@@ -107,6 +107,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "domprobe"
+version = "0.1.0"
+dependencies = [
+ "symbian",
+ "symbian-app",
+ "symbian-dom",
+ "symbian-report",
+ "symbian-sys",
+]
+
+[[package]]
 name = "downcast-rs"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -231,6 +242,39 @@ dependencies = [
  "cfg-if",
  "libc",
  "r-efi",
+]
+
+[[package]]
+name = "ghprobe"
+version = "0.1.0"
+dependencies = [
+ "symbian",
+ "symbian-app",
+ "symbian-sys",
+]
+
+[[package]]
+name = "gpsprobe"
+version = "0.1.0"
+dependencies = [
+ "symbian",
+ "symbian-app",
+ "symbian-report",
+ "symbian-sys",
+]
+
+[[package]]
+name = "httpprobe"
+version = "0.1.0"
+dependencies = [
+ "symbian",
+ "symbian-app",
+ "symbian-crypto",
+ "symbian-gfx",
+ "symbian-report",
+ "symbian-sim",
+ "symbian-sys",
+ "symbian-ui",
 ]
 
 [[package]]
@@ -577,6 +621,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 
 [[package]]
+name = "skinprobe"
+version = "0.1.0"
+dependencies = [
+ "symbian",
+ "symbian-gfx",
+ "symbian-sim",
+ "symbian-ui",
+]
+
+[[package]]
 name = "slab"
 version = "0.4.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -596,6 +650,15 @@ dependencies = [
  "symbian-gfx",
  "symbian-sys",
  "symbian-ui",
+]
+
+[[package]]
+name = "startprobe"
+version = "0.1.0"
+dependencies = [
+ "symbian",
+ "symbian-app",
+ "symbian-sys",
 ]
 
 [[package]]
@@ -629,6 +692,8 @@ name = "symbian-bootcfg"
 version = "0.1.0"
 dependencies = [
  "symbian",
+ "symbian-crypto",
+ "symbian-json",
 ]
 
 [[package]]
@@ -637,6 +702,7 @@ version = "0.1.0"
 dependencies = [
  "symbian",
  "symbian-bootcfg",
+ "symbian-decl-ui",
  "symbian-gfx",
  "symbian-preview",
  "symbian-ui",
@@ -656,7 +722,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "symbian-dom"
+version = "0.1.0"
+dependencies = [
+ "symbian-gfx",
+ "symbian-layout",
+]
+
+[[package]]
 name = "symbian-gfx"
+version = "0.1.0"
+
+[[package]]
+name = "symbian-json"
 version = "0.1.0"
 
 [[package]]
@@ -664,11 +742,32 @@ name = "symbian-keys"
 version = "0.1.0"
 
 [[package]]
+name = "symbian-layout"
+version = "0.1.0"
+dependencies = [
+ "symbian-gfx",
+ "symbian-preview",
+ "symbian-ui",
+]
+
+[[package]]
 name = "symbian-mtm"
 version = "0.1.0"
 dependencies = [
  "symbian",
  "symbian-sys",
+]
+
+[[package]]
+name = "symbian-pkgui"
+version = "0.1.0"
+dependencies = [
+ "symbian",
+ "symbian-bootcfg",
+ "symbian-decl-ui",
+ "symbian-gfx",
+ "symbian-preview",
+ "symbian-ui",
 ]
 
 [[package]]
@@ -741,6 +840,29 @@ dependencies = [
  "once_cell",
  "rustix",
  "windows-sys",
+]
+
+[[package]]
+name = "tileprobe"
+version = "0.1.0"
+dependencies = [
+ "symbian",
+ "symbian-app",
+ "symbian-report",
+ "symbian-sys",
+]
+
+[[package]]
+name = "uigallery"
+version = "0.1.0"
+dependencies = [
+ "symbian",
+ "symbian-decl-ui",
+ "symbian-gfx",
+ "symbian-preview",
+ "symbian-sim",
+ "symbian-sys",
+ "symbian-ui",
 ]
 
 [[package]]
