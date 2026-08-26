@@ -156,7 +156,6 @@ mod tests {
         };
         assert_eq!(app.handle_key(ev, &theme, Rect::from_size(Size::new(320, 240))), Handled::Consumed);
         app.draw(&mut c, &theme);
-        drop(c);
 
         assert_eq!(app.presses, 1);
         let bg = theme.palette.bg.mid().to_rgb565().0;

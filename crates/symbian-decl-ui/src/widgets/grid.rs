@@ -210,7 +210,7 @@ impl Grid {
     /// The band cells are drawn into, with the scrollbar gutter taken off the right.
     fn content(&self, rect: Rect, theme: &Theme<'_>) -> Rect {
         if self.scrollbar {
-            Rect { x1: rect.x1 - chrome::scrollbar_gutter(theme, true), ..rect }
+            Rect { x1: rect.x1 - chrome::scrollbar_gutter(theme), ..rect }
         } else {
             rect
         }
@@ -264,7 +264,7 @@ impl Widget for Grid {
                 theme,
                 &mut cache,
             );
-            layout::layout_node(&node, slot, r, &mut cache);
+            layout::layout_node(&node, slot, r, &mut cache, theme);
             layout::draw_node(&node, slot, &cache, c, theme);
             slot += node.slot_count();
         });

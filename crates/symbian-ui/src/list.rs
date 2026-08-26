@@ -288,6 +288,9 @@ impl ListState {
 }
 
 #[cfg(test)]
+extern crate alloc;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use alloc::vec::Vec;
@@ -496,6 +499,3 @@ mod tests {
         assert_eq!(s.selected, 3, "must not silently disagree with the row count");
     }
 }
-
-#[cfg(test)]
-extern crate alloc;

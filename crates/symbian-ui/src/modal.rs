@@ -90,6 +90,18 @@ impl<T: Clone> Modal<T> {
         }
     }
 
+    /// The default softkey labels are **Portuguese** — `Escolher` and `Voltar`.
+    ///
+    /// Not a slip: this widget was written for `tg`, whose interface is Portuguese, and those are the
+    /// words its other bars use. It is worth saying out loud because a shared widget that carries a
+    /// language hands every later caller a decision it never asked about, and the symptom is one
+    /// Portuguese word in an otherwise English screen — which is exactly what the boot manager's
+    /// first confirmation dialog looked like.
+    ///
+    /// So: call [`action_label`](Self::action_label) and [`back_label`](Self::back_label) unless your
+    /// screen is Portuguese. There is no English default because picking one would silently change
+    /// what `tg` already ships.
+    ///
     /// Add a choice: what it reads as, and what it means.
     pub fn choice(mut self, label: impl Into<String>, value: T) -> Self {
         self.choices.push((label.into(), value));
@@ -116,6 +128,35 @@ impl<T: Clone> Modal<T> {
     /// caller who wants a decision made can still treat [`Answer::Cancelled`] as one.
     pub fn back_label(mut self, label: impl Into<String>) -> Self {
         self.back_label = label.into();
+        self
+    }
+
+    /// The panel's cursor, whole — for a caller that rebuilds the modal on every frame.
+    ///
+    /// [`default_choice`](Self::default_choice) can seed the cursor and nothing could read it back,
+    /// which is fine for the imperative use this was written for: the caller keeps one `Modal` in a
+    /// field for as long as the question is up, so the cursor never has to leave it.
+    ///
+    /// A declarative caller cannot do that. Its view is rebuilt every frame, so its `Modal` is built
+    /// every frame too, and without this pair the cursor is reset to the default by the very act of
+    /// redrawing — `Down` moves the highlight, the next frame puts it back, and the dialog answers
+    /// the first choice whatever the user pointed at.
+    ///
+    /// The whole [`Prompt`] and not just its index, because the index is not all of it: `Prompt`
+    /// also records the row height and viewport it was last drawn at, and scrolling a dialog with
+    /// more choices than fit is computed from those. Handing back only `selected()` would have made
+    /// a long dialog scroll against a one-pixel viewport — the defect
+    /// `Select::set_popup_metrics` exists to prevent, arrived at from the other side.
+    pub fn cursor(&self) -> &Prompt {
+        &self.prompt
+    }
+
+    /// Start from a cursor taken out of an earlier frame's modal. See [`Modal::cursor`].
+    ///
+    /// After [`default_choice`](Self::default_choice), not before: this restores where the user
+    /// actually is, and a default is only where they started.
+    pub fn with_cursor(mut self, cursor: Prompt) -> Self {
+        self.prompt = cursor;
         self
     }
 

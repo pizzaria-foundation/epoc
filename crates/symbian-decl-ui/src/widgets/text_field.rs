@@ -179,6 +179,10 @@ impl TextField {
 }
 
 impl Widget for TextField {
+    fn focus_state(&self) -> Option<bool> {
+        Some(self.focused)
+    }
+
     fn content_hash(&self) -> WidgetHash {
         // The text is part of the digest because the field's width does not change with it but a
         // parent that measured around it may care; the caret is not, because moving it never

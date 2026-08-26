@@ -39,7 +39,7 @@ mod tests {
             let mut cache = UiCache::new();
             cache.begin_frame();
             measure_tree(root, Constraints::tight(area.width(), area.height()), t, &mut cache);
-            layout_tree(root, area, &mut cache);
+            layout_tree(root, area, &mut cache, t);
             cache
         })
     }

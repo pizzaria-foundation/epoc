@@ -270,11 +270,13 @@ pub fn measure_group(
     }
 
     let axis = g.axis;
+    let padding = g.padding.resolve(theme);
+    let gap = g.gap.resolve(theme);
     let (pad_main, pad_cross) = (
-        axis.pick(g.padding.horizontal(), g.padding.vertical()),
-        axis.pick(g.padding.vertical(), g.padding.horizontal()),
+        axis.pick(padding.horizontal(), padding.vertical()),
+        axis.pick(padding.vertical(), padding.horizontal()),
     );
-    let gaps = g.gap.max(0) * (g.children.len() as i32 - 1).max(0);
+    let gaps = gap * (g.children.len() as i32 - 1).max(0);
 
     // What the parent is offering, before anything is spent.
     let outer_main = resolve(axis.pick(g.width, g.height), axis.main(max_size(offer)));
@@ -282,6 +284,13 @@ pub fn measure_group(
     // Gaps and padding are spent here — before the division, never after it.
     let avail_main = (outer_main - pad_main - gaps).max(0);
     let avail_cross = (outer_cross - pad_cross).max(0);
+
+    if g.wraps() {
+        let size =
+            measure_wrapping(g, slot, offer, theme, cache, outer_main, outer_cross, pad_main, pad_cross);
+        cache.store(slot, hash, offer, size);
+        return size;
+    }
 
     // Pass one: the children that asked for a size get it.
     //
@@ -340,27 +349,200 @@ pub fn measure_group(
     size
 }
 
+/// [`measure_group`] for a group that wraps — see [`crate::widgets::Flow`].
+///
+/// # Why this is a separate function and not a branch inside the line arithmetic
+///
+/// A wrapping group divides nothing. The flex pass exists to share one line's leftover space by
+/// weight, and there is no leftover when a child that does not fit opens a line of its own instead
+/// of competing for this one. Threading `wrap` through the two-pass division would mean a `if wrap`
+/// beside every use of `avail_main`, `Shares` and `total_weight` — five branches in the most
+/// delicate arithmetic in the crate, four of which say "not this".
+///
+/// So flex weights are ignored here, deliberately and documented on
+/// [`Flow`](crate::widgets::Flow): a share of a line is meaningless when lines are created on
+/// demand.
+#[allow(clippy::too_many_arguments)]
+fn measure_wrapping(
+    g: &Group,
+    slot: usize,
+    offer: Constraints,
+    theme: &Theme<'_>,
+    cache: &mut UiCache,
+    outer_main: i32,
+    outer_cross: i32,
+    pad_main: i32,
+    pad_cross: i32,
+) -> Size {
+    use alloc::vec::Vec;
+    use symbian_ui::flow::{stack_extent, Packer};
+
+    let axis = g.axis;
+    // The line's own room, with no gap subtracted up front: gaps here are *within* a line and the
+    // packer charges them as it goes, which is the whole reason it counts them against its limit.
+    let limit = (outer_main - pad_main).max(0);
+    let avail_cross = (outer_cross - pad_cross).max(0);
+
+    let mut packer = Packer::new(limit, g.gap.resolve(theme));
+    // One entry per line, so the placement pass can find where each line begins across the axis.
+    let mut line_crosses: Vec<i32> = Vec::new();
+    let mut widest_line = 0;
+    let mut current_line = 0usize;
+    let mut current_cross = 0;
+
+    let mut child_slot = slot + 1;
+    for child in g.children() {
+        // Offered the whole line, never what its predecessors left — the same cache decision the
+        // straight-line pass makes, and it matters more here: an offer that shrank as a line filled
+        // would make the last chip in a row a cache miss every time one before it changed.
+        let size = measure_node(child, child_slot, axis.offer(0, limit, avail_cross), theme, cache);
+        let placed = packer.place(axis.main(size));
+        if placed.line != current_line {
+            line_crosses.push(current_cross);
+            current_line = placed.line;
+            current_cross = 0;
+        }
+        current_cross = current_cross.max(axis.cross(size).clamp(0, avail_cross));
+        widest_line = widest_line.max(packer.line_extent());
+        child_slot += child.slot_count();
+    }
+    line_crosses.push(current_cross);
+
+    let main = if axis.pick(g.width, g.height).is_wrap() {
+        widest_line + pad_main
+    } else {
+        outer_main
+    };
+    let cross = if axis.pick(g.height, g.width).is_wrap() {
+        stack_extent(&line_crosses, g.cross_gap.resolve(theme)) + pad_cross
+    } else {
+        outer_cross
+    };
+    offer.constrain(axis.size(main, cross))
+}
+
+/// [`layout_group`] for a group that wraps.
+///
+/// # Two packers, one rule
+///
+/// The line breaks are recomputed here rather than carried over from the measure pass, because the
+/// cache stores sizes and rects and nothing in between — and a third kind of entry, holding line
+/// numbers, would be a second thing to invalidate correctly.
+///
+/// Recomputing is safe for a reason the packer's own tests pin down: the same feed gives the same
+/// lines. This pass feeds it the *cached* main sizes in the same order the measure pass fed it the
+/// freshly measured ones, and those are the same numbers — the measure pass stored exactly what it
+/// packed. `the_same_feed_gives_the_same_lines_twice` in `symbian_ui::flow` is the assertion that
+/// keeps that true.
+fn layout_wrapping(g: &Group, slot: usize, inner: Rect, cache: &mut UiCache, theme: &Theme<'_>) {
+    use alloc::vec::Vec;
+    use symbian_ui::flow::Packer;
+
+    let axis = g.axis;
+    let gap = g.gap.resolve(theme);
+    let cross_gap = g.cross_gap.resolve(theme);
+    let limit = axis.pick(inner.width(), inner.height()).max(0);
+    let main0 = axis.pick(inner.x0, inner.y0);
+    let cross0 = axis.pick(inner.y0, inner.x0);
+
+    // Pass one: how tall each line is, from what the measure pass stored. Nothing is placed yet,
+    // because a line's cross origin is the sum of the lines above it and the last child of line 0
+    // is walked before the first child of line 1.
+    let mut line_crosses: Vec<i32> = Vec::new();
+    {
+        let mut packer = Packer::new(limit, gap);
+        let mut current_line = 0usize;
+        let mut current_cross = 0;
+        let mut child_slot = slot + 1;
+        for child in g.children() {
+            let size = cache.size(child_slot).unwrap_or(Size::ZERO);
+            let placed = packer.place(axis.main(size));
+            if placed.line != current_line {
+                line_crosses.push(current_cross);
+                current_line = placed.line;
+                current_cross = 0;
+            }
+            current_cross = current_cross.max(axis.cross(size));
+            child_slot += child.slot_count();
+        }
+        line_crosses.push(current_cross);
+    }
+
+    // Where each line begins across the axis, accumulated once so the placement below is a lookup.
+    let mut line_origins: Vec<i32> = Vec::with_capacity(line_crosses.len());
+    let mut at = cross0;
+    for h in &line_crosses {
+        line_origins.push(at);
+        at += h + cross_gap;
+    }
+
+    let mut packer = Packer::new(limit, gap);
+    let mut child_slot = slot + 1;
+    for child in g.children() {
+        let size = cache.size(child_slot).unwrap_or(Size::ZERO);
+        let placed = packer.place(axis.main(size));
+        let band = line_crosses[placed.line];
+        let band0 = line_origins[placed.line];
+
+        // Clamped against the line's own end, exactly as the straight-line pass clamps against the
+        // group's: an over-wide first child on a line comes out flat inside its parent rather than
+        // sitting off the edge with a positive width.
+        let start = (main0 + placed.offset).min(main0 + limit);
+        let main = axis.main(size).clamp(0, (main0 + limit - start).max(0));
+        let cross = axis.cross(size).clamp(0, band);
+        // Alignment is within the child's own *line*, not the whole group. A row of chips of two
+        // heights centres each chip in its line; measured against the block, the short chips on the
+        // last line would drift toward the middle of the whole thing.
+        let (cross_at, cross) = match child.align_self().unwrap_or(g.align) {
+            CrossAlign::Start => (band0, cross),
+            CrossAlign::Center => (band0 + (band - cross) / 2, cross),
+            CrossAlign::End => (band0 + band - cross, cross),
+            CrossAlign::Stretch => (band0, band),
+        };
+        layout_node(child, child_slot, axis.rect(start, cross_at, main, cross), cache, theme);
+        child_slot += child.slot_count();
+    }
+}
+
 /// Turn the measured sizes into rectangles, starting from `area`.
 ///
-/// Takes no theme and no constraints: it cannot measure, only place. See the module docs.
-pub fn layout_tree(root: &Node, area: Rect, cache: &mut UiCache) {
-    layout_node(root, 0, area, cache);
+/// Takes no constraints: it cannot measure, only place. See the module docs.
+///
+/// # It does take a theme, and that is not a measurement
+///
+/// This signature used to end at `cache`, and its comment said so with some pride. What changed is
+/// [`Gap`](crate::Gap): a group's padding and gaps are now named by role — `Gap::Snug`, not `4` —
+/// for the same reason a colour is, and turning a role into a pixel count needs the theme that
+/// defines the scale.
+///
+/// The rule this pass obeys is unchanged, because the rule was never "no theme". It is that this
+/// pass **cannot measure**: it may not ask a widget how big it is, consult a font, or look at a
+/// string. Resolving `Gap::Snug` does none of those — it is a lookup with the same answer every
+/// time, and the measure pass resolves it identically from the same theme, which is what keeps the
+/// two passes agreeing about where a line starts.
+pub fn layout_tree(root: &Node, area: Rect, cache: &mut UiCache, theme: &Theme<'_>) {
+    layout_node(root, 0, area, cache, theme);
 }
 
 /// [`layout_tree`] for a subtree whose slots start at `slot`.
-pub fn layout_node(node: &Node, slot: usize, area: Rect, cache: &mut UiCache) {
+pub fn layout_node(node: &Node, slot: usize, area: Rect, cache: &mut UiCache, theme: &Theme<'_>) {
     match node {
         Node::Leaf(_) => cache.set_rect(slot, area),
-        Node::Group(g) => layout_group(g, slot, area, cache),
+        Node::Group(g) => layout_group(g, slot, area, cache, theme),
     }
 }
 
 /// Walk the line, laying each child down where the previous one ended.
-pub fn layout_group(g: &Group, slot: usize, area: Rect, cache: &mut UiCache) {
+pub fn layout_group(g: &Group, slot: usize, area: Rect, cache: &mut UiCache, theme: &Theme<'_>) {
     cache.set_rect(slot, area);
 
     let axis = g.axis;
-    let inner = sane(area.inset_edges(g.padding));
+    let gap = g.gap.resolve(theme);
+    let inner = sane(area.inset_edges(g.padding.resolve(theme)));
+    if g.wraps() {
+        layout_wrapping(g, slot, inner, cache, theme);
+        return;
+    }
     let limit = axis.pick(inner.x1, inner.y1);
     let cross0 = axis.pick(inner.y0, inner.x0);
     let cross_room = axis.pick(inner.height(), inner.width()).max(0);
@@ -374,7 +556,7 @@ pub fn layout_group(g: &Group, slot: usize, area: Rect, cache: &mut UiCache) {
             total += axis.main(cache.size(s).unwrap_or(Size::ZERO));
             s += child.slot_count();
         }
-        total + g.gap.max(0) * (g.children.len() as i32 - 1).max(0)
+        total + gap * (g.children.len() as i32 - 1).max(0)
     };
     let room = axis.pick(inner.width(), inner.height()).max(0);
     let slack = (room - content_main).max(0);
@@ -412,8 +594,8 @@ pub fn layout_group(g: &Group, slot: usize, area: Rect, cache: &mut UiCache) {
             CrossAlign::End => (cross0 + cross_room - cross, cross),
             CrossAlign::Stretch => (cross0, cross_room),
         };
-        layout_node(child, child_slot, axis.rect(start, cross_at, main, cross), cache);
-        cursor = start + main + g.gap.max(0) + extra_gap;
+        layout_node(child, child_slot, axis.rect(start, cross_at, main, cross), cache, theme);
+        cursor = start + main + gap + extra_gap;
         child_slot += child.slot_count();
     }
 }
@@ -456,7 +638,7 @@ pub fn draw_frame(
 pub fn place_frame(root: &Node, rect: Rect, cache: &mut UiCache, theme: &Theme<'_>) {
     cache.begin_frame();
     measure_tree(root, Constraints::tight(rect.width(), rect.height()), theme, cache);
-    layout_tree(root, rect, cache);
+    layout_tree(root, rect, cache, theme);
 }
 
 /// Paint the tree into the rects [`layout_tree`] worked out.
@@ -519,15 +701,34 @@ pub fn draw_group(
     if let Some(bg) = g.background {
         c.fill_rect(rect, bg);
     }
+    // What the children will be standing on. A literal `background` cannot say — a `Color` carries no
+    // role — so it leaves the ground alone, which is one more reason `surface` exists beside it.
+    let mut ground = theme.ground;
+    if let Some(role) = g.surface {
+        symbian_ui::paint::band(c, rect, &role.resolve_on(theme, g.has_selection_band()));
+        ground = role.ground();
+    }
+    // Before the children and after any flat background, which is the order `ScrollList` uses: the
+    // band goes down first and everything the row draws lands on top of it. Through
+    // `chrome::selection` rather than a fill, so a row in a form gets the same band a row in a list
+    // gets rather than one that nearly matches.
+    if g.has_selection_band() {
+        symbian_ui::chrome::selection(c, rect, theme);
+        ground = symbian_ui::Ground::Band;
+    }
+    // Handed down rather than mutated in place, so a sibling that paints no band is unaffected — the
+    // ground belongs to a subtree, not to the walk.
+    let inner = theme.on(ground);
     let mut child_slot = slot + 1;
     for child in g.children() {
-        draw_node(child, child_slot, cache, c, theme);
+        draw_node(child, child_slot, cache, c, &inner);
         child_slot += child.slot_count();
     }
     // After the children, so a row whose content reaches the bottom edge does not paint over its
     // own separator — the same order the hand-written row draws in, and the reason a border is a
     // property here rather than a child.
     if let Some((ink, inset)) = g.border_bottom {
+        let inset = inset.resolve(theme);
         c.hline(rect.y1 - 1, rect.x0 + inset, rect.x1, ink.resolve(theme));
     }
     c.restore(saved);
@@ -604,6 +805,20 @@ pub fn dispatch_key_group(
             return Handled::Consumed;
         }
         child_slot += child.slot_count();
+    }
+    // A focus scope's own cursor moves only after everything inside it has declined — the ordering
+    // `OnKey` already uses, and load-bearing for the same reason: a control must not have to know
+    // what encloses it. It is also what makes nesting work. Outer-first, a vertical `RadioGroup`
+    // inside a vertical form would never move between its own options, because the form would take
+    // every `Down` before the group was asked.
+    //
+    // A scope that declines here — `EdgePolicy::Escape` at its last stop — leaves the key to bubble
+    // to the scope enclosing *it*, which is the whole mechanism a row of buttons inside a form is
+    // built on.
+    if let Some(hook) = g.focus() {
+        if let (Handled::Consumed, _) = hook.handle_key(ev) {
+            return Handled::Consumed;
+        }
     }
     Handled::Ignored
 }
@@ -723,7 +938,7 @@ mod tests {
     fn frame(root: &Node, area: Rect, theme: &Theme<'_>, cache: &mut UiCache) {
         cache.begin_frame();
         measure_tree(root, Constraints::tight(area.width(), area.height()), theme, cache);
-        layout_tree(root, area, cache);
+        layout_tree(root, area, cache, theme);
     }
 
     fn run(area: Rect, build: impl Fn() -> Node, frames: usize) -> UiCache {
@@ -1085,7 +1300,7 @@ mod tests {
             let size = measure_tree(&root, Constraints::loose(100, 20), t, &mut cache);
             assert_eq!(size.w, 100, "nothing may claim more of the screen than there is");
             // And the child inside it must not be handed the imaginary 400 either.
-            layout_tree(&root, Rect::from_xywh(0, 0, 100, 20), &mut cache);
+            layout_tree(&root, Rect::from_xywh(0, 0, 100, 20), &mut cache, t);
             assert_eq!(cache.rect(1).unwrap().width(), 100);
         });
     }
@@ -1376,7 +1591,7 @@ mod tests {
             1,
         );
         let r = cache.rect(1).unwrap();
-        assert_eq!(r.y0 - 0, 10, "above");
+        assert_eq!(r.y0, 10, "above");
         assert_eq!(38 - r.y1, 11, "below");
     }
 
@@ -1616,7 +1831,7 @@ mod align_self_tests {
             let area = Rect::from_xywh(0, 0, 100, 40);
             cache.begin_frame();
             measure_tree(&node, Constraints::tight(area.width(), area.height()), t, &mut cache);
-            layout_tree(&node, area, &mut cache);
+            layout_tree(&node, area, &mut cache, t);
             out = (1..=2).filter_map(|slot| cache.rect(slot)).collect();
         });
         out
@@ -1674,7 +1889,7 @@ mod align_self_tests {
             let area = Rect::from_xywh(0, 0, 100, 40);
             cache.begin_frame();
             measure_tree(&node, Constraints::tight(area.width(), area.height()), t, &mut cache);
-            layout_tree(&node, area, &mut cache);
+            layout_tree(&node, area, &mut cache, t);
             out = cache.rect(1);
         });
         assert_eq!(out.expect("the group was placed").y1, 40);

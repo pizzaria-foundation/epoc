@@ -52,6 +52,7 @@ use crate::cache::UiCache;
 use crate::constraints::Constraints;
 use crate::layout;
 use crate::slot::SlotTable;
+use crate::spacing::RowHeight;
 use crate::widget::{hash_i32, KeyCtx, Widget, WidgetHash};
 use crate::widgets::Node;
 
@@ -75,6 +76,59 @@ pub type RowFn = dyn Fn(usize, bool) -> Node;
 /// much text each one holds, and there is no single number to give. [`symbian_ui::Rows`] already
 /// models both — this is only the owned form of it, since a widget rebuilt every frame cannot hold
 /// a borrow of the caller's slice.
+/// Row heights **as declared**, before a theme has turned the roles into pixels.
+///
+/// The pair with [`Heights`] is deliberate and is the whole shape of this change: a view names a
+/// kind of row, and the passes that have a theme resolve it. Keeping one type for both would mean
+/// either a `view` that needed a theme — the thing this crate exists not to require — or heights
+/// that stayed numbers, which is what they were.
+enum RowHeights {
+    /// Every row the same kind. The overwhelming case, and the one that resolves without allocating.
+    Uniform { count: usize, height: RowHeight },
+    /// One kind per row, in order. A list of headings and rows, or a transcript of measured bubbles.
+    Mixed(Vec<RowHeight>),
+}
+
+impl RowHeights {
+    /// How many rows, which needs no theme — the count is not a distance.
+    fn len(&self) -> usize {
+        match self {
+            RowHeights::Uniform { count, .. } => *count,
+            RowHeights::Mixed(v) => v.len(),
+        }
+    }
+
+    /// Turn the roles into pixels.
+    ///
+    /// `Uniform` costs nothing: it becomes a `Uniform` with a resolved number and allocates not at
+    /// all, which keeps the ordinary list exactly as cheap as it was. `Mixed` allocates one `Vec<i32>`
+    /// per frame, per mixed list — a settings screen's twenty entries, not a transcript's two
+    /// hundred, and only on the path that asked for it.
+    fn resolve(&self, theme: &Theme<'_>) -> Heights {
+        match self {
+            RowHeights::Uniform { count, height } => {
+                Heights::Uniform(Uniform { count: *count, height: height.resolve(theme).max(1) })
+            }
+            RowHeights::Mixed(v) => {
+                Heights::Varying(v.iter().map(|h| h.resolve(theme)).collect())
+            }
+        }
+    }
+
+    /// Fold the roles into a digest — never the resolved pixels. See [`RowHeight::hash`].
+    fn hash(&self, seed: WidgetHash) -> WidgetHash {
+        match self {
+            RowHeights::Uniform { count, height } => {
+                height.hash(hash_i32(hash_i32(seed, 0), *count as i32))
+            }
+            // Every entry, not just the count: two lists with the same number of rows and different
+            // kinds are different lists, and a digest that missed that would keep the old heights.
+            RowHeights::Mixed(v) => v.iter().fold(hash_i32(seed, 1), |acc, h| h.hash(acc)),
+        }
+    }
+}
+
+/// Row heights **as resolved**, in pixels, ready for [`ListState`].
 enum Heights {
     Uniform(Uniform),
     /// One height per row, in order. Built by the caller, which is the only party that knows how
@@ -102,7 +156,7 @@ impl Rows for Heights {
 }
 
 pub struct ScrollList {
-    rows: Heights,
+    rows: RowHeights,
     /// Selection as the app sees it. `None` leaves the list to keep its own in the slot, which is
     /// what a list nobody navigates from the model wants.
     selected: Option<usize>,
@@ -151,7 +205,7 @@ impl ScrollList {
     ///
     /// Takes the slot table because that is where the scroll offset has to come from: this struct
     /// is rebuilt every frame and the offset must not be.
-    pub fn new(slots: &mut SlotTable, count: usize, row_height: i32) -> Self {
+    pub fn new(slots: &mut SlotTable, count: usize, row_height: impl Into<RowHeight>) -> Self {
         let state = slots
             .use_state_with(|| Rc::new(Cell::new(ListState::new())))
             .clone();
@@ -159,7 +213,7 @@ impl ScrollList {
             .use_state_with(|| Rc::new(RefCell::new(UiCache::new())))
             .clone();
         Self {
-            rows: Heights::Uniform(Uniform { count, height: row_height.max(1) }),
+            rows: RowHeights::Uniform { count, height: row_height.into() },
             selected: None,
             focused: false,
             scrollbar: true,
@@ -179,8 +233,18 @@ impl ScrollList {
     /// A height of zero is legal and means a row that occupies no space; negative ones are clamped
     /// away, since a negative height would walk the scroll offset backwards.
     pub fn varying(slots: &mut SlotTable, heights: Vec<i32>) -> Self {
-        let mut me = Self::new(slots, 0, 1);
-        me.rows = Heights::Varying(heights.into_iter().map(|h| h.max(0)).collect());
+        Self::mixed(slots, heights.into_iter().map(RowHeight::Exact).collect())
+    }
+
+    /// A list of unlike *kinds* of row: headings among rows, measured bubbles among them.
+    ///
+    /// The reason this is not [`varying`](Self::varying) with a theme in hand: a view has no theme,
+    /// so a caller that wanted a heading's height would have to write the number, and the number is
+    /// `theme.fonts.small.line_height() + theme.metrics.space.snug`. Naming the kind moves that
+    /// arithmetic to where the theme is and leaves the view saying what it means.
+    pub fn mixed(slots: &mut SlotTable, kinds: Vec<RowHeight>) -> Self {
+        let mut me = Self::new(slots, 0, RowHeight::Row);
+        me.rows = RowHeights::Mixed(kinds);
         me
     }
 
@@ -307,8 +371,8 @@ impl ScrollList {
     /// already handle the second — `clamp` is the one that stops a selection dangling past the end
     /// after messages are deleted, which otherwise shows up much later as a list with no visible
     /// highlight and no obvious cause.
-    fn sync(&self, viewport_h: i32) -> ListState {
-        let st = self.synced(viewport_h);
+    fn sync(&self, rows: &Heights, viewport_h: i32) -> ListState {
+        let st = self.synced(rows, viewport_h);
         self.state.set(st);
         st
     }
@@ -321,11 +385,11 @@ impl ScrollList {
     /// keypress it did not answer. That is what
     /// `an_unfocused_list_reports_nothing_because_it_never_sees_the_key` is checking, and it caught
     /// exactly this.
-    fn synced(&self, viewport_h: i32) -> ListState {
+    fn synced(&self, rows: &Heights, viewport_h: i32) -> ListState {
         let mut st = self.state.get();
         match self.selected {
-            Some(i) => st.select(i, &self.rows, viewport_h),
-            None => st.clamp(&self.rows, viewport_h),
+            Some(i) => st.select(i, rows, viewport_h),
+            None => st.clamp(rows, viewport_h),
         }
         st
     }
@@ -335,8 +399,8 @@ impl ScrollList {
     /// Zero unless [`anchor`](Self::anchor) says otherwise, and zero whenever the content overflows
     /// — there is no slack to distribute then, and offsetting anyway would push the top row off the
     /// screen with no way to scroll back to it.
-    fn slack_offset(&self, band_h: i32) -> i32 {
-        let slack = band_h - ListState::content_height(&self.rows);
+    fn slack_offset(&self, rows: &Heights, band_h: i32) -> i32 {
+        let slack = band_h - ListState::content_height(rows);
         if slack <= 0 {
             return 0;
         }
@@ -365,16 +429,17 @@ impl ScrollList {
         if self.rows.len() == 0 {
             return Handled::Ignored;
         }
+        let rows = self.rows.resolve(cx.theme);
         let band = self.content(rect, cx.theme);
-        let st = self.synced(band.height());
-        let rows_at = Rect { y0: band.y0 + self.slack_offset(band.height()), ..band };
+        let st = self.synced(&rows, band.height());
+        let rows_at = Rect { y0: band.y0 + self.slack_offset(&rows, band.height()), ..band };
 
         // Walked rather than remembered: the slot a row occupies depends on which rows are visible
         // and on how wide each one's subtree is, and a number stashed during `draw` would be stale
         // for exactly one frame after anything changed — which is the frame a key arrives in.
         let mut slot = 0usize;
         let mut base = None;
-        st.for_visible(&self.rows, rows_at, |i, _| {
+        st.for_visible(&rows, rows_at, |i, _| {
             let node = (self.row)(i, i == st.selected);
             if i == st.selected {
                 base = Some(slot);
@@ -396,7 +461,7 @@ impl ScrollList {
     /// The band rows are drawn into, with the scrollbar gutter taken off the right.
     fn content(&self, rect: Rect, theme: &Theme<'_>) -> Rect {
         if self.scrollbar {
-            Rect { x1: rect.x1 - chrome::scrollbar_gutter(theme, true), ..rect }
+            Rect { x1: rect.x1 - chrome::scrollbar_gutter(theme), ..rect }
         } else {
             rect
         }
@@ -411,10 +476,9 @@ impl Widget for ScrollList {
         // Every height, not just the count: two transcripts with the same number of messages and
         // different wrapping are different lists, and a digest that missed that would keep the old
         // measurements for the new text.
-        let h = match &self.rows {
-            Heights::Uniform(u) => hash_i32(h, u.height),
-            Heights::Varying(v) => v.iter().fold(h, |acc, &px| hash_i32(acc, px)),
-        };
+        // The roles, not the pixels they resolve to — `content_hash` has no theme, and folding in a
+        // resolved height would make a digest that changed with the palette.
+        let h = self.rows.hash(h);
         hash_i32(h, self.scrollbar as i32)
     }
 
@@ -426,10 +490,11 @@ impl Widget for ScrollList {
     }
 
     fn draw(&self, c: &mut Canvas<'_>, rect: Rect, theme: &Theme<'_>) {
+        let rows = self.rows.resolve(theme);
         let band = self.content(rect, theme);
-        let st = self.sync(band.height());
+        let st = self.sync(&rows, band.height());
         let sel = st.selected;
-        let has_rows = self.rows.len() > 0;
+        let has_rows = rows.len() > 0;
 
         let mut cache = self.cache.borrow_mut();
         // This list's own frame, over this list's own cache. The bridge is forbidden from calling
@@ -451,26 +516,36 @@ impl Widget for ScrollList {
         // inside `band` still fits inside `band` moved down by its own slack. Were the offset ever
         // applied to overflowing content it would trim the last row by that many pixels, which is
         // why `slack_offset` returns zero there rather than leaving it to this call site.
-        let rows_at = Rect { y0: band.y0 + self.slack_offset(band.height()), ..band };
-        st.draw_visible(c, &self.rows, rows_at, |c, i, r| {
+        let rows_at = Rect { y0: band.y0 + self.slack_offset(&rows, band.height()), ..band };
+        st.draw_visible(c, &rows, rows_at, |c, i, r| {
             // The highlight goes down first and full-bleed: with no pointer it is the only thing
             // saying where you are, so a row drawing its own background must not cover it.
             if has_rows && i == sel {
                 chrome::selection(c, r, theme);
             }
+            // The selected row's subtree is standing on the band, so it is told. Every other row is
+            // on the page. Without this a row's `Ink::Dim` timestamp keeps being the page's `dim`
+            // under the highlight — which is why the parity reference and the declarative scene both
+            // had to write `if selected { selection_text }` by hand.
+            let row_theme = theme.on(if has_rows && i == sel {
+                symbian_ui::Ground::Band
+            } else {
+                theme.ground
+            });
+            let theme = &row_theme;
             let node = (self.row)(i, i == sel);
             // The same three passes the bridge runs, on a subtree: measure, place, draw. `slot` is
             // the base for this row's subtree and advances by the whole subtree's width, or two
             // rows would write over each other's rects.
             layout::measure_node(&node, slot, Constraints::tight(r.width(), r.height()), theme, &mut cache);
-            layout::layout_node(&node, slot, r, &mut cache);
+            layout::layout_node(&node, slot, r, &mut cache, theme);
             layout::draw_node(&node, slot, &cache, c, theme);
             slot += node.slot_count();
         });
         drop(cache);
 
         if self.scrollbar {
-            chrome::scrollbar(c, rect, theme, st.scrollbar(&self.rows, band.height()));
+            chrome::scrollbar(c, rect, theme, st.scrollbar(&rows, band.height()));
         }
     }
 
@@ -496,13 +571,16 @@ impl Widget for ScrollList {
             return Handled::Ignored;
         }
         // `rect.height()` and not the content band: the scrollbar gutter is taken off the width,
-        // never the height, and there is no theme here to ask for its width anyway.
+        // never the height. (An earlier version of this comment also claimed there was no theme here
+        // to ask for the gutter's width. There is — `cx.theme` — and the heights below need it.)
+        //
         // Reconciled against this frame's rows *before* the key, not after: the app may have moved
         // the selection since the last draw, and moving from a stale cursor is how a list scrolls
         // from where it used to be. `sync` also clamps a selection left dangling by deleted rows.
-        let mut st = self.sync(rect.height());
+        let rows = self.rows.resolve(cx.theme);
+        let mut st = self.sync(&rows, rect.height());
         let before = st.selected;
-        let out = st.handle_key(ev, &self.rows, rect.height());
+        let out = st.handle_key(ev, &rows, rect.height());
         self.state.set(st);
         if out != Handled::Consumed {
             return out;
@@ -553,11 +631,14 @@ mod tests {
     // ---- a list that moves its own cursor ---------------------------------------------------------
 
     /// The list, the reports it made, and the state behind it — assembled once per test.
+    /// A list plus the two logs it writes into. Named so the signature says what it hands back.
+    type Recorded<T> = Rc<RefCell<Vec<T>>>;
+
     fn reporting(
         slots: &mut SlotTable,
         count: usize,
         selected: usize,
-    ) -> (ScrollList, Rc<RefCell<Vec<usize>>>, Rc<RefCell<Vec<Edge>>>) {
+    ) -> (ScrollList, Recorded<usize>, Recorded<Edge>) {
         let moves: Rc<RefCell<Vec<usize>>> = Rc::new(RefCell::new(Vec::new()));
         let edges: Rc<RefCell<Vec<Edge>>> = Rc::new(RefCell::new(Vec::new()));
         let (m, e) = (moves.clone(), edges.clone());
@@ -743,7 +824,7 @@ mod tests {
         // Same tree, cursor elsewhere: the field is still on screen and is now nobody's business.
         slots.end_frame();
         slots.begin_frame();
-        let (list, buf) = with_field(&mut slots, 0, true);
+        let (_list, buf) = with_field(&mut slots, 0, true);
         let stray = Rc::new(RefCell::new(symbian_ui::edit::TextField::new()));
         let shared = stray.clone();
         let list = ScrollList::new(&mut slots, 4, ROW).selected(0).row(move |i, _| {
@@ -1129,10 +1210,60 @@ mod varying_tests {
 
     #[test]
     fn a_negative_height_cannot_walk_the_list_backwards() {
+        // The clamp used to happen in `varying`; it now happens in `RowHeight::resolve`, which is the
+        // single place every path into a height goes through — including a `RowHeight::Exact` written
+        // straight into a `mixed` list, which `varying` would never have seen.
         let mut slots = SlotTable::new();
         let list = ScrollList::varying(&mut slots, alloc::vec![20, -5, 20]);
-        assert_eq!(list.rows.height(1), 0, "clamped to zero, not carried through");
-        assert_eq!(list.rows.len(), 3, "and the row still exists");
+        symbian_ui::testing::with_theme(symbian_ui::Palette::DARK, |t| {
+            let rows = list.rows.resolve(t);
+            assert_eq!(rows.height(1), 0, "clamped to zero, not carried through");
+            assert_eq!(rows.len(), 3, "and the row still exists");
+        });
+    }
+
+    #[test]
+    fn a_row_kind_resolves_to_the_theme_and_not_to_a_number() {
+        // The point of the roles: a declarative list reaches the same height an imperative screen
+        // reaches through `theme.metrics.row_h`, rather than a literal that agrees with it today.
+        let mut slots = SlotTable::new();
+        let list = ScrollList::new(&mut slots, 3, RowHeight::Row);
+        symbian_ui::testing::with_theme(symbian_ui::Palette::DARK, |t| {
+            assert_eq!(list.rows.resolve(t).height(0), t.metrics.row_h);
+        });
+    }
+
+    #[test]
+    fn a_mixed_list_gives_each_kind_its_own_height() {
+        let mut slots = SlotTable::new();
+        let list = ScrollList::mixed(
+            &mut slots,
+            alloc::vec![RowHeight::Header, RowHeight::Row, RowHeight::Exact(7)],
+        );
+        symbian_ui::testing::with_theme(symbian_ui::Palette::DARK, |t| {
+            let rows = list.rows.resolve(t);
+            assert_eq!(rows.height(1), t.metrics.row_h);
+            assert_eq!(rows.height(2), 7);
+            assert!(rows.height(0) < rows.height(1), "a heading is shorter than a row");
+        });
+    }
+
+    #[test]
+    fn the_digest_holds_the_kinds_and_not_the_pixels() {
+        // `RowHeight::Row` and an `Exact` that happens to equal it today are the same list on screen
+        // and different declarations. A cache miss is the safe direction; a stale height is not.
+        let mut a = SlotTable::new();
+        let mut b = SlotTable::new();
+        let roles = ScrollList::new(&mut a, 3, RowHeight::Row);
+        let literal = ScrollList::new(&mut b, 3, 38);
+        assert_ne!(roles.content_hash(), literal.content_hash());
+        // And two mixed lists of the same length with different kinds are told apart.
+        let mut c = SlotTable::new();
+        let mut d = SlotTable::new();
+        assert_ne!(
+            ScrollList::mixed(&mut c, alloc::vec![RowHeight::Header, RowHeight::Row]).content_hash(),
+            ScrollList::mixed(&mut d, alloc::vec![RowHeight::Row, RowHeight::Row]).content_hash()
+        );
     }
 }
 

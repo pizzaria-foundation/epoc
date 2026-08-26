@@ -184,11 +184,13 @@ fn declared_row(index: usize, selected: bool) -> symbian_decl_ui::widgets::Group
     use symbian_decl_ui::widgets::Ink;
 
     let (name, time) = CHATS[index];
-    let (fg, dim) = if selected {
-        (Ink::Fixed(SELECTED_TEXT), Ink::Fixed(SELECTED_TEXT))
-    } else {
-        (Ink::Text, Ink::Dim)
-    };
+    // No `if selected` here any more, and that absence is the point of this scene now. `Ink::Text`
+    // and `Ink::Dim` resolve against the ground the list put them on — see `symbian_ui::Ground` — so
+    // the declarative row says what it means and the highlight is handled where the highlight is
+    // painted. This used to be a literal `Ink::Fixed(SELECTED_TEXT)`, a colour smuggled past the
+    // theme because a row is built before it has one.
+    let (fg, dim) = (Ink::Text, Ink::Dim);
+    let _ = selected;
     Row::new()
         .align(symbian_decl_ui::layout::CrossAlign::Stretch)
         .padding(symbian_gfx::Edges { left: 5, right: 5, top: 0, bottom: 0 })
@@ -196,10 +198,6 @@ fn declared_row(index: usize, selected: bool) -> symbian_decl_ui::widgets::Group
         .child(Text::new(name).font(FontRole::Strong).ink(fg).flex(1))
         .child(Text::new(time).font(FontRole::Small).ink(dim).align(Align::End))
 }
-
-/// The dark palette's selection text colour, needed as a literal because a row is built before it
-/// meets a theme and [`Ink`] has no "whatever the selection uses" entry.
-const SELECTED_TEXT: Color = Color::hex(0xFFFFFF);
 
 // -------------------------------------------------------------------------- the imperative side
 
@@ -219,7 +217,7 @@ fn by_hand(c: &mut Canvas<'_>, theme: &Theme<'_>) {
     // The gutter comes off the width and never off the height, so the viewport a scroll offset is
     // computed against is still the full band. Getting that backwards is a list that scrolls a few
     // pixels short of the bottom row and never quite shows it.
-    let band = Rect { x1: f.content.x1 - chrome::scrollbar_gutter(theme, true), ..f.content };
+    let band = Rect { x1: f.content.x1 - chrome::scrollbar_gutter(theme), ..f.content };
     let mut state = ListState::new();
     state.select(SELECTED, &rows, f.content.height());
 
@@ -620,7 +618,7 @@ mod tests {
         // Deleting the `.align` call turns the second assertion red before the pixels ever get a
         // chance to disagree, which is a much easier failure to read.
         with_real_theme(|theme| {
-            let band_w = E72_SCREEN.w - chrome::scrollbar_gutter(theme, true);
+            let band_w = E72_SCREEN.w - chrome::scrollbar_gutter(theme);
             let row_rect = Rect::from_xywh(0, frame(theme).content.y0, band_w, ROW_H);
             let line_h = theme.fonts.strong.line_height();
             assert!(row_rect.height() > line_h, "a row must be taller than a line or this is moot");
@@ -639,7 +637,7 @@ mod tests {
                     theme,
                     &mut cache,
                 );
-                layout_tree(&node, row_rect, &mut cache);
+                layout_tree(&node, row_rect, &mut cache, theme);
                 cache.rect(1).expect("the name child was not placed")
             };
 
@@ -716,7 +714,7 @@ mod tests {
             // would keep passing if the row loop stopped drawing anything at all.
             let unclipped = render(theme, |c, t| {
                 let f = Frame::split(Rect::from_size(E72_SCREEN), t, true, true);
-                let band = Rect { x1: f.content.x1 - chrome::scrollbar_gutter(t, true), ..f.content };
+                let band = Rect { x1: f.content.x1 - chrome::scrollbar_gutter(t), ..f.content };
                 let mut st = ListState::new();
                 st.select(SELECTED, &rows, f.content.height());
                 chrome::clear(c, t);
@@ -761,7 +759,7 @@ mod tests {
         with_real_theme(|theme| {
             // The room a name actually gets: the band without the scrollbar gutter, without the
             // padding on both sides, without the timestamp, without the gap before it.
-            let band_w = E72_SCREEN.w - chrome::scrollbar_gutter(theme, true);
+            let band_w = E72_SCREEN.w - chrome::scrollbar_gutter(theme);
             let pad = theme.metrics.pad;
             let (name, time) = CHATS[SELECTED];
             let room = band_w - pad * 3 - theme.fonts.small.measure(time);

@@ -52,12 +52,21 @@ impl Widget for Avatar {
         hash_i32(h, self.size.unwrap_or(-1))
     }
 
-    fn measure(&self, constraints: Constraints, _theme: &Theme<'_>) -> Size {
+    fn measure(&self, constraints: Constraints, theme: &Theme<'_>) -> Size {
         // Without an explicit size, take the offered height and square it — a chat row is the case
         // this exists for, and there the height is the row and the width is whatever that needs.
         let edge = match self.size {
             Some(px) => px,
-            None => constraints.max_h.min(constraints.max_w),
+            // Clamped to a row, and the clamp is the point. Taking the offered height is right in a
+            // list, where a row is 38 pixels by construction — and catastrophic outside one: inside a
+            // `FocusScope` column the offer is the *whole remaining page*, so an avatar with no
+            // explicit size measured 180 pixels square and pushed everything below it off the screen.
+            //
+            // Every other widget in the catalogue that measures from the offer already clamps
+            // (`switch_height` to 10..18, `mark_size` to 9..18, `track_height` to 4..10,
+            // `stepper_height` to one line). This was the only one that did not, which the gallery
+            // found by being the first screen to put one outside a list.
+            None => constraints.max_h.min(constraints.max_w).min(theme.metrics.row_h),
         };
         constraints.constrain(Size::new(edge, edge))
     }
@@ -87,6 +96,18 @@ mod tests {
             assert_eq!(Avatar::new("CE", 7).size(24).measure(Constraints::loose(320, 38), t), Size::new(24, 24));
             // But it cannot escape a box smaller than itself; the clamp is the offer's, not ours.
             assert_eq!(Avatar::new("CE", 7).size(99).measure(Constraints::loose(20, 20), t), Size::new(20, 20));
+        });
+    }
+
+    #[test]
+    fn a_tall_offer_cannot_make_an_avatar_bigger_than_a_row() {
+        // The defect the gallery found. Inside a `FocusScope` column the offer is the whole remaining
+        // page, and an avatar with no explicit size took it: 180 pixels square, with the two rows
+        // below it squeezed to nothing and off the screen. Asserted against `metrics.row_h` rather
+        // than a number, so a theme with taller rows moves the expectation with it.
+        testing::with_theme(Palette::DARK, |t| {
+            let s = Avatar::new("CE", 7).measure(Constraints::loose(320, 205), t);
+            assert_eq!(s, Size::new(t.metrics.row_h, t.metrics.row_h));
         });
     }
 

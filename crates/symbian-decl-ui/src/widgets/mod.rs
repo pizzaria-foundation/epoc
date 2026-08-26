@@ -6,37 +6,95 @@
 //! intended shape. The imperative toolkit's arithmetic is correct and tested; what it lacked was a
 //! way to *declare* a screen made of it.
 
+pub mod card;
+pub mod surface_role;
+pub mod tile;
+pub mod chip;
+pub mod collapsible;
+pub mod detail_sheet;
+pub mod dialog;
+pub mod drawer;
+pub mod empty_state;
+pub mod notice;
+pub mod option_menu;
+pub mod progress;
+pub mod spinner;
+pub mod tabs;
 pub mod avatar;
 pub mod badge;
 pub mod button;
+pub mod checkbox;
 pub mod column;
+pub mod date_time;
+pub mod divider;
+pub mod field_row;
+pub mod flow;
+pub mod focus;
 pub mod grid;
+pub mod icon;
 pub mod imperative;
+pub mod list_item;
+pub mod marquee;
 pub mod row;
 pub mod on_key;
 pub mod screen;
+pub mod search_field;
+pub mod section_header;
+pub mod select;
+pub mod slider;
 pub mod scroll_list;
 pub mod softkey_bar;
 pub mod spacer;
 pub mod stack;
+pub mod stepper;
+pub mod switch;
 pub mod text;
 pub mod text_area;
 pub mod text_field;
 pub mod title_bar;
 
+pub use card::Card;
+pub use surface_role::SurfaceRole;
+pub use tile::Tile;
+pub use chip::Chip;
+pub use collapsible::{Collapsible, CollapsibleHead};
+pub use detail_sheet::DetailSheet;
+pub use dialog::Dialog;
+pub use drawer::Drawer;
+pub use empty_state::EmptyState;
+pub use notice::{Notice, Tone as NoticeTone};
+pub use option_menu::OptionMenu;
+pub use progress::ProgressBar;
+pub use spinner::Spinner;
+pub use tabs::Tabs;
 pub use avatar::Avatar;
 pub use badge::Badge;
 pub use button::Button;
+pub use checkbox::Checkbox;
 pub use column::Column;
+pub use date_time::DateTime;
+pub use divider::Divider;
+pub use field_row::FieldRow;
+pub use flow::Flow;
+pub use focus::{FocusScope, FocusStops};
 pub use grid::{Grid, GridEdge};
+pub use icon::{Icon, IconSize};
 pub use imperative::Imperative;
+pub use list_item::ListItem;
+pub use marquee::Marquee;
 pub use row::Row;
 pub use on_key::OnKey;
 pub use screen::Screen;
+pub use search_field::SearchField;
+pub use section_header::SectionHeader;
+pub use select::{Select, SelectParts};
+pub use slider::Slider;
 pub use scroll_list::{Edge, ScrollList};
 pub use softkey_bar::SoftkeyBar;
 pub use spacer::Spacer;
 pub use stack::Stack;
+pub use stepper::Stepper;
+pub use switch::Switch;
 pub use text::{Ink, Text};
 pub use text_area::TextArea;
 pub use text_field::TextField;
@@ -60,7 +118,9 @@ pub use title_bar::TitleBar;
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
-use symbian_gfx::{Canvas, Color, Edges, Rect, Size};
+use symbian_gfx::{Canvas, Color, Rect, Size};
+
+use crate::spacing::{Gap, Pad};
 use symbian_ui::{Handled, KeyEvent, Theme};
 
 use crate::cache::UiCache;
@@ -102,11 +162,6 @@ impl Node {
         }
     }
 
-    /// This node's share of its parent's leftover space.
-    ///
-    /// Routed through [`Length::weight`] so the rule about weightless and negative fills is written
-    /// once: a child claiming `Fill(0)` or `Fill(-1)` is a mistake, and counting it would divide
-    /// the screen by a number nobody chose.
     /// This node's cross-axis override, if it has one — CSS's `align-self`.
     ///
     /// Asked of the child, exactly like [`weight`](Self::weight), because a `Node` is the child and
@@ -115,6 +170,22 @@ impl Node {
         match self {
             Node::Leaf(w) => w.align_self(),
             Node::Group(g) => g.align_self,
+        }
+    }
+
+    /// This node's share of its parent's leftover space.
+    ///
+    /// Routed through [`Length::weight`] so the rule about weightless and negative fills is written
+    /// once: a child claiming `Fill(0)` or `Fill(-1)` is a mistake, and counting it would divide
+    /// the screen by a number nobody chose.
+    /// Whether this node takes focus, and whether it has it. See [`Widget::focus_state`].
+    ///
+    /// Asked of the child exactly like [`weight`](Self::weight): a `Node` *is* the child, and a
+    /// group has no focus of its own to report.
+    pub fn focus_state(&self) -> Option<bool> {
+        match self {
+            Node::Leaf(w) => w.focus_state(),
+            Node::Group(_) => None,
         }
     }
 
@@ -136,8 +207,8 @@ impl Node {
 pub struct Group {
     pub(crate) axis: Axis,
     pub(crate) children: Vec<Node>,
-    pub(crate) gap: i32,
-    pub(crate) padding: Edges,
+    pub(crate) gap: Gap,
+    pub(crate) padding: Pad,
     pub(crate) width: Length,
     pub(crate) height: Length,
     /// This group's share of *its parent's* main axis, whichever axis that turns out to be.
@@ -152,11 +223,30 @@ pub struct Group {
     pub(crate) align_self: Option<CrossAlign>,
     pub(crate) justify: MainAlign,
     pub(crate) background: Option<Color>,
+    /// A themed ground, named by role. See [`Group::surface`].
+    pub(crate) surface: Option<SurfaceRole>,
+    /// Whether the selection band is painted behind this group. See [`Group::selection_band`].
+    pub(crate) selection_band: bool,
     /// A hairline along the bottom edge — CSS's `border-bottom`, with the inset that a list row
     /// wants. `(colour, left inset)`.
-    pub(crate) border_bottom: Option<(Ink, i32)>,
+    pub(crate) border_bottom: Option<(Ink, Gap)>,
     /// Whether a child may paint outside this group — CSS's `overflow: visible`.
     pub(crate) overflow_visible: bool,
+    /// Whether a child that does not fit starts a new line instead of overflowing — see [`Flow`].
+    ///
+    /// A property of the container, like `axis`, and for the reason this file opens with: the engine
+    /// has to be able to see it. A `Flow` that laid out its own children as a leaf would be the
+    /// `Group: Widget` trap, and a row of chips would re-measure every one of them every frame.
+    pub(crate) wrap: bool,
+    /// Space between wrapped lines, across the axis. Only read when `wrap` is set.
+    pub(crate) cross_gap: Gap,
+    /// The cursor this group moves between its focusable children, if it is a focus scope.
+    ///
+    /// Data on the container, exactly like `axis` and `border_bottom`, and for the same reason
+    /// given at the top of this file: the engine has to be able to *see* it. A focus scope built as
+    /// a leaf wrapping a group would be the `Group: Widget` trap — one opaque node, a cache holding
+    /// one entry, and the whole form re-measured every frame with nothing in the picture to look at.
+    pub(crate) focus: Option<focus::FocusHook>,
     /// Subtree slot count, maintained as children are added.
     slots: usize,
     /// The children's digests, folded as they arrive.
@@ -174,8 +264,8 @@ impl Group {
         Self {
             axis,
             children: Vec::new(),
-            gap: 0,
-            padding: Edges::ZERO,
+            gap: Gap::None,
+            padding: Pad::ZERO,
             width: Length::WrapContent,
             height: Length::WrapContent,
             fill: Length::WrapContent,
@@ -183,8 +273,13 @@ impl Group {
             align_self: None,
             justify: MainAlign::Start,
             background: None,
+            surface: None,
+            selection_band: false,
             border_bottom: None,
             overflow_visible: false,
+            wrap: false,
+            cross_gap: Gap::None,
+            focus: None,
             slots: 1,
             child_hash: 0,
             volatile: false,
@@ -232,19 +327,24 @@ impl Group {
 
     /// Space between children, along this group's axis. Never applied before the first child or
     /// after the last one.
-    pub fn gap(mut self, px: i32) -> Self {
-        self.gap = px.max(0);
+    ///
+    /// Takes a [`Gap`], so `.gap(Gap::Snug)` names the distance and `.gap(4)` still states it — the
+    /// second goes through `From<i32>` and is what every screen written before the roles existed
+    /// already says.
+    pub fn gap(mut self, g: impl Into<Gap>) -> Self {
+        self.gap = g.into();
         self
     }
 
-    pub fn padding(mut self, e: Edges) -> Self {
-        self.padding = e;
+    /// Padding, per side. Accepts a [`Pad`], an [`Edges`], a [`Gap`] or a number.
+    pub fn padding(mut self, p: impl Into<Pad>) -> Self {
+        self.padding = p.into();
         self
     }
 
     /// The same padding on every side.
-    pub fn pad(self, px: i32) -> Self {
-        self.padding(Edges::all(px))
+    pub fn pad(self, g: impl Into<Gap>) -> Self {
+        self.padding(Pad::all(g))
     }
 
     /// An exact width. Without it a group is as wide as what it holds.
@@ -285,22 +385,6 @@ impl Group {
         self
     }
 
-    /// Where the children sit across the line: centred in a row, stretched down a column.
-    ///
-    /// The one setting that turns a declared row into an S60 row. A list row is 38 pixels tall and
-    /// its text is 17; left at [`CrossAlign::Start`] every row in the list draws ten pixels high,
-    /// which is the single difference a pixel-for-pixel comparison against the hand-written toolkit
-    /// found.
-    ///
-    /// Per group rather than per child: one setting covers every row this device has, and a screen
-    /// that needs one child placed differently can put it in a group of its own — which is cheaper
-    /// to read than an alignment on every child of every row for the sake of a case our screens do
-    /// not have.
-    ///
-    /// Deliberately absent from [`content_hash`](Widget::content_hash): a digest exists to say
-    /// whether a *size* could have changed, alignment moves a rect and never a size, and rects are
-    /// recomputed every frame regardless. Including it would re-measure a whole subtree to move a
-    /// child ten pixels down.
     /// Where *this* group sits across its parent's line, overriding the parent's `align`.
     ///
     /// CSS's `align-self`. Not to be confused with [`align`](Self::align), which is `align-items`
@@ -340,8 +424,8 @@ impl Group {
     /// which is exactly what the hand-written row does with its single `hline`.
     /// Takes an [`Ink`] rather than a `Color` for the reason that runs through this crate: a view
     /// is built without a theme, so a colour has to be named by its role and resolved at draw time.
-    pub fn border_bottom(mut self, ink: Ink, inset_left: i32) -> Self {
-        self.border_bottom = Some((ink, inset_left.max(0)));
+    pub fn border_bottom(mut self, ink: Ink, inset_left: impl Into<Gap>) -> Self {
+        self.border_bottom = Some((ink, inset_left.into()));
         self
     }
 
@@ -350,8 +434,65 @@ impl Group {
         self
     }
 
+    /// Where the children sit across the line: centred in a row, stretched down a column.
+    ///
+    /// The one setting that turns a declared row into an S60 row. A list row is 38 pixels tall and
+    /// its text is 17; left at [`CrossAlign::Start`] every row in the list draws ten pixels high,
+    /// which is the single difference a pixel-for-pixel comparison against the hand-written toolkit
+    /// found.
+    ///
+    /// Per group rather than per child: one setting covers every row this device has, and a screen
+    /// that needs one child placed differently can put it in a group of its own — which is cheaper
+    /// to read than an alignment on every child of every row for the sake of a case our screens do
+    /// not have.
+    ///
+    /// Deliberately absent from [`content_hash`](Widget::content_hash): a digest exists to say
+    /// whether a *size* could have changed, alignment moves a rect and never a size, and rects are
+    /// recomputed every frame regardless. Including it would re-measure a whole subtree to move a
+    /// child ten pixels down.
     pub fn align(mut self, align: CrossAlign) -> Self {
         self.align = align;
+        self
+    }
+
+    /// Paint the toolkit's selection band behind this group's children.
+    ///
+    /// # Why this is not `background(color)`
+    ///
+    /// Because the band is a [`Surface`](symbian_ui::Surface) — a gradient with a light top edge and a
+    /// dark bottom one — and a `Color` cannot say that. It is also a *role*: which surface a selection
+    /// uses is the theme's to decide, and a view is built without one, exactly as
+    /// [`Ink`](super::Ink) exists because a colour cannot be written in a view either.
+    ///
+    /// So this is a property the engine resolves at draw time, like
+    /// [`border_bottom`](Self::border_bottom) — and it paints through `chrome::selection`, so a row in
+    /// a form gets the same band a row in a list gets rather than one that nearly matches.
+    ///
+    /// Leave it off inside a [`ScrollList`](super::ScrollList), which paints the band itself.
+    pub fn selection_band(mut self, on: bool) -> Self {
+        self.selection_band = on;
+        self
+    }
+
+    /// Paint one of the theme's grounds behind the children, named by its role.
+    ///
+    /// # Why this exists beside `background`
+    ///
+    /// [`background`](Self::background) takes a `Color`, and a `view` is built without a theme — so
+    /// the only colour a screen can pass it is a **literal**, which is the one thing a theme cannot
+    /// change. A panel written that way is dark on `HIGH_CONTRAST` and light on `LIGHT`, and it is
+    /// dark and light in the wrong places.
+    ///
+    /// That gap is what forced [`Card`](super::Card) to be a `Widget` rather than a builder on this
+    /// type: it needed a themed ground and there was no way to declare one. A card is still worth
+    /// having — it rounds itself, pads itself and owns a cache — but it should not have been the
+    /// only way to get a colour that follows the theme.
+    ///
+    /// This also sets the [`Ground`](symbian_ui::Ground) for everything inside, which is the half
+    /// that is easy to leave out: a band nobody is told about is a band whose text is still being
+    /// chosen against the page.
+    pub fn surface(mut self, role: SurfaceRole) -> Self {
+        self.surface = Some(role);
         self
     }
 
@@ -373,6 +514,27 @@ impl Group {
         &self.children
     }
 
+    /// Whether this group paints the selection band. Read by the draw pass.
+    pub fn has_selection_band(&self) -> bool {
+        self.selection_band
+    }
+
+    /// Whether this group wraps. Read by the layout pass.
+    pub fn wraps(&self) -> bool {
+        self.wrap
+    }
+
+    /// Space between wrapped lines.
+    pub fn cross_gap(&self) -> Gap {
+        self.cross_gap
+    }
+
+    /// This group's focus cursor, if it is a [`FocusScope`]. Read by
+    /// [`crate::layout::dispatch_key_group`] and by nothing else.
+    pub fn focus(&self) -> Option<&focus::FocusHook> {
+        self.focus.as_ref()
+    }
+
     /// Slots this group and everything under it occupy. See [`Node::slot_count`].
     pub fn slot_count(&self) -> usize {
         self.slots
@@ -392,15 +554,17 @@ impl Widget for Group {
             return 0;
         }
         let mut h = hash_i32(0, self.axis as u8 as i32);
-        h = hash_i32(h, self.gap);
-        h = hash_i32(h, self.padding.left);
-        h = hash_i32(h, self.padding.top);
-        h = hash_i32(h, self.padding.right);
-        h = hash_i32(h, self.padding.bottom);
+        h = self.gap.hash(h);
+        h = self.padding.hash(h);
         h = hash_length(h, self.width);
         h = hash_length(h, self.height);
         h = hash_length(h, self.fill);
         h = hash_i32(h, self.children.len() as i32);
+        // Wrapping changes the *shape* of the box and not just where its children sit, so unlike
+        // `align` it belongs in the digest: the same children in the same order are one line wide or
+        // three lines tall depending on it.
+        h = hash_i32(h, self.wrap as i32);
+        h = self.cross_gap.hash(h);
         hash_bytes(h, &self.child_hash.to_le_bytes())
     }
 
@@ -420,7 +584,7 @@ impl Widget for Group {
         let mut scratch = UiCache::with_capacity(self.slots);
         let offer = Constraints::tight(rect.width(), rect.height());
         measure_group(self, 0, offer, theme, &mut scratch);
-        layout_group(self, 0, rect, &mut scratch);
+        layout_group(self, 0, rect, &mut scratch, theme);
         draw_group(self, 0, &scratch, c, theme);
     }
 
@@ -443,7 +607,7 @@ impl Widget for Group {
         let mut scratch = UiCache::with_capacity(self.slots);
         let offer = Constraints::tight(rect.width(), rect.height());
         measure_group(self, 0, offer, cx.theme, &mut scratch);
-        layout_group(self, 0, rect, &mut scratch);
+        layout_group(self, 0, rect, &mut scratch, cx.theme);
         crate::layout::dispatch_key_group(self, 0, ev, &scratch, cx)
     }
 

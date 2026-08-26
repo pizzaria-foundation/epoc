@@ -78,6 +78,10 @@ fn wrapped_ranges(display: &str, font: &dyn Font, width: i32) -> Vec<(usize, usi
 }
 
 impl Widget for TextArea {
+    fn focus_state(&self) -> Option<bool> {
+        Some(self.focused)
+    }
+
     fn content_hash(&self) -> WidgetHash {
         let f = self.state.borrow();
         let h = hash_str(0, f.text());
@@ -137,6 +141,11 @@ impl Widget for TextArea {
         let saved = c.save();
         c.clip_to(Rect::new(rect.x0, rect.y0, rect.x1, rect.y1));
         let mut y = top;
+        // `li` is the **line number**, not a cursor into `ranges` — it is compared against
+        // `caret_line` below, which is what the caret's own arithmetic produced. Iterating and
+        // enumerating would recover the same number with an offset added back on, which is the
+        // subtraction this loop exists to avoid getting wrong.
+        #[allow(clippy::needless_range_loop)]
         for li in scroll..(scroll + visible).min(ranges.len()) {
             let (ls, le) = ranges[li];
             let line = &display[ls..le];

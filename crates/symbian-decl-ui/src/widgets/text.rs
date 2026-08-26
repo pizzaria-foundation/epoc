@@ -3,7 +3,7 @@
 use alloc::string::String;
 
 use symbian_gfx::{Align, Canvas, Color, Rect, Size};
-use symbian_ui::Theme;
+use symbian_ui::{Ground, Theme};
 
 use crate::constraints::Constraints;
 use crate::theme::FontRole;
@@ -41,6 +41,13 @@ pub enum Ink {
     /// inventing a literal here would put a colour in a view that a theme could not change. If an
     /// error role is ever added, this variant is where the login screen stops needing it.
     Unread,
+    /// Something went wrong, said in text.
+    ///
+    /// Its own role rather than [`Unread`](Self::Unread), which is what two screens in `tg` reached
+    /// for before this existed and is wrong for a reason worth keeping: `unread` is the colour of a
+    /// *count*, chosen to separate from both row states, and a palette free to make that a bright
+    /// green — `IRC` nearly does — would render every error message in it.
+    Error,
     /// Text inside a selected row.
     ///
     /// Its own role rather than `Chrome`, which is the nearest-looking one and is wrong: a
@@ -54,15 +61,55 @@ pub enum Ink {
 }
 
 impl Ink {
+    /// The colour this role means, on the ground the theme says we are drawing onto.
+    ///
+    /// # The ground is half the answer
+    ///
+    /// `Text`, `Dim` and `Accent` were all chosen against the **page**, so on any other ground they
+    /// are void — see [`Ground`]. On a band they collapse to `selection_text`, which is not a
+    /// choice made here: `drawer.rs`, the parity reference in `compare.rs` and the declarative side
+    /// of that comparison had each already written `if selected { selection_text }` by hand, and
+    /// this is those three lines said once.
+    ///
+    /// `Chrome` and `Selection` stay as they are on every ground. They are a caller saying *"I know
+    /// what I am on"* — the title bar's ink is `Chrome` whether or not the theme was told — and a
+    /// ground that overrode them would take away the only way to be explicit.
     pub fn resolve(self, theme: &Theme<'_>) -> Color {
+        let p = &theme.palette;
         match self {
-            Ink::Text => theme.palette.text,
-            Ink::Dim => theme.palette.dim,
-            Ink::Accent => theme.palette.accent,
-            Ink::Chrome => theme.palette.chrome_text,
-            Ink::Selection => theme.palette.selection_text,
-            Ink::Divider => theme.palette.divider,
-            Ink::Unread => theme.palette.unread,
+            Ink::Text => match theme.ground {
+                Ground::Page => p.text,
+                Ground::Band => p.selection_text,
+                Ground::Chrome => p.chrome_text,
+            },
+            // Not a quieter version of the above, on a band or on chrome: there is no palette entry
+            // for "quiet on a highlight" and deriving one by lerping toward the band is how a hint
+            // ends up at the exact contrast the band was chosen to avoid. One legible ink, which is
+            // what the three hand-written sites already concluded.
+            Ink::Dim => match theme.ground {
+                Ground::Page => p.dim,
+                Ground::Band => p.selection_text,
+                Ground::Chrome => p.chrome_text,
+            },
+            Ink::Accent => match theme.ground {
+                Ground::Page => p.accent,
+                Ground::Band => p.selection_text,
+                // The chrome band is authored, and nothing says the accent reads on it. `LIGHT`'s
+                // chrome is a pale blue and so is its accent.
+                Ground::Chrome => p.chrome_text,
+            },
+            Ink::Error => match theme.ground {
+                Ground::Page => p.error,
+                // An error on a highlight is still an error, but `error` was chosen against the page
+                // and a red on a blue band is the least readable pair this palette can make. The
+                // band's own ink carries it, and the *word* carries the meaning.
+                Ground::Band => p.selection_text,
+                Ground::Chrome => p.chrome_text,
+            },
+            Ink::Chrome => p.chrome_text,
+            Ink::Selection => p.selection_text,
+            Ink::Divider => p.divider,
+            Ink::Unread => p.unread,
             Ink::Fixed(c) => c,
         }
     }
@@ -495,5 +542,74 @@ mod tests {
     #[test]
     fn max_lines_zero_is_read_as_one() {
         assert_eq!(Text::new("x").max_lines(0).max_lines, 1);
+    }
+
+    #[test]
+    fn the_page_roles_follow_the_ground_and_the_explicit_ones_do_not() {
+        // The whole point of `Ground`, as an assertion rather than as a mechanism. `Text`, `Dim`,
+        // `Accent` and `Error` were chosen against the page, so on a band they must move; `Chrome`
+        // and `Selection` are a caller being explicit and must not.
+        for (name, palette) in Palette::ALL {
+            testing::with_theme(palette, |page| {
+                let band = page.on(Ground::Band);
+                for role in [Ink::Text, Ink::Dim, Ink::Accent, Ink::Error] {
+                    assert_eq!(
+                        role.resolve(&band),
+                        palette.selection_text,
+                        "{name}: {role:?} on a band is the band's ink"
+                    );
+                }
+                for role in [Ink::Chrome, Ink::Selection, Ink::Divider, Ink::Unread] {
+                    assert_eq!(
+                        role.resolve(&band),
+                        role.resolve(page),
+                        "{name}: {role:?} says what ground it is on itself"
+                    );
+                }
+            });
+        }
+    }
+
+    #[test]
+    fn dim_is_quieter_than_text_on_the_page_and_equal_to_it_on_a_band() {
+        // The collapse is deliberate and is the thing most likely to be "fixed" by someone who reads
+        // it as a bug. A highlight is one row tall and already the loudest thing on screen; a second
+        // level of emphasis inside it is a hint at the exact contrast the band exists to avoid.
+        // `drawer.rs` and the parity reference in `compare.rs` both concluded this independently.
+        for (name, palette) in Palette::ALL {
+            testing::with_theme(palette, |page| {
+                if palette.dim != palette.text {
+                    assert_ne!(Ink::Dim.resolve(page), Ink::Text.resolve(page), "{name}");
+                }
+                let band = page.on(Ground::Band);
+                assert_eq!(Ink::Dim.resolve(&band), Ink::Text.resolve(&band), "{name}");
+            });
+        }
+    }
+
+    #[test]
+    fn every_ground_can_be_read_on() {
+        // The guard that would have caught all four of the bugs this type was built for: whatever a
+        // role resolves to has to separate from the thing behind it, on every ground, in every
+        // palette. `HIGH_CONTRAST` is the one that fails first — its band, its chrome and its `dim`
+        // are all pure white.
+        for (name, palette) in Palette::ALL {
+            testing::with_theme(palette, |page| {
+                for (what, ground, behind) in [
+                    ("page", Ground::Page, palette.bg.mid()),
+                    ("band", Ground::Band, palette.selection.mid()),
+                    ("chrome", Ground::Chrome, palette.chrome.mid()),
+                ] {
+                    let t = page.on(ground);
+                    for role in [Ink::Text, Ink::Dim, Ink::Accent, Ink::Error] {
+                        let ink = role.resolve(&t);
+                        let d = (symbian_ui::tokens::luma(ink) as i32
+                            - symbian_ui::tokens::luma(behind) as i32)
+                            .abs();
+                        assert!(d >= 70, "{name}/{what}: {role:?} is {d} from its ground");
+                    }
+                }
+            });
+        }
     }
 }

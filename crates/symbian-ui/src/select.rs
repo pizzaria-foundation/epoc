@@ -13,6 +13,85 @@ use crate::input::{Handled, Key, KeyEvent, Softkey};
 use crate::list::{ListState, Uniform};
 use crate::theme::Theme;
 
+/// How tall the value is inside a band `band_h` pixels high: one line of body text, never the band.
+///
+/// The counterpart of [`crate::switch_height`] and [`crate::stepper::stepper_height`], and here for
+/// the same reason they are: `symbian_decl_ui`'s `Select` draws only the value, and a list row
+/// places it with `CrossAlign::Stretch` — which hands it the whole 38-pixel band. A value that
+/// claimed the band would still *look* right, because
+/// [`Canvas::draw_text_in`](symbian_gfx::Canvas::draw_text_in) centres within whatever it is given,
+/// and would have lied to every caller that asked how big it is.
+///
+/// Clamped down to the band, so a select in a band shorter than a line draws where it drew before
+/// this function existed.
+pub fn value_height(band_h: i32, theme: &Theme<'_>) -> i32 {
+    theme.fonts.body.line_height().min(band_h.max(0))
+}
+
+/// Where the value sits inside `band`: the band's full width, one line, centred across it.
+///
+/// Extracted so the two painters cannot disagree, exactly as [`crate::switch_track`] was.
+/// [`Select::draw`] paints a whole settings row and `symbian_decl_ui`'s `Select` paints only the
+/// value; before this the arithmetic lived inside the first one, so the second would have been a
+/// second copy of it, agreeing on the day it was written and on no day after.
+pub fn value_box(band: Rect, theme: &Theme<'_>) -> Rect {
+    let h = value_height(band.height(), theme);
+    Rect::from_xywh(band.x0, band.y0 + (band.height() - h) / 2, band.width(), h)
+}
+
+/// How much room the value needs: the widest option, never the current one.
+///
+/// The same rule [`crate::stepper::STEPPER_W`] states as a constant, arrived at by measuring
+/// because a select's options are the caller's words and no constant could cover them. A field
+/// sized to the *chosen* option changes width when the choice changes, and the symptom is the
+/// label beside it shuffling sideways every time the user commits — the defect `STEPPER_W` exists
+/// to prevent, in the one widget that cannot prevent it with a number.
+///
+/// It is also what lets a declarative select keep the chosen index out of its `content_hash`:
+/// the size does not depend on it.
+pub fn value_width(options: &[&str], theme: &Theme<'_>) -> i32 {
+    options.iter().map(|s| theme.fonts.body.measure(s)).max().unwrap_or(0)
+}
+
+/// Paint `label` right-aligned in exactly `slot` — the closed drop-down.
+///
+/// Takes the slot rather than the band, so a caller that has already reserved room for a caption to
+/// the left passes what it reserved instead of trusting this to reach the same answer twice.
+///
+/// `focused` picks the selection ink, because the row underneath may be carrying the selection band
+/// and text in the resting colour on top of it is very nearly invisible.
+pub fn draw_value(c: &mut Canvas<'_>, slot: Rect, theme: &Theme<'_>, label: &str, focused: bool) {
+    let p = &theme.palette;
+    let ink = if focused { p.selection_text } else { p.text };
+    c.draw_text_in(slot, label, theme.fonts.body, ink, Align::End);
+}
+
+/// How tall an open popup wants to be for `count` options: every row, plus the sunken frame's
+/// one-pixel border on each side.
+pub fn popup_height(count: usize, theme: &Theme<'_>) -> i32 {
+    count as i32 * theme.metrics.row_h + 2
+}
+
+/// Where an open popup sits inside the band `area` it was given: full width, against the bottom.
+///
+/// Against the bottom rather than under the field, and that is a deliberate limitation with a
+/// reason. A popup anchored to its field has to *know* where its field is, and in a declarative
+/// tree the popup is a sibling at the screen level — it is not inside the row, because an ancestor
+/// that clips still clips and a row inside a scrolling list is clipped to the list's band. So the
+/// popup is given the content band and nothing else, and the only two anchors available to it are
+/// the band's edges. The bottom is the one S60 uses for a list query, which is what this is.
+///
+/// Shorter than the band when the options fit, so the screen behind stays visible — the S60 look —
+/// and clamped to the band when they do not, because a popup that grew past its band would paint
+/// over the title bar.
+pub fn popup_box(area: Rect, count: usize, theme: &Theme<'_>) -> Rect {
+    if area.is_empty() {
+        return Rect::from_xywh(area.x0, area.y0, 0, 0);
+    }
+    let h = popup_height(count, theme).min(area.height()).max(0);
+    Rect::from_xywh(area.x0, area.y1 - h, area.width(), h)
+}
+
 /// What a key did to the selection.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum SelectAction {
@@ -45,6 +124,29 @@ impl Select {
 
     pub fn is_open(&self) -> bool {
         self.open
+    }
+
+    /// Which option the open popup is highlighting — not the chosen one, which only a commit
+    /// changes.
+    ///
+    /// Public so a caller that keeps the popup's state somewhere else can assert on the highlight
+    /// without committing it. The distinction is the whole of what cancelling means: the highlight
+    /// moved and the choice did not.
+    pub fn highlight(&self) -> usize {
+        self.list.selected
+    }
+
+    /// Tell it the popup's viewport and row height before a key arrives.
+    ///
+    /// [`draw_popup`](Self::draw_popup) records both, which is enough for a screen that always
+    /// paints before it reads a key. It is not enough for a caller that knows the band *without*
+    /// having painted it — `symbian_decl_ui`'s popup is handed its rect on every key dispatch — and
+    /// the difference is visible: opened and scrolled before the first paint, the viewport is one
+    /// pixel and `clamp_scroll` pins the offset to the top of the highlighted row, so the frame
+    /// that follows shows the list scrolled to the bottom with blank rows under it.
+    pub fn set_popup_metrics(&mut self, view_h: i32, row_h: i32) {
+        self.view_h = view_h;
+        self.row_h = row_h;
     }
 
     /// Force the chosen index (clamped by the caller against its own option count).
@@ -103,15 +205,14 @@ impl Select {
     /// Draw the closed field in `r`. When open, also call [`Self::draw_popup`] over the area the
     /// popup may cover (usually the content below the field).
     pub fn draw(&mut self, c: &mut Canvas<'_>, r: Rect, theme: &Theme<'_>, options: &[&str], focused: bool) {
-        let p = &theme.palette;
         if focused {
             crate::chrome::selection(c, r, theme);
         }
         let inner = r.inset_xy(theme.metrics.pad, 0);
         let value = options.get(self.index).copied().unwrap_or("");
-        let color = if focused { p.selection_text } else { p.text };
-        // Value right-aligned, a caret after it — the closed-drop-down look.
-        c.draw_text_in(inner, value, theme.fonts.body, color, Align::End);
+        // Value right-aligned — the closed-drop-down look. Routed through the free functions so
+        // that this row and `symbian_decl_ui`'s value-only widget are one painter and not two.
+        draw_value(c, value_box(inner, theme), theme, value, focused);
     }
 
     /// Draw the open popup over `area` (a list of the options). No-op when closed. Records the
@@ -210,6 +311,56 @@ mod tests {
         let mut s = Select::new(0);
         let (h, _) = s.handle_key(ev(Key::Up), OPTS);
         assert_eq!(h, Handled::Ignored);
+    }
+
+    #[test]
+    fn the_value_is_one_line_and_not_the_band_it_sits_in() {
+        // The `Stretch` trap, from the primitive's end: `symbian_decl_ui`'s select is handed the
+        // whole 38-pixel row band by `CrossAlign::Stretch`, and a value box that took the band would
+        // still look right — `draw_text_in` centres in whatever it is given — while lying to every
+        // caller that asked how tall it is.
+        testing::with_theme(Palette::DARK, |th| {
+            let band = symbian_gfx::Rect::from_xywh(0, 0, 120, 38);
+            let slot = value_box(band, th);
+            assert_eq!(slot.height(), th.fonts.body.line_height());
+            assert!(slot.height() < band.height());
+            assert_eq!(slot.y0, (38 - slot.height()) / 2, "and centred in the band");
+            assert_eq!((slot.x0, slot.x1), (band.x0, band.x1), "the width is the band's");
+            // A band shorter than a line clamps rather than overflowing upward.
+            let squashed = value_box(symbian_gfx::Rect::from_xywh(0, 0, 120, 4), th);
+            assert_eq!(squashed.height(), 4);
+        });
+    }
+
+    #[test]
+    fn the_field_reserves_the_widest_option_and_not_the_chosen_one() {
+        // What keeps a caption from shuffling sideways when the user commits — `STEPPER_W`'s rule,
+        // measured because a select's words are the caller's.
+        testing::with_theme(Palette::DARK, |th| {
+            let widest = OPTS.iter().map(|s| th.fonts.body.measure(s)).max().unwrap();
+            assert_eq!(value_width(OPTS, th), widest);
+            assert!(value_width(OPTS, th) > th.fonts.body.measure("S60"));
+            assert_eq!(value_width(&[], th), 0, "no options is no reservation, not a panic");
+        });
+    }
+
+    #[test]
+    fn the_popup_sits_against_the_bottom_of_its_band_and_never_past_the_top() {
+        testing::with_theme(Palette::DARK, |th| {
+            let band = symbian_gfx::Rect::from_xywh(0, 20, 320, 200);
+            let r = popup_box(band, 3, th);
+            assert_eq!(r.y1, band.y1, "not anchored to the bottom");
+            assert_eq!(r.height(), 3 * th.metrics.row_h + 2);
+            assert!(r.y0 > band.y0, "it filled the band with room to spare");
+            assert_eq!((r.x0, r.x1), (band.x0, band.x1));
+            // More options than fit: clamped to the band, because a popup that grew past it would
+            // paint over the title bar.
+            let tall = popup_box(band, 40, th);
+            assert_eq!(tall.y0, band.y0);
+            assert_eq!(tall.height(), band.height());
+            // An empty band is not a negative rect.
+            assert!(popup_box(symbian_gfx::Rect::from_xywh(0, 0, 0, 0), 3, th).is_empty());
+        });
     }
 
     #[test]

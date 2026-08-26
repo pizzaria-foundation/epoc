@@ -101,6 +101,9 @@ impl Softkeys {
     ///
     /// A named constructor rather than a bare array so the order cannot be transposed silently —
     /// `[a, b, c]` reads the same whichever meaning you had in mind, and the compiler cannot help.
+    // Not a constructor for `Self`: `Softkeys` is a namespace here, and what this builds is the
+    // three-slot array the bar is actually drawn from. The name is the point — see the doc above.
+    #[allow(clippy::new_ret_no_self)]
     pub const fn new<'a>(
         options: Option<&'a str>,
         action: Option<&'a str>,
@@ -177,10 +180,14 @@ pub fn scrollbar(c: &mut Canvas<'_>, area: Rect, theme: &Theme<'_>, thumb: Optio
 
 /// The gutter a scrollbar occupies, so content can reserve it.
 ///
-/// `_needed` is ignored: the bar is always drawn (see [`scrollbar`]), so reserving
-/// conditionally would make row text reflow the moment a list crossed the "fits"
-/// boundary — the same list jumping sideways as one message arrives.
-pub fn scrollbar_gutter(theme: &Theme<'_>, _needed: bool) -> i32 {
+/// # Why this takes no "is it needed" flag
+///
+/// It used to, and the flag was ignored. The bar is always drawn (see [`scrollbar`]), so reserving
+/// conditionally would make row text reflow the moment a list crossed the "fits" boundary — the same
+/// list jumping sideways as one message arrives. Every caller in the SDK passed `true`, which is the
+/// tell: an argument nobody varies and the callee never reads is not a flag, it is a comment that
+/// looks like a decision. It is gone, so a caller can no longer believe it made one.
+pub fn scrollbar_gutter(theme: &Theme<'_>) -> i32 {
     theme.metrics.scrollbar_w + 2
 }
 
@@ -256,6 +263,44 @@ pub fn unread_colors(theme: &Theme<'_>, selected: bool) -> (Color, Color) {
     }
 }
 
+/// The three colours a control paints with, given whether it sits on the selection band.
+///
+/// Returns `(ground, ink, quiet)`: what is behind the control, the colour of its "on" state, and the
+/// colour of its "off" state.
+///
+/// # Why every control needs this
+///
+/// A switch, a checkbox, a slider and a stepper all paint a mark on whatever the row is. Off the
+/// band that is the page; on it, the selection surface — and the palette's `accent`, `dim` and `bg`
+/// were all chosen against the *page*. Used unchanged on the band they are three colours picked for
+/// a ground that is not there.
+///
+/// This was visible rather than theoretical. On `HIGH_CONTRAST`, whose selection band is white and
+/// whose `dim` is also white, the focused row's switch became a black dot floating in nothing: the
+/// track vanished into the band and only the knob survived. `DARK` and `S60` looked fine, which is
+/// exactly why a five-palette sweep is worth having — the defect existed in every palette and was
+/// only *visible* in one.
+///
+/// # Why it is one function and not four
+///
+/// Because four answers to "what colour goes on the band" is four chances to disagree, and the
+/// disagreement would show as one control looking wrong beside three that look right. The same
+/// argument [`unread_colors`] makes above, which is this function's precedent and the reason it lives
+/// here rather than in each control's own file.
+pub fn control_colors(theme: &Theme<'_>, selected: bool) -> (Color, Color, Color) {
+    let p = &theme.palette;
+    if selected {
+        // On the band, the text colour is the one thing the palette guarantees is readable against it
+        // — `Palette::check` requires 70 luma between the two. So the "on" mark takes it, and the
+        // "off" mark is that colour pulled back toward the band, which keeps it visible without
+        // competing with the on state.
+        let band = p.selection.mid();
+        (band, p.selection_text, p.selection_text.lerp(band, 128))
+    } else {
+        (p.bg.mid(), p.accent, p.dim)
+    }
+}
+
 /// Centred message for an empty list or an error.
 pub fn placeholder(c: &mut Canvas<'_>, area: Rect, theme: &Theme<'_>, text: &str) {
     let f = theme.fonts.body;
@@ -266,6 +311,122 @@ pub fn placeholder(c: &mut Canvas<'_>, area: Rect, theme: &Theme<'_>, text: &str
         f.line_height(),
     );
     c.draw_text_in(line, text, f, theme.palette.dim, Align::Center);
+}
+
+#[cfg(test)]
+mod control_color_tests {
+    use super::*;
+    use crate::testing;
+    use crate::theme::Palette;
+    use crate::tokens::luma;
+
+    #[test]
+    fn a_control_can_be_seen_on_the_band_in_every_palette() {
+        // The defect a person found on the handset. On `HIGH_CONTRAST` the selection band is white and
+        // `dim` is also white, so a focused row's switch became a black dot floating in nothing — the
+        // track vanished into the band and only the knob was left. It was wrong in every palette and
+        // visible in one, which is the whole argument for sweeping all five.
+        //
+        // 40 is the same distance `Palette::check` demands between `dim` and the page: it is the same
+        // question — how far apart two colours must be to be two colours.
+        for (name, palette) in Palette::ALL {
+            testing::with_theme(palette, |t| {
+                for selected in [false, true] {
+                    let (ground, ink, quiet) = control_colors(t, selected);
+                    let d = |a: Color, b: Color| (luma(a) as i32 - luma(b) as i32).abs();
+                    assert!(d(ink, ground) >= 40, "{name} selected={selected}: the on state vanishes");
+                    assert!(
+                        d(quiet, ground) >= 20,
+                        "{name} selected={selected}: the off state vanishes"
+                    );
+                    // Channel distance, not luma, and the difference matters: `DARK`'s accent is a
+                    // blue at luma 128 and its `dim` is a grey at 146 — eighteen apart by luma and
+                    // obviously two colours on screen. Luma answers "can this be read on that"; it
+                    // does not answer "are these two different marks", and using it for the second
+                    // question failed this test on a palette that is fine.
+                    let chan = |a: Color, b: Color| {
+                        (a.r() as i32 - b.r() as i32).abs()
+                            + (a.g() as i32 - b.g() as i32).abs()
+                            + (a.b() as i32 - b.b() as i32).abs()
+                    };
+                    assert!(
+                        chan(ink, quiet) >= 60,
+                        "{name} selected={selected}: on and off are the same mark"
+                    );
+                }
+            });
+        }
+    }
+
+    #[test]
+    fn the_band_and_the_page_get_different_answers() {
+        // If they did not, this function would be a rename of the palette and the defect would still
+        // be there — which is what it looked like before, four controls reading `accent`/`dim`/`bg`
+        // whatever they were sitting on.
+        testing::with_theme(Palette::DARK, |t| {
+            assert_ne!(control_colors(t, false), control_colors(t, true));
+        });
+    }
+
+    #[test]
+    fn a_switch_on_the_band_is_not_a_dot_in_nothing() {
+        // The specific picture, on the palette that showed it. Counting pixels of each colour: the
+        // track has to be a different colour from the band it is on, or there is no track.
+        use symbian_gfx::Size;
+        let palette = Palette::HIGH_CONTRAST;
+        let band = symbian_gfx::Rect::from_xywh(0, 0, 60, 38);
+        let (_, buf) = testing::with_canvas(Size::new(60, 38), |c| {
+            testing::with_theme(palette, |t| {
+                selection(c, band, t);
+                crate::toggle::draw_switch(c, crate::toggle::switch_track(band, t), t, false, true);
+            });
+        });
+        let band_px = palette.selection.mid().to_rgb565().0;
+        let track = testing::with_theme(palette, |t| crate::toggle::switch_track(band, t));
+        let row = (track.y0 + track.height() / 2) as usize;
+        let on_track: usize = (track.x0..track.x1)
+            .filter(|&x| buf[row * 60 + x as usize] != band_px)
+            .count();
+        assert!(on_track > 10, "only {on_track} pixels of the track differ from the band");
+    }
+
+    #[test]
+    fn a_focused_field_looks_different_from_a_sleeping_one_in_every_palette() {
+        // The gap `docs/ui-catalog.md` recorded and a person then found on the handset: the band was
+        // drawn identically either way, so the *only* difference was a one-pixel caret — and an empty
+        // field that was never told it had focus draws no caret at all, which looks like a thin caret
+        // rather than like a dead control.
+        //
+        // Counting differing pixels rather than naming a colour, so a future outline that changes for
+        // a good reason does not turn this red.
+        use crate::edit::TextField as Editor;
+        let paint = |palette: crate::theme::Palette, focused: bool| {
+            let mut ed = Editor::new();
+            ed.set_text("aaa");
+            let (_, buf) = testing::with_canvas(symbian_gfx::Size::new(160, 30), |c| {
+                testing::with_theme(palette, |t| {
+                    c.clear(palette.bg.mid());
+                    text_field(
+                        c,
+                        Rect { x0: 0, y0: 0, x1: 160, y1: 24 },
+                        t,
+                        &ed,
+                        FieldStyle { focused, ..Default::default() },
+                    );
+                });
+            });
+            buf
+        };
+        for (name, palette) in crate::theme::Palette::ALL {
+            let (awake, asleep) = (paint(palette, true), paint(palette, false));
+            let differing = awake.iter().zip(&asleep).filter(|(a, b)| a != b).count();
+            // More than a caret's worth. A caret in this box is 1x18; an outline is the perimeter.
+            assert!(
+                differing > 40,
+                "{name}: a focused field differs from a sleeping one by only {differing} pixels"
+            );
+        }
+    }
 }
 
 #[cfg(test)]
@@ -303,7 +464,7 @@ mod tests {
         v.extend_from_slice(&[4, 6, 5, 0]);
         v.extend_from_slice(&0i16.to_le_bytes());
         v.extend_from_slice(&6i16.to_le_bytes());
-        v.extend(core::iter::repeat(0xFFu8).take(24));
+        v.extend(std::iter::repeat_n(0xFFu8, 24));
         v
     }
 
@@ -372,7 +533,6 @@ mod tests {
         scrollbar(&mut c, Rect::EMPTY, &t, Some((0, 10)));
         scrollbar(&mut c, Rect::EMPTY, &t, None);
         selection(&mut c, Rect::EMPTY, &t);
-        drop(c);
         assert!(buf.iter().all(|&p| p == 0), "nothing should have been drawn");
     }
 }
@@ -432,6 +592,23 @@ pub fn text_field(
     let (top, bottom) = (r.y0 + 3, r.y1 - 3);
 
     paint::band(c, r, &p.chrome);
+    // A focused field has to look different from an unfocused one somewhere other than in a caret.
+    //
+    // It did not, and the cost was two real bugs: `FieldRow` lights its *caption* in the accent from
+    // a flag the control never sees, so a form whose field was never told it had focus showed a lit
+    // caption over a dead box — and the only true signal on screen was the *absence* of a one-pixel
+    // caret, which reads as a thin caret rather than as a broken field. A person found it on the
+    // handset; the host had nothing to say. `docs/ui-catalog.md` had recorded the gap already.
+    //
+    // An outline rather than a different fill: the fill is `chrome`, which the palette authored to
+    // hold text, and a second authored fill would be a sixth colour per palette to keep in step. The
+    // outline is drawn *on* the band's edge and not inside it, so nothing below moves by a pixel
+    // when a field takes the cursor — a form that shifted as the cursor walked it would be a worse
+    // defect than the one this fixes.
+
+    if style.focused {
+        c.stroke_rect(r, p.accent);
+    }
 
     let mut text_x = r.x0 + 6;
     if let Some(pre) = style.prefix {

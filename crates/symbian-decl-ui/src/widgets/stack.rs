@@ -109,7 +109,7 @@ impl Stack {
         for child in &self.children {
             let offer = Constraints::tight(rect.width(), rect.height());
             layout::measure_node(child, slot, offer, theme, &mut cache);
-            layout::layout_node(child, slot, rect, &mut cache);
+            layout::layout_node(child, slot, rect, &mut cache, theme);
             slot += child.slot_count();
         }
         let mut slot = 0usize;

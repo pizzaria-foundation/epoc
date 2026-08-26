@@ -144,6 +144,34 @@ pub trait Widget {
     /// once, in [`Node::weight`](crate::widgets::Node::weight), through
     /// [`Length::weight`](crate::length::Length::weight), so the container is the only thing that
     /// decides what counts as a claim.
+    /// Whether this widget has the keyboard, for a container that wants to say so on its behalf.
+    ///
+    /// `None` means "not a thing that takes focus" — a `Spacer`, a `Text` — and is the default, so
+    /// no existing widget has to answer.
+    ///
+    /// # Why a container has to ask instead of being told
+    ///
+    /// [`FieldRow`](crate::widgets::FieldRow) paints a focus cue — its caption goes to the accent —
+    /// for a control it accepts **already built**, so it could not reach in and had to be told
+    /// separately: `.control(TextField::new(slots).focused(here)).focused(here)`. Its own module
+    /// docs called that a duplication and it cost two real bugs, both in this SDK's own gallery, one
+    /// of which shipped and was found by a person holding the phone: the caption lit, the field
+    /// stayed dead, and the only true signal was the *absence* of a caret.
+    ///
+    /// A duplicated parameter is a trap exactly when it carries no information. `FieldRow` has one
+    /// control slot, so its two flags can only ever agree — a disagreement *is* the bug.
+    /// [`ListItem`](crate::widgets::ListItem) has two (`leading` and `trailing`) and only one of
+    /// them can hold the cursor, so its flags carry a real fact and it is deliberately left alone.
+    ///
+    /// The alternative was a closure, `control(|focused| Node)`, the shape
+    /// [`FocusScope::stop`](crate::widgets::FocusScope::stop) uses. It was rejected on this crate's
+    /// own precedent: a `FieldRow` builder must not depend on the order its methods are called in —
+    /// there is a test saying so — which means the closure has to be *stored* rather than run, and
+    /// storing it is a `Box` per field per frame. That is the cost `Outbox::wrapped` is refused for.
+    fn focus_state(&self) -> Option<bool> {
+        None
+    }
+
     fn flex_weight(&self) -> i32 {
         0
     }

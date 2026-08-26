@@ -207,6 +207,10 @@ pub fn band_round(c: &mut Canvas, r: Rect, s: &Surface, radius: i32) {
 ///
 /// A flat fill and not a [`Surface`]: this sits behind text at body size, where a gradient reads as
 /// dirt on the screen rather than as depth.
+// Nine parameters, and they are one text run: where it starts, how tall it is, what it says, which
+// part of it is picked, in what font, in what colour. A struct would be built at both call sites and
+// taken apart again here — a type whose whole job is to satisfy a counter.
+#[allow(clippy::too_many_arguments)]
 pub fn text_selection(
     c: &mut Canvas,
     x: i32,
@@ -454,7 +458,7 @@ mod tests {
                     Color::hex(0xFFFFFF),
                 );
             }
-            let top = (0..40).find(|&y| px(&buf, size, 1, y) == thumb).unwrap() as i32;
+            let top = (0..40).find(|&y| px(&buf, size, 1, y) == thumb).unwrap();
             assert!(top >= last_top, "offset {offset} moved the thumb up");
             last_top = top;
         }

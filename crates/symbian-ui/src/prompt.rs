@@ -18,7 +18,6 @@
 //! detail the question is about. So the body wraps to the panel width and the panel grows, up to
 //! what the screen allows; past that the body scrolls with the choices.
 
-use alloc::string::String;
 use alloc::vec::Vec;
 
 use symbian_gfx::{Align, Canvas, Rect};

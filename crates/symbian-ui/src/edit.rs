@@ -101,7 +101,7 @@ impl TextField {
     /// need a second branch.
     pub fn display(&self) -> alloc::string::String {
         if self.masked {
-            core::iter::repeat('*').take(self.text.chars().count()).collect()
+            core::iter::repeat_n('*', self.text.chars().count()).collect()
         } else {
             alloc::string::String::from(&self.text)
         }
@@ -175,9 +175,20 @@ impl TextField {
     }
 
     /// Delete the selection, if there is one. Returns whether anything went.
+    ///
+    /// An *empty* selection — the anchor sitting exactly on the caret — is dropped here too, even
+    /// though nothing is deleted. It has to be: `selection()` already reports an empty range as
+    /// `None`, so an anchor left behind is invisible to every reader and yet becomes a real
+    /// selection the moment the caret moves. That is not theoretical. `select_all` on an empty
+    /// field anchors at 0, the first typed character moves the caret to 1, and the anchor turns the
+    /// character just typed into a selection that the second character replaces — a field where the
+    /// first letter vanishes as you type the second, found on the phone in a search box.
     pub fn delete_selection(&mut self) -> bool {
         match self.selection() {
-            None => false,
+            None => {
+                self.anchor = None;
+                false
+            }
             Some((from, to)) => {
                 self.text.replace_range(from..to, "");
                 self.cursor = from;
@@ -884,6 +895,21 @@ mod tests {
         assert_eq!(key(&mut f, Key::Left), Handled::Consumed);
         assert_eq!(key(&mut f, Key::Right), Handled::Consumed);
     }
+
+    #[test]
+    fn typing_into_an_empty_field_that_was_select_alled_keeps_the_first_letter() {
+        // The browser opens an in-page input with `select_all`, so typing replaces a prefilled
+        // value. On an *empty* field that anchors at 0 with the caret at 0, and the first keystroke
+        // used to leave the anchor behind — making the letter just typed a selection the next one
+        // overwrote. Typing "go" produced "o".
+        let mut f = TextField::new();
+        f.select_all();
+        f.insert('g');
+        assert_eq!(f.selection(), None, "no selection may survive the first insert");
+        f.insert('o');
+        assert_eq!(f.text(), "go");
+    }
+
 
     #[test]
     fn select_all_then_type_is_the_quick_way_to_replace_a_code() {

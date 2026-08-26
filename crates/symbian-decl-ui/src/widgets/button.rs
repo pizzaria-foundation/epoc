@@ -27,6 +27,7 @@ use symbian_ui::{Handled, KeyEvent, Theme};
 
 use crate::constraints::Constraints;
 use crate::keys::Softkeys;
+use crate::outbox::Outbox;
 use crate::widget::{hash_i32, hash_str, KeyCtx, Widget, WidgetHash};
 
 /// A focusable button carrying the message it sends.
@@ -35,11 +36,37 @@ pub struct Button<M> {
     /// decided by [`Softkeys::dispatch`] and not by a match written here.
     keys: Softkeys<M>,
     focused: bool,
+    /// Where the message goes when the button fires.
+    ///
+    /// # A button used to consume the key and drop the message
+    ///
+    /// `handle_key` matched `press(ev).is_some()` and returned `Consumed`, and the message it had
+    /// just computed went nowhere. Reachable only by an app calling [`press`](Self::press) itself,
+    /// which nothing in the SDK did — so a `Button` placed in a tree looked right, took the key, and
+    /// fired nothing. The tests all passed: every one of them called `press` directly.
+    ///
+    /// An [`Outbox`] is the channel this crate already has for exactly this — a widget that answers a
+    /// key with a *decision* rather than with slot state. `Imperative` was using it and a button was
+    /// not.
+    ///
+    /// Still optional, because `press` remains a perfectly good way to use one from a screen that is
+    /// asking rather than being told, and because a button with nowhere to send is a mistake worth
+    /// being able to see: [`Outbox::dropped`] counts what a missing channel loses.
+    out: Option<Outbox<M>>,
 }
 
 impl<M: Clone> Button<M> {
     pub fn new(label: impl Into<String>, msg: M) -> Self {
-        Self { keys: Softkeys::new().action(label, msg), focused: false }
+        Self { keys: Softkeys::new().action(label, msg), focused: false, out: None }
+    }
+
+    /// Where this button's message goes when it fires.
+    ///
+    /// Without it the button still consumes its key and reports `Consumed`, and the message is lost —
+    /// see the field's own note. A screen that reads [`press`](Self::press) itself does not need this.
+    pub fn out(mut self, out: Outbox<M>) -> Self {
+        self.out = Some(out);
+        self
     }
 
     /// Whether this button has the focus. Only a focused button fires.
@@ -66,6 +93,10 @@ impl<M: Clone> Button<M> {
 }
 
 impl<M: Clone + 'static> Widget for Button<M> {
+    fn focus_state(&self) -> Option<bool> {
+        Some(self.focused)
+    }
+
     fn content_hash(&self) -> WidgetHash {
         // Focus is in the digest because the ring is drawn inside the button's own box on this
         // theme; if a future theme drew it outside, the size would change with focus and a digest
@@ -96,10 +127,17 @@ impl<M: Clone + 'static> Widget for Button<M> {
     fn handle_key(&self, ev: KeyEvent, _rect: Rect, _cx: &mut KeyCtx<'_>) -> Handled {
         // Consumed only when it would actually fire. Returning `Consumed` for every key would eat
         // the D-pad and trap the focus on this button.
-        if self.press(ev).is_some() {
-            Handled::Consumed
-        } else {
-            Handled::Ignored
+        match self.press(ev) {
+            Some(msg) => {
+                // Delivered, not discarded. The key is consumed either way — a button that took the
+                // press and reported `Ignored` because it had no channel would hand the same press to
+                // whatever encloses it, which is worse than losing it.
+                if let Some(out) = &self.out {
+                    out.push(msg);
+                }
+                Handled::Consumed
+            }
+            None => Handled::Ignored,
         }
     }
 }
@@ -165,6 +203,50 @@ mod tests {
             assert_eq!(b.handle_key(press(Key::Down), r, cx), Handled::Ignored);
             let idle = Button::new("Send", Msg::Send);
             assert_eq!(idle.handle_key(press(Key::Select), r, cx), Handled::Ignored);
+        });
+    }
+
+    #[test]
+    fn a_button_in_a_tree_delivers_its_message() {
+        // The gap this closes. Before the outbox, `handle_key` computed the message and threw it away,
+        // and every test in this file missed it by calling `press` directly instead of pressing the
+        // widget the way the engine does.
+        let out = crate::outbox::Outbox::new();
+        let b = Button::new("Send", Msg::Send).focused(true).out(out.clone());
+        testing::with_theme(Palette::DARK, |t| {
+            let mut clip = symbian_ui::NoClipboard;
+            let mut cx = KeyCtx::new(t, &mut clip);
+            let r = GSize::new(60, 20);
+            let r = symbian_gfx::Rect::from_size(r);
+            assert_eq!(b.handle_key(press(Key::Select), r, &mut cx), Handled::Consumed);
+        });
+        assert_eq!(out.take(), alloc::vec![Msg::Send]);
+    }
+
+    #[test]
+    fn an_unfocused_button_delivers_nothing() {
+        let out = crate::outbox::Outbox::new();
+        let b = Button::new("Send", Msg::Send).out(out.clone());
+        testing::with_theme(Palette::DARK, |t| {
+            let mut clip = symbian_ui::NoClipboard;
+            let mut cx = KeyCtx::new(t, &mut clip);
+            let r = symbian_gfx::Rect::from_size(GSize::new(60, 20));
+            assert_eq!(b.handle_key(press(Key::Select), r, &mut cx), Handled::Ignored);
+        });
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn a_button_with_no_channel_still_consumes_its_key() {
+        // Deliberate: reporting `Ignored` for want of a channel would hand the same press to whatever
+        // encloses the button, which is a worse failure than a lost message. `Outbox::dropped` is
+        // where a missing channel is meant to be noticed.
+        let b = Button::new("Send", Msg::Send).focused(true);
+        testing::with_theme(Palette::DARK, |t| {
+            let mut clip = symbian_ui::NoClipboard;
+            let mut cx = KeyCtx::new(t, &mut clip);
+            let r = symbian_gfx::Rect::from_size(GSize::new(60, 20));
+            assert_eq!(b.handle_key(press(Key::Select), r, &mut cx), Handled::Consumed);
         });
     }
 

@@ -8,6 +8,7 @@ use symbian_ui::{chrome, paint, Frame, Handled, KeyEvent, Theme};
 
 use crate::constraints::Constraints;
 use crate::keys::Softkeys;
+use crate::outbox::Outbox;
 use crate::widget::{KeyCtx, Widget, WidgetHash};
 use crate::widgets::title_bar::TitleBar;
 
@@ -31,10 +32,27 @@ use crate::widgets::title_bar::TitleBar;
 /// did something other than what it said. Here you cannot write a label without a message, and you
 /// cannot write a message without a label — see [`crate::keys`].
 ///
-/// `handle_key` reports whether the bar claimed the key; the *message* comes out of
-/// [`Screen::dispatch`], because [`Widget`] has no message type to return one through. An app
-/// normally never calls either: [`DeclarativeApp::keys`](crate::app::DeclarativeApp::keys) routes
-/// the same declaration from the bridge, which is where a key arrives.
+/// # One declaration, and it took a second look to get there
+///
+/// The paragraph above was true of this widget and not of the layer around it. `Widget` has no
+/// message type, so `handle_key` could only report *that* the bar claimed a key — the message came
+/// out of [`Screen::dispatch`], which the bridge never calls. So the routing had to be written a
+/// second time, in [`DeclarativeApp::keys`](crate::app::DeclarativeApp::keys), and this crate's own
+/// example app duly declared the same three labels and the same three messages twice with nothing
+/// checking that they agreed.
+///
+/// Which is the defect this file's own doc comment argues against, reappearing one layer up. The
+/// argument was right; the fix was one layer short.
+///
+/// [`out`](Self::out) closes it. Give the screen the app's [`Outbox`] and its bar delivers its own
+/// messages, exactly as [`Button`](super::Button) does — so a screen declares its softkeys once,
+/// here, and `keys()` becomes the thing you write only when a key's *meaning* depends on the model
+/// in a way the bar's labels do not.
+///
+/// It is additive on purpose. `DeclarativeApp::on_key` still runs before the tree, so an app that
+/// declares both is routed by `keys()` exactly as before and not one pixel moves — which is what
+/// made this safe to land under eight screens in two other repositories. What changes is that an
+/// app no longer *has* to.
 ///
 /// # Why the content is not reported as a child
 ///
@@ -53,11 +71,33 @@ pub struct Screen<M> {
     /// [`Screen::footer`].
     footer: Option<Box<dyn Widget>>,
     keys: Softkeys<M>,
+    /// Where this bar's messages go. `None` leaves the routing to
+    /// [`DeclarativeApp::keys`](crate::app::DeclarativeApp::keys), which is how every screen written
+    /// before this worked and still works.
+    out: Option<Outbox<M>>,
 }
 
 impl<M: Clone> Screen<M> {
     pub fn new() -> Self {
-        Self { title: None, content: None, footer: None, keys: Softkeys::new(), keep_band: false }
+        Self {
+            title: None,
+            content: None,
+            footer: None,
+            keys: Softkeys::new(),
+            keep_band: false,
+            out: None,
+        }
+    }
+
+    /// Where this screen's softkey messages go.
+    ///
+    /// With it, the bar declared here is the whole declaration and `keys()` is optional. Without it
+    /// the bar is drawn and its keys are claimed, and the message is dropped — which is what every
+    /// screen relying on `keys()` has always done, and why this is a `Some`/`None` rather than a
+    /// required argument.
+    pub fn out(mut self, out: Outbox<M>) -> Self {
+        self.out = Some(out);
+        self
     }
 
     /// A plain title bar with this text.
@@ -289,7 +329,13 @@ impl<M: Clone> Widget for Screen<M> {
     /// composer under a transcript — and a key that both would take belongs to the one being typed
     /// into. Both self-veto when unfocused, so in practice at most one of them answers.
     fn handle_key(&self, ev: KeyEvent, rect: Rect, cx: &mut KeyCtx<'_>) -> Handled {
-        if self.dispatch(ev).is_some() {
+        if let Some(msg) = self.dispatch(ev) {
+            // Delivered when there is somewhere to deliver it. Consumed either way: a bar that took
+            // the press and reported `Ignored` for want of a channel would hand the same press to its
+            // own content, which is worse than losing it — the same call `Button` makes.
+            if let Some(out) = &self.out {
+                out.push(msg);
+            }
             return Handled::Consumed;
         }
         let f = self.bands(rect, cx.theme);
@@ -329,6 +375,23 @@ mod tests {
         }
         fn draw(&self, c: &mut Canvas<'_>, rect: Rect, _t: &Theme<'_>) {
             c.fill_rect(rect, symbian_gfx::Color::hex(0xFF00FF));
+        }
+    }
+
+    /// Content that takes every key it is offered, so a test can prove the bar was asked first.
+    ///
+    /// `Fill` above answers nothing, which means a test using it cannot tell "the bar took it" from
+    /// "nobody took it" — the distinction this fixture exists for.
+    #[derive(Default)]
+    struct Greedy;
+
+    impl Widget for Greedy {
+        fn measure(&self, c: Constraints, _t: &Theme<'_>) -> Size {
+            c.constrain(Size::new(c.max_w, c.max_h))
+        }
+        fn draw(&self, _c: &mut Canvas<'_>, _rect: Rect, _t: &Theme<'_>) {}
+        fn handle_key(&self, _ev: KeyEvent, _rect: Rect, _cx: &mut KeyCtx<'_>) -> Handled {
+            Handled::Consumed
         }
     }
 
@@ -617,6 +680,76 @@ mod tests {
                 assert_eq!(s.handle_key(press(k), testing::SCREEN, cx), Handled::Ignored);
             }
         });
+    }
+
+    #[test]
+    fn a_screen_with_a_channel_delivers_its_own_softkey_message() {
+        // The gap this closes. Before the outbox, `handle_key` computed the message and dropped it, so
+        // the routing had to be written a second time in `DeclarativeApp::keys` — and this crate's own
+        // example app declared the same three labels and messages twice, with nothing checking they
+        // agreed. Which is the defect the module docs above argue against, one layer up.
+        let out = crate::outbox::Outbox::new();
+        let s = full().out(out.clone());
+        crate::widget::with_key_ctx(|cx| {
+            let r = testing::SCREEN;
+            assert_eq!(s.handle_key(press(Key::Softkey(Softkey::Left)), r, cx), Handled::Consumed);
+            assert_eq!(s.handle_key(press(Key::Select), r, cx), Handled::Consumed);
+            assert_eq!(s.handle_key(press(Key::Softkey(Softkey::Right)), r, cx), Handled::Consumed);
+        });
+        // The order is the order the keys were pressed, and each label's own message — not three
+        // copies of one, which is what a bar wired to the wrong slot would produce.
+        assert_eq!(out.take().len(), 3);
+    }
+
+    #[test]
+    fn the_channel_delivers_exactly_what_dispatch_would_have_returned() {
+        // The property that makes this safe to land under screens that already work: the new path and
+        // the old one carry the *same* message for the same key. If these ever diverge, an app that
+        // declares its bar in both places starts behaving differently depending on which half won.
+        let out = crate::outbox::Outbox::new();
+        let s = full().out(out.clone());
+        for key in [Key::Softkey(Softkey::Left), Key::Select, Key::Softkey(Softkey::Right), Key::End] {
+            let by_hand = s.dispatch(press(key));
+            crate::widget::with_key_ctx(|cx| {
+                s.handle_key(press(key), testing::SCREEN, cx);
+            });
+            let delivered = out.take();
+            match by_hand {
+                Some(m) => assert_eq!(delivered, alloc::vec![m], "{key:?}"),
+                None => assert!(delivered.is_empty(), "{key:?} delivered {delivered:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_screen_with_no_channel_still_claims_its_keys() {
+        // Every screen written before this. The bar is drawn, its keys are claimed so the content
+        // cannot also answer them, and the message goes to `DeclarativeApp::keys` instead — which is
+        // why the channel is optional rather than required.
+        let s = full();
+        crate::widget::with_key_ctx(|cx| {
+            assert_eq!(
+                s.handle_key(press(Key::Softkey(Softkey::Left)), testing::SCREEN, cx),
+                Handled::Consumed
+            );
+        });
+    }
+
+    #[test]
+    fn the_bar_is_still_asked_before_the_content() {
+        // Unchanged and load-bearing: a text field must never swallow a key the bar promised on its
+        // label. Asserted with a channel attached, since that is the path that is new.
+        let out = crate::outbox::Outbox::new();
+        let greedy = Greedy;
+        let s = Screen::new()
+            .title("t")
+            .on_action("Open", Msg::Open)
+            .content(greedy)
+            .out(out.clone());
+        crate::widget::with_key_ctx(|cx| {
+            assert_eq!(s.handle_key(press(Key::Select), testing::SCREEN, cx), Handled::Consumed);
+        });
+        assert_eq!(out.take().len(), 1, "the bar took it, not the content");
     }
 
     #[test]

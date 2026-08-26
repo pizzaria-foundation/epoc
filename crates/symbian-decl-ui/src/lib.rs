@@ -69,8 +69,10 @@ pub use symbian_gfx::{Canvas, Point, Rect, Size};
 pub use symbian_ui::{Handled, Key, KeyEvent, Softkey, Theme};
 
 pub mod slot;
+pub mod spacing;
 pub mod theme;
 pub mod widgets;
 
+pub use spacing::{Gap, Pad};
 pub use widgets::{Column, Group, Imperative, Node, Row, Spacer};
 pub mod overflow;

@@ -109,20 +109,12 @@ impl AppPicker {
     /// The indices of `items` that pass the current filter, in the incoming order (which the caller
     /// has already sorted — the picker never re-sorts). An empty filter matches everything.
     ///
-    /// Substring, case-insensitive: typing "ap" finds both "Maps" and "Apps". Lower-casing both
-    /// sides each call is cheap at the few dozen entries this ever holds, and avoids caring about
-    /// where in the label the match falls.
+    /// Substring, case-insensitive: typing "ap" finds both "Maps" and "Apps". The rule itself lives
+    /// in [`crate::match_filter`] and is *only* there — a picker and a search field that each folded their
+    /// own needle would find different apps for the same three letters, and nothing on screen would
+    /// say which one had answered.
     pub fn matches(&self, items: &[Item<'_>]) -> Vec<usize> {
-        if self.filter.is_empty() {
-            return (0..items.len()).collect();
-        }
-        let needle = self.filter.to_lowercase();
-        items
-            .iter()
-            .enumerate()
-            .filter(|(_, it)| it.label.to_lowercase().contains(&needle))
-            .map(|(i, _)| i)
-            .collect()
+        crate::match_filter::matching_indices(&self.filter, items.iter().map(|it| it.label))
     }
 
     /// The id of the row currently highlighted under the active filter, if any. Lets a caller act on

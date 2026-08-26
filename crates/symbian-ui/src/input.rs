@@ -51,7 +51,17 @@ pub struct Modifiers {
     pub shift: bool,
     pub ctrl: bool,
     /// The Fn/Chr key, which on the E72 is how digits and symbols are reached.
+    ///
+    /// True however the layer was engaged — held, tapped to arm one keystroke, or locked. Use this
+    /// for anything about *what character* a key produces.
     pub func: bool,
+    /// The Fn key is physically down at this moment.
+    ///
+    /// Use this, not [`Modifiers::func`], for a shortcut. Arming and locking are stored state from
+    /// an earlier press and will happily attach themselves to a key pressed much later; holding is
+    /// a gesture the person is making right now. A destructive or irreversible shortcut wants the
+    /// second and not the first.
+    pub func_held: bool,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
@@ -64,7 +74,7 @@ pub struct KeyEvent {
 
 impl KeyEvent {
     pub const fn new(key: Key) -> Self {
-        Self { key, mods: Modifiers { shift: false, ctrl: false, func: false }, repeat: false }
+        Self { key, mods: Modifiers { shift: false, ctrl: false, func: false, func_held: false }, repeat: false }
     }
 
     pub const fn with_mods(key: Key, mods: Modifiers) -> Self {
@@ -121,5 +131,26 @@ impl From<bool> for Handled {
         } else {
             Handled::Ignored
         }
+    }
+}
+
+#[cfg(test)]
+mod modifier_tests {
+    use super::*;
+
+    #[test]
+    fn a_held_fn_is_also_the_fn_layer() {
+        // Holding is one of the ways the layer is engaged, so a text field still sees `func`.
+        let m = Modifiers { shift: false, ctrl: false, func: true, func_held: true };
+        assert!(m.func && m.func_held);
+    }
+
+    #[test]
+    fn an_armed_fn_is_the_layer_but_not_a_gesture() {
+        // The state a tap leaves behind: a digit typed next gets the Fn layer, and a shortcut that
+        // requires a deliberate hold must not fire.
+        let m = Modifiers { shift: false, ctrl: false, func: true, func_held: false };
+        assert!(m.func, "a text field still gets the Fn layer");
+        assert!(!m.func_held, "but a shortcut sees no gesture");
     }
 }
