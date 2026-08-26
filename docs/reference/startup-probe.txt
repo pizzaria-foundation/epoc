@@ -1,4 +1,4 @@
-device: Nokia E72-2 (3C:F7:2A:6B:0B:4A)
+device: Nokia E72-2
   SDP unavailable (timed out); falling back
   cached channel 13 answers
   connect failed ([Errno 16] Device or resource busy); retrying 1/4
