@@ -30,6 +30,7 @@ pub mod config;
 pub mod crc;
 pub mod github;
 pub mod pkg;
+pub mod scan_cache;
 pub mod queue;
 pub mod repo;
 pub mod sis;

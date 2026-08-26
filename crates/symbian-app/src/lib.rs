@@ -814,6 +814,24 @@ macro_rules! daemon_entry {
 
         #[no_mangle]
         pub extern "C" fn rust_app_start() {
+            // The stamp, and **not** the language.
+            //
+            // A daemon is a daemon: what it writes is a log, and a log is English. Making every
+            // headless binary read a preference file at start-up to pick a language for text nobody
+            // reads is a cost with no reader.
+            //
+            // One of them is not that, and it calls `lang_pref::load_system` itself because it
+            // knows it is the exception: `calsync` fills a status line the *calendar* draws. Text
+            // that reaches a screen needs the screen's language whoever wrote it — and a daemon
+            // knows whether it writes any far better than this macro does.
+            //
+            // `notifd` looked like a second one and is not: it forwards words an application wrote,
+            // and never composes any of its own.
+            //
+            // The stamp has no such exception. A daemon installed from a package is a package that
+            // can be proved, and one that never says which version is running is one no update of
+            // it could ever commit.
+            $crate::stamp_version();
             // SAFETY: called once, from shim_daemon.cpp's MainL, before the scheduler runs.
             unsafe {
                 __SYMBIAN_DAEMON = Some($crate::__Box::new($ctor));
