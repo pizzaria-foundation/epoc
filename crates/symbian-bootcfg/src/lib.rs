@@ -25,14 +25,28 @@
 
 extern crate alloc;
 
+pub mod catalog;
 pub mod config;
 pub mod crc;
+pub mod github;
+pub mod pkg;
+pub mod queue;
+pub mod repo;
+pub mod sis;
 pub mod status;
 pub mod supervise;
+pub mod update;
 
 pub use config::{BootConfig, DecodeError, Entry, Policy};
+pub use catalog::{CatEntry, CatalogDb};
+pub use github::RepoError;
+pub use queue::{Job, JobKind, JobState, Queue};
+pub use repo::{LastResult, Repo, RepoDb, RepoKind};
+pub use pkg::{Candidate, ManagedPkg, Offer, PkgDb, Row, Version};
+pub use sis::{SisError, SisInfo};
 pub use status::{BootStatus, EntryStatus, Mode, State};
 pub use supervise::{Action, Supervisor};
+pub use update::{Journal, Obs, Proof, Stage, Updater};
 
 /// `apps/bootctl`'s UID3 — the GUI editor. Refused as a supervised entry.
 pub const BOOTCTL_UID: u32 = 0xE0AA_0010;
@@ -47,6 +61,59 @@ pub const CONFIG_PATH: &str = "C:\\Data\\bootd\\boot.cfg";
 pub const STATUS_PATH: &str = "C:\\Data\\bootd\\boot.status";
 /// One byte: how many boots in a row failed to settle. Cleared after a healthy one.
 pub const COUNT_PATH: &str = "C:\\Data\\bootd\\boot.count";
+/// The packages we manage and what we believe is installed. See [`pkg::PkgDb`].
+pub const PKG_DB_PATH: &str = "C:\\Data\\bootd\\pkg.db";
+/// The update in flight, if there is one. See [`update::Journal`].
+pub const UPDATE_JOURNAL: &str = "C:\\Data\\bootd\\update.jrn";
+/// Where the known-good `.sis` of each managed package is kept, and where the candidate being
+/// installed is staged. A rollback is only possible because this directory exists — the card the
+/// candidate came from can be gone by the time the new version fails.
+pub const PKG_DIR: &str = "C:\\Data\\bootd\\pkg";
+/// The candidate copied out of `updates\` before anything is done to it, so the install and the
+/// rollback both read a file on internal storage that nobody can pull out mid-operation.
+pub const STAGING_PATH: &str = "C:\\Data\\bootd\\pkg\\staging.sis";
+/// One file per application UID3, written by [`symbian::pkg::stamp`] when that application starts.
+/// The only evidence anywhere that a *particular version of the code actually ran*. Defined by the
+/// SDK, because the writers are ordinary applications and only the reader is here.
+pub use symbian::pkg::VER_DIR;
+/// The repositories somebody registered. See [`repo::RepoDb`].
+pub const REPO_DB_PATH: &str = "C:\\Data\\bootd\\repos.db";
+/// What those repositories offered at the last check. See [`catalog::CatalogDb`].
+pub const CATALOG_PATH: &str = "C:\\Data\\bootd\\cat.db";
+/// The network work waiting to be done. See [`queue::Queue`].
+pub const QUEUE_PATH: &str = "C:\\Data\\bootd\\jobs.q";
+
+/// Searched, in this order, for candidate packages.
+///
+/// The first is [`symbian::APP_INSTALL_DIR`], which is where `epoc sideload` already puts a `.sis`
+/// and where a person already goes in File mgr. to tap one. Reusing it rather than inventing an
+/// `updates\` of our own is the whole point: the way a build reaches this phone does not change,
+/// only what the phone can then do with it. A package dropped there to be tapped by hand and one
+/// dropped there for the boot manager to install are the same file in the same place.
+///
+/// Then the card, in the same two spellings, for a build too big to be comfortable on C: — a memory
+/// card is the ordinary way a 320 KB package arrives on a phone with no cable to hand.
+///
+/// **Every one of them ends in a backslash, and that is required, not tidiness.** `shim_dir_list`
+/// hands the path straight to `RFs::GetDir`, which reads a last component with no trailing
+/// separator as a *filename pattern* rather than a directory — so `E:\Data\_app_install` lists
+/// `E:\Data\` filtered to that name and finds nothing. The same rule that made `MkDirAll` create
+/// nothing and report success.
+pub const UPDATE_DIRS: [&str; 3] = [
+    symbian::APP_INSTALL_DIR,
+    "E:\\Data\\_app_install\\",
+    "E:\\_app_install\\",
+];
+
+/// Where the known-good `.sis` for one package lives: `C:\Data\bootd\pkg\E0AA0000.sis`.
+///
+/// Named by UID3 and not by the package's file name, because the file name is whatever the card
+/// happened to carry and the UID3 is the identity everything else in this crate already keys on. A
+/// rollback that cannot find its file is a rollback that does not happen, so the name has to be
+/// derivable rather than remembered.
+pub fn known_good_path(uid3: u32) -> alloc::string::String {
+    alloc::format!("{PKG_DIR}\\{uid3:08X}.sis")
+}
 /// The directory both live in; bootd creates it before its first write.
 pub const DATA_DIR: &str = "C:\\Data\\bootd";
 
@@ -63,6 +130,33 @@ pub const STARTUP_IMPORT_PATH: &str = "C:\\private\\101f875a\\import\\[E0AA0010]
 /// The same compiled resource, shipped as plain data by bootctl's package so bootd has the bytes
 /// without embedding a build artefact in its own image.
 pub const STARTUP_SOURCE: &str = "C:\\Data\\bootd\\startup_item.rsc";
+
+/// Where the supervisor's executable is installed.
+///
+/// One definition, because two processes now need to start it — `apps/launcher` at boot, and
+/// `apps/bootctl` when it arms an update and finds the supervisor is not running.
+pub const BOOTD_EXE: &str = "C:\\sys\\bin\\bootd.exe";
+
+/// A one-shot flag: *this* start of bootd is for an update, not for a boot.
+///
+/// Written by `apps/bootctl` immediately before it starts the supervisor, read and deleted by the
+/// supervisor at start. Without it, starting bootd mid-session would do the two things a boot does
+/// and neither is wanted here: consume a safe-mode strike from `boot.count` — three updates and the
+/// phone would come up in safe mode — and relaunch the entire boot list, which is already running.
+///
+/// A file rather than a command-line argument for the same reason [`HOLD_PATH`] is one: it is a fact
+/// written by our own code at a moment we control, and `symbian::process::spawn` carries no
+/// arguments to inspect. Deleted by the reader, so a bootd that dies before reading it leaves at
+/// worst one boot that skipped its own boot list — recovered by the next real boot.
+pub const UPDATE_ONLY_PATH: &str = "C:\\Data\\bootd\\updateonly";
+
+/// Written by `apps/bootctl` when it sees the platform's installer close, and deleted by
+/// `apps/bootd` as it reads it.
+///
+/// The difference between detecting and timing. Without it the supervisor waits out a fixed floor
+/// before reopening what it just updated, because it has no way to know the installer has finished;
+/// with it, the wait ends when the install does. See `update::Obs::installer_done`.
+pub const INSTALLER_DONE_PATH: &str = "C:\\Data\\bootd\\installdone";
 
 /// Unsettled boots in a row before bootd launches nothing and waits to be told why.
 pub const SAFE_MODE_STRIKES: u8 = 3;

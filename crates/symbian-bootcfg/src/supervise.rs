@@ -166,6 +166,23 @@ pub struct Supervisor {
     /// Deferring, not cancelling: the death is still recorded, the strike count is held at the
     /// threshold, and the restart happens on the first poll after the installer is gone.
     installing: bool,
+    /// The one entry whose liveness is somebody else's business this round: the application
+    /// `crate::update` is in the middle of installing and proving.
+    ///
+    /// Distinct from [`Supervisor::installing`] in scope and in kind, and the difference is the
+    /// reason both exist. `installing` is global and temporary — *nobody* is restarted while an
+    /// installer holds a file — and it still records the death. This is one entry and it records
+    /// nothing, because the updater is deliberately launching that application and watching it
+    /// die: a death inside a proof window is data the updater is collecting, not a fault the
+    /// supervisor should be reacting to.
+    ///
+    /// Without it the two machines fight over the same application. The updater launches 0.2.0 and
+    /// starts a 60-second proof window; the bad build dies in three seconds; the supervisor sees the
+    /// death first, restarts it, and the updater then observes a *running* process for most of the
+    /// window. The rollback still happens, but for the wrong reason and by luck — and meanwhile the
+    /// entry has burned its restart budget and comes back `auto_disarmed`, so the home screen
+    /// returns switched off.
+    updating: Option<u32>,
 }
 
 impl Supervisor {
@@ -237,6 +254,7 @@ impl Supervisor {
             reset_cadence: false,
             boot_count: 0,
             installing: false,
+            updating: None,
         }
     }
 
@@ -257,6 +275,17 @@ impl Supervisor {
         self.installing = installing;
     }
 
+    /// Name the entry the updater owns this round, or `None` when no update is in flight.
+    ///
+    /// Set before each [`step`] round, like [`Supervisor::set_installing`]. Passing a UID3 that is
+    /// not in the boot list is harmless and means nothing is exempt — the caller does not have to
+    /// know whether the application being updated is also supervised.
+    ///
+    /// [`step`]: Supervisor::step
+    pub fn set_updating(&mut self, uid3: Option<u32>) {
+        self.updating = uid3;
+    }
+
     /// The UID3s in slot order, so the caller can build the `alive` slice without holding the config.
     pub fn uids(&self) -> impl Iterator<Item = u32> + '_ {
         self.slots.iter().map(|s| s.uid3)
@@ -264,8 +293,16 @@ impl Supervisor {
 
     /// Whether slot `i` is worth asking the OS about. A caller that skips the rest saves a
     /// `TFindProcess` walk per unsupervised row.
+    ///
+    /// It is also where [`Supervisor::set_updating`] takes effect, and deliberately so: the
+    /// supervise round opens by skipping every slot this returns `false` for, so one answer here
+    /// exempts the updated entry from all of it at once — no death observed, no strike counted, no
+    /// restart issued, no budget spent, no auto-disarm. Spreading the same rule across four
+    /// decisions is how two of them end up disagreeing.
     pub fn probes(&self, i: usize) -> bool {
-        self.slots.get(i).is_some_and(|s| s.supervised && s.launched_at.is_some())
+        self.slots.get(i).is_some_and(|s| {
+            s.supervised && s.launched_at.is_some() && Some(s.uid3) != self.updating
+        })
     }
 
     /// One instruction. `alive[i]` is whether `cfg.entries[i]`'s process is currently running; it is
@@ -501,9 +538,26 @@ impl Supervisor {
 
     /// Whether any supervised entry could still produce work. An entry that is alive under `Never`
     /// will never be restarted, so watching it forever buys nothing.
+    ///
+    /// An exempt entry counts as work even though nothing is being done about it. It is exempt for
+    /// the duration of an update and not forever, so concluding `Done` — which makes the daemon
+    /// exit — would hand the phone back with the entry unsupervised and nobody to pick it up when
+    /// the update finishes.
     fn has_future_work(&self) -> bool {
         self.slots.iter().any(|s| {
-            if !s.supervised || s.policy == Policy::Never {
+            if !s.supervised {
+                return false;
+            }
+            // Checked before the policy, and the order is the whole point. `Never` means "do not
+            // restart this if it dies", which is a statement about deaths — not permission to end
+            // the daemon while somebody else is mid-way through replacing the executable. A home
+            // screen set to `Never` is the case that gets this wrong: the supervisor would declare
+            // itself finished during the install and bootd would exit, leaving the update with
+            // nobody to prove it.
+            if Some(s.uid3) == self.updating {
+                return true;
+            }
+            if s.policy == Policy::Never {
                 return false;
             }
             !s.terminal
@@ -960,5 +1014,104 @@ mod tests {
             Action::Wait(ms) => assert_eq!(ms, MAX_WAIT_MS),
             other => panic!("expected a wait, got {other:?}"),
         }
+    }
+    // ------------------------------------------------------- the entry an update owns
+
+    const HOME: u32 = 0xE0AA_0000;
+    const OTHER: u32 = 0x1000_0001;
+
+    #[test]
+    fn the_updated_entry_is_not_restarted_and_spends_nothing() {
+        let cfg = cfg_of(vec![entry(HOME, Policy::Always)]);
+        let mut sup = Supervisor::new(&cfg, OWN, CTL, 0);
+        let mut t = 0;
+        boot(&mut sup, &mut t);
+
+        sup.set_updating(Some(HOME));
+        let acts = kill_once(&mut sup, &mut t);
+        assert!(
+            acts.iter().all(|a| !matches!(a, Action::Restart(_))),
+            "the updater is deliberately watching this one die; a restart underneath it turns the \
+             proof window into a measurement of the supervisor"
+        );
+        assert_eq!(sup.snapshot().restarts_used, 0, "and nothing was spent doing it");
+
+        // The update ends. The supervisor picks the entry straight back up, with its budget intact.
+        sup.set_updating(None);
+        let acts = kill_once(&mut sup, &mut t);
+        assert!(acts.contains(&Action::Restart(0)), "the home comes back once the update is over");
+    }
+
+    #[test]
+    fn the_rest_of_the_boot_list_stays_supervised_during_an_update() {
+        // The whole reason for a per-entry exemption rather than standing the supervisor down: an
+        // install can take ten minutes, and something else in the list crashing during it is real.
+        let cfg = cfg_of(vec![entry(HOME, Policy::Always), entry(OTHER, Policy::Always)]);
+        let mut sup = Supervisor::new(&cfg, OWN, CTL, 0);
+        let mut t = 0;
+        boot(&mut sup, &mut t);
+        sup.set_updating(Some(HOME));
+
+        run(&mut sup, t, &[true, true]);
+        t += LAUNCH_GRACE_MS + 1_000;
+        run(&mut sup, t, &[false, false]);
+        t += 20_000;
+        let (acts, _) = run(&mut sup, t, &[false, false]);
+        assert!(acts.contains(&Action::Restart(1)), "the other app is still watched");
+        assert!(!acts.contains(&Action::Restart(0)), "the updated one is not");
+    }
+
+    #[test]
+    fn an_exempt_entry_is_never_auto_disarmed_by_a_crash_loop_the_updater_caused() {
+        // Without the exemption this is the expensive failure: the bad build dies five times inside
+        // the proof window, the budget runs out, and the home screen comes back switched off — so
+        // the rollback restores a version the boot list no longer launches.
+        let cfg = cfg_of(vec![entry(HOME, Policy::Times(2))]);
+        let mut sup = Supervisor::new(&cfg, OWN, CTL, 0);
+        let mut t = 0;
+        boot(&mut sup, &mut t);
+        sup.set_updating(Some(HOME));
+
+        for _ in 0..5 {
+            let acts = kill_once(&mut sup, &mut t);
+            assert!(!acts.contains(&Action::Disarm(0)));
+        }
+        sup.set_updating(None);
+        let acts = kill_once(&mut sup, &mut t);
+        assert!(acts.contains(&Action::Restart(0)), "its two restarts were never spent");
+    }
+
+    #[test]
+    fn an_update_in_flight_stops_the_supervisor_declaring_itself_finished() {
+        // `Done` makes the daemon exit. Exiting mid-update leaves nobody to prove the new version,
+        // roll it back, or resume supervising the entry when the update ends.
+        let cfg = cfg_of(vec![entry(HOME, Policy::Never)]);
+        let mut sup = Supervisor::new(&cfg, OWN, CTL, 0);
+        let mut t = 0;
+        boot(&mut sup, &mut t);
+        sup.set_updating(Some(HOME));
+
+        t += SETTLE_MS + 1_000;
+        let (acts, _) = run(&mut sup, t, &[true]);
+        assert!(
+            !acts.contains(&Action::Done),
+            "a `Never` entry would normally end the supervisor here"
+        );
+
+        sup.set_updating(None);
+        t += SETTLE_MS + 1_000;
+        let (acts, _) = run(&mut sup, t, &[true]);
+        assert!(acts.contains(&Action::Done), "and it ends as soon as the update is over");
+    }
+
+    #[test]
+    fn naming_an_application_that_is_not_in_the_boot_list_exempts_nothing() {
+        // bootd does not have to know whether the package it is updating is also supervised.
+        let cfg = cfg_of(vec![entry(HOME, Policy::Always)]);
+        let mut sup = Supervisor::new(&cfg, OWN, CTL, 0);
+        let mut t = 0;
+        boot(&mut sup, &mut t);
+        sup.set_updating(Some(0xDEAD_BEEF));
+        assert!(kill_once(&mut sup, &mut t).contains(&Action::Restart(0)));
     }
 }

@@ -13,6 +13,10 @@ rust-version.workspace = true
 # clock-free struct) — reusing the SDK's cadence beats a second copy of the same doubling.
 [dependencies]
 symbian = { workspace = true }
+# For one thing: inflating a package's controller to read its version. See `sis`.
+symbian-crypto = { workspace = true }
+# For the GitHub provider: reading a release payload. See `github`.
+symbian-json = { workspace = true }
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_vendor, values("symbian"))'] }
