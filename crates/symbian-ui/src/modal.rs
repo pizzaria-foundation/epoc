@@ -85,22 +85,26 @@ impl<T: Clone> Modal<T> {
             body: body.into(),
             choices: Vec::new(),
             prompt: Prompt::new(),
-            action_label: String::from("Escolher"),
-            back_label: String::from("Voltar"),
+            action_label: String::from(crate::strings::select()),
+            back_label: String::from(crate::strings::back()),
         }
     }
 
-    /// The default softkey labels are **Portuguese** — `Escolher` and `Voltar`.
+    /// The default softkey labels come from the phone's language.
     ///
-    /// Not a slip: this widget was written for `tg`, whose interface is Portuguese, and those are the
-    /// words its other bars use. It is worth saying out loud because a shared widget that carries a
-    /// language hands every later caller a decision it never asked about, and the symptom is one
-    /// Portuguese word in an otherwise English screen — which is exactly what the boot manager's
-    /// first confirmation dialog looked like.
+    /// They used to be Portuguese constants — `Escolher` and `Voltar` — written that way because
+    /// this widget was built for `tg`, and documented at length because the consequence was already
+    /// understood: *a shared widget that carries a language hands every later caller a decision it
+    /// never asked about, and the symptom is one Portuguese word in an otherwise English screen*.
+    /// The boot manager's first confirmation dialog looked exactly like that.
     ///
-    /// So: call [`action_label`](Self::action_label) and [`back_label`](Self::back_label) unless your
-    /// screen is Portuguese. There is no English default because picking one would silently change
-    /// what `tg` already ships.
+    /// `crate::strings` answers instead, so the decision belongs to the only party that knows it.
+    /// In Portuguese the labels are the same two words, which is why nothing needed re-checking when
+    /// this changed: what `tg` ships is unchanged and every other screen stopped being wrong.
+    ///
+    /// [`action_label`](Self::action_label) and [`back_label`](Self::back_label) are still there for
+    /// a dialog whose buttons are about its own subject — `Remove`/`Keep` rather than
+    /// `Select`/`Back`.
     ///
     /// Add a choice: what it reads as, and what it means.
     pub fn choice(mut self, label: impl Into<String>, value: T) -> Self {
@@ -253,6 +257,40 @@ mod tests {
     use super::*;
     use crate::input::{Key, Softkey};
     use crate::{testing, Palette};
+
+    /// The defaults follow the phone, and nothing in this file knows how.
+    ///
+    /// This is the whole point of the change that removed `String::from("Escolher")` from `new`:
+    /// a widget shared by every application stopped carrying one application's language. It reads
+    /// as a small test because the mechanism is small — a static, a table, and a branch — and the
+    /// bug it replaces shipped for months as one Portuguese word in an English dialog.
+    #[test]
+    fn the_default_labels_are_the_phones_language() {
+        use symbian_sys::Lang;
+
+        crate::lang::set(Lang::En);
+        let en = Modal::<u8>::new("t", "b");
+        assert_eq!(en.action_label, "Select");
+        assert_eq!(en.back_label, "Back");
+
+        crate::lang::set(Lang::Pt);
+        let pt = Modal::<u8>::new("t", "b");
+        assert_eq!(pt.action_label, "Escolher", "the words tg has always shipped");
+        assert_eq!(pt.back_label, "Voltar");
+
+        crate::lang::set(Lang::En);
+    }
+
+    /// And an override still wins, because a dialog about its own subject wants its own verbs.
+    #[test]
+    fn an_explicit_label_beats_the_language() {
+        use symbian_sys::Lang;
+        crate::lang::set(Lang::Pt);
+        let m = Modal::<u8>::new("t", "b").action_label("Remove").back_label("Keep");
+        assert_eq!(m.action_label, "Remove");
+        assert_eq!(m.back_label, "Keep");
+        crate::lang::set(Lang::En);
+    }
     use symbian_gfx::Size;
 
     #[derive(Clone, PartialEq, Eq, Debug)]

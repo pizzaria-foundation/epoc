@@ -85,6 +85,7 @@ pub mod focus;
 pub mod grid;
 pub mod icon;
 pub mod input;
+pub mod lang;
 pub mod list;
 pub mod match_filter;
 pub mod marquee;
@@ -97,6 +98,7 @@ pub mod select;
 pub mod sheet;
 pub mod slider;
 pub mod stepper;
+pub mod strings;
 pub mod tabs;
 pub mod text_prompt;
 pub mod tile;
@@ -113,6 +115,9 @@ pub use app_picker::{AppPicker, IconRef, Item as PickerItem, PickerAction};
 pub use calendar::{Part as DatePart, Stamp};
 pub use chip::{Chip, Tone};
 pub use chrome::{Frame, Softkeys};
+// Re-exported so a `strings!` table needs one import rather than two, and so the macro's own
+// expansion can name it as `$crate::Lang` without the caller depending on symbian-sys directly.
+pub use symbian_sys::Lang;
 pub use clip::{Clipboard, MemClipboard, NoClipboard};
 pub use device_screen::{DeviceScreen, Entry as DeviceEntry};
 pub use drawer::{Drawer, DrawerAction, Section};

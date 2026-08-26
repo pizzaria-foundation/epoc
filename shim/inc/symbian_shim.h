@@ -1115,6 +1115,18 @@ int32_t shim_sql_column_index(int32_t stmt, const uint16_t* name, int32_t len, i
  * implement an attribute is telling you the hardware is absent. */
 int32_t shim_hal_get(int32_t attr, int32_t* out);
 
+/* ------------------------------------------------------------ locale ------
+ * Ungated, unlike every optional block around it: `User::Language()` is euser, which
+ * every executable already links, so there is no import to add and no gate to earn.
+ *
+ * Returns a raw TLanguage. Interpreting it is a table with about a hundred and sixty
+ * entries, and a table belongs in Rust where a host test can cover it — `symbian::locale`.
+ * Two of those entries are worth knowing before anybody writes the obvious `== 1`: English
+ * is eight separate values, and Brazilian Portuguese is 76, nowhere near Portuguese's 13.
+ *
+ * Cannot fail and cannot Leave, so it has no error return: a phone always has a locale. */
+int32_t shim_locale_language(void);
+
 /* ------------------------------------------------------------ drives -------
  * SHIM_USE_FS_INFO. What is mounted, how big, how full.
  *

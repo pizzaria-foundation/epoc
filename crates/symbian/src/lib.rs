@@ -47,6 +47,7 @@ pub mod http;
 pub mod msg;
 pub mod image;
 pub mod intent;
+pub mod locale;
 pub mod location;
 pub mod log;
 pub mod mem;

@@ -165,6 +165,25 @@ pub mod atlas {
 /// cannot outlive the `BitmapFont`s it points at. The atlases are parsed per call rather
 /// than cached in a static — caching one would need a self-referential static, and
 /// parsing is a header read plus a bounds check, which is nothing against a full repaint.
+/// Adopt the phone's language, so every `strings!` table answers in it.
+///
+/// Called by [`entry!`] before the application is constructed, and that ordering is the point: a
+/// constructor may build a title or a softkey label, and one built before this ran would be English
+/// on a Portuguese phone and stay that way for the life of the screen. The same class of mistake as
+/// resolving a palette before publishing it, which cost a release to find.
+///
+/// Fails open in the only way it can. `symbian::locale::language` maps everything it does not
+/// recognise — including the error the host stub returns — onto English, so this cannot leave an
+/// application with no language at all.
+///
+/// # It does not read a preference yet
+///
+/// Only the system setting. A `lang.pref` beside `theme.pref`, letting the launcher pin a language
+/// for every application, is the next step and belongs here rather than at any call site.
+pub fn adopt_language() {
+    symbian_ui::lang::set(symbian::locale::language());
+}
+
 pub fn with_theme<R>(palette: Palette, f: impl FnOnce(&Theme<'_>) -> R) -> R {
     let body = BitmapFont::new(UI_BODY).expect("ui11 atlas is malformed");
     let strong = BitmapFont::new(UI_STRONG).expect("ui11b atlas is malformed");
@@ -916,6 +935,9 @@ macro_rules! entry {
 
         #[no_mangle]
         pub extern "C" fn rust_app_start() {
+            // Before the constructor, not after: a constructor that builds a label would build it
+            // in the wrong language and keep it. See `adopt_language`.
+            $crate::adopt_language();
             // SAFETY: called exactly once, from CShimAppUi::ConstructL, on the GUI thread.
             unsafe {
                 let mut app = $crate::__Box::new($ctor);

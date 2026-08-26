@@ -1259,6 +1259,16 @@ extern "C" {
     /// `KErrNotSupported` means the handset does not implement that attribute, which is
     /// itself an answer about the hardware.
     pub fn shim_hal_get(attr: i32, out: *mut i32) -> i32;
+    /// The phone's language, as a raw `TLanguage`.
+    ///
+    /// Ungated, unlike most of what surrounds it: `User::Language()` is euser, which every
+    /// executable already links, so it costs no import. An application should not have to opt in
+    /// to being able to speak the user's language — forgetting the flag would look like a
+    /// translation bug rather than a missing gate.
+    ///
+    /// Cannot fail: a phone always has a locale. Interpreting the value is [`Lang`]'s job, and the
+    /// table is in `symbian::locale` where a host test covers it.
+    pub fn shim_locale_language() -> i32;
     /// One entry of the **phone's own theme** colour table, as `0x00RRGGBB` in `out`.
     ///
     /// `major`/`minor` are the two halves of a `TAknsItemID` and `index` is the entry within that
@@ -1406,6 +1416,97 @@ extern "C" {
 // Host stubs, so this crate compiles and the workspace tests run. They abort
 // rather than return, because reaching one means a host binary tried to talk to a
 // phone and every subsequent value would be a lie.
+/// The languages this project's applications speak.
+///
+/// # Why it is here and not in the toolkit
+///
+/// Because of the dependency graph, and it is the only place that works. `symbian-ui` needs it, to
+/// pick which of two strings to draw. `symbian` needs it, to map a `TLanguage` onto it. And
+/// `symbian-ui` deliberately does **not** depend on `symbian` — `symbian_ui::theme` states the rule:
+/// the toolkit has no business opening a server session. `symbian-sys` has no dependencies at all
+/// and everything depends on it, so this is the floor both can stand on.
+///
+/// That placement is also honest about what this is. It is not a UI decision; it is the vocabulary
+/// of the shim boundary, sitting beside [`shim_locale_language`] which produces it.
+///
+/// # Two, and adding a third is a table entry
+///
+/// English and Brazilian Portuguese, because those are the two anybody here can translate into. A
+/// third is a variant plus one more arm in every `strings!` table — which will not compile until
+/// every table has it, so the day it is added, nothing is silently left untranslated.
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Default)]
+pub enum Lang {
+    /// The default, and the fallback for every language nobody has translated into. A phone set to
+    /// Spanish gets English rather than nothing: an untranslated interface is usable and a blank
+    /// one is not.
+    #[default]
+    En,
+    /// Portuguese. Both the Brazilian and the European settings map here — the differences between
+    /// them do not reach the eleven words on a softkey, and pretending otherwise would mean two
+    /// tables to keep in step for no reader's benefit.
+    Pt,
+}
+
+/// Which language the interface is drawn in, held for whoever draws it.
+///
+/// # Why the value lives down here
+///
+/// `symbian-ui` is where it is *read* and cannot be where it is *kept*: that crate carries
+/// `#![forbid(unsafe_code)]`, and a mutable static on a target with no atomics needs an
+/// `UnsafeCell`. It is not where it is *written* either — reading `User::Language()` means calling
+/// the shim, and the toolkit deliberately does not depend on the device crate.
+///
+/// So it sits at the floor, next to [`Lang`] and next to [`shim_locale_language`] which produces the
+/// value: `symbian` writes it, `symbian-ui` reads it, and neither has to know about the other.
+pub mod lang {
+    use super::Lang;
+
+    struct LangCell(core::cell::UnsafeCell<Lang>);
+
+    // SAFETY: single-threaded by construction. Every access is from the GUI thread — the draw and
+    // key callbacks the shim invokes — because that is the only thread that renders text. A worker
+    // thread never draws and so never reads this.
+    //
+    // `AtomicU8` would be tidier and is not available: this target has no atomics. The same note is
+    // on `symbian_app::theme_pref`'s palette cell, which solved this once already; this is a second
+    // use of one trick rather than a second trick.
+    unsafe impl Sync for LangCell {}
+
+    impl LangCell {
+        const fn new(l: Lang) -> Self {
+            Self(core::cell::UnsafeCell::new(l))
+        }
+        fn load(&self) -> Lang {
+            // SAFETY: see the `Sync` impl.
+            unsafe { *self.0.get() }
+        }
+        fn store(&self, l: Lang) {
+            // SAFETY: see the `Sync` impl.
+            unsafe { *self.0.get() = l }
+        }
+    }
+
+    /// English until [`set`] says otherwise, so an application that forgets to call it draws
+    /// readable text rather than nothing — the same fail-open rule the palette cell uses one crate
+    /// up. A headless build never calls it and never draws, and both facts are fine.
+    static CURRENT: LangCell = LangCell::new(Lang::En);
+
+    /// The language every `strings!` table resolves against.
+    pub fn current() -> Lang {
+        CURRENT.load()
+    }
+
+    /// Set it — once, at start-up, by whoever can read the phone. `symbian_app::entry!` does this,
+    /// so an ordinary application never calls it.
+    ///
+    /// Also what the host simulator and the tests call, which is why the host shim stub refuses to
+    /// invent a language: the answer comes from here, deliberately, rather than from a stub
+    /// pretending to be a phone.
+    pub fn set(l: Lang) {
+        CURRENT.store(l);
+    }
+}
+
 #[cfg(not(target_vendor = "symbian"))]
 mod host_stubs {
     use super::*;
@@ -2732,6 +2833,20 @@ mod host_stubs {
     ///
     /// The shim ABI contract in the crate docs. `out` must point to a writable `i32`.
     pub unsafe fn shim_hal_get(_attr: i32, _out: *mut i32) -> i32 {
+        SHIM_ERR_NOT_READY
+    }
+    /// The host has no locale to report, and says so rather than guessing.
+    ///
+    /// `SHIM_ERR_NOT_READY` and not `ELangEnglish`: a stub that *asserted* a language would be an
+    /// instrument that lies, and the simulator would then be unable to show what a Portuguese phone
+    /// looks like. A host caller sets the language directly instead — which is what a test does too.
+    ///
+    /// # Safety
+    ///
+    /// The shim ABI contract in the crate docs. No pointers cross here, so the shared contract is the
+    /// whole of it — and `unsafe` is on it only so the call site is written once for both targets,
+    /// the same reason `shim_now_us` carries it.
+    pub unsafe fn shim_locale_language() -> i32 {
         SHIM_ERR_NOT_READY
     }
     /// # Safety
