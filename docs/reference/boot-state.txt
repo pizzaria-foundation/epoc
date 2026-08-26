@@ -1,0 +1,14 @@
+# watching 0x101f8766/0x41 — system state (aiidleint observes this; 104/109/110/111 = it grabs the screen)
+# watching 0x101f8766/0x2 — a second state key, 104 on a settled phone
+# watching 0x101f8766/0x11 — startup phase marker
+# watching 0x101f8766/0x31 — startup phase marker
+# watching 0x101f8766/0x42 — startup phase marker
+# watching 0x101f8767/0x501 — SysAp: autolock-status candidate
+# baseline, phone settled:
+#   0x101f8766/0x41 = 109
+#   0x101f8766/0x2 = 104
+#   0x101f8766/0x11 = 101
+#   0x101f8766/0x31 = 101
+#   0x101f8766/0x42 = 100
+#   0x101f8767/0x501 = 1
+# reboot now -> ok=True rebooting: killing the file server once this reply is on the wire

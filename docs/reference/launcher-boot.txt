@@ -1,0 +1,36 @@
+    53  [launcher] new: settings read
+    88  [launcher] new: resident=true
+    95  [launcher] new: roster=0
+   118  [launcher] new: recents+props done
+   150  [launcher] daemon e0aa0002 spawn rc=Ok(())
+   165  [launcher] daemon e0aa0003 spawn rc=Ok(())
+   189  [launcher] daemon e0aa0005 spawn rc=Ok(())
+   223  [launcher] daemon e0aa0011 spawn rc=Ok(())
+   242  [launcher] idle uid before=Err(AccessDenied)
+   399  [launcher] idle uid claim rc=Ok(()) after=Err(AccessDenied)
+   462  [launcher] new: daemons done
+   604  [launcher] unread -1 -> 0
+   647  [launcher] roster read returned nothing; keeping the old one
+   733  [launcher] new: constructed at uptime 9555 ms, system state Ok(104), resident=true
+  1195  [launcher] fg race 1 at age 724 ms rc=Ok(()) foreground=true
+  2367  [launcher] start_icon_build ready=true on=true candidates=5
+  2404  [launcher] outstanding=0
+  8667  [launcher] fg race 2 at age 8191 ms rc=Ok(()) foreground=true
+  8671  [launcher] splash done at 8200 ms (roster ready=true) fg=Ok(())
+  9378  [launcher] fg race 3 at age 8906 ms rc=Ok(()) foreground=true
+ 10113  [launcher] fg race 4 at age 9642 ms rc=Ok(()) foreground=true
+ 10830  [launcher] fg race 5 at age 10359 ms rc=Ok(()) foreground=true
+ 11568  [launcher] fg race 6 at age 11097 ms rc=Ok(()) foreground=true
+ 12427  [launcher] fg race 7 at age 11955 ms rc=Ok(()) foreground=true
+ 13158  [launcher] fg race 8 at age 12687 ms rc=Ok(()) foreground=true
+ 13952  [launcher] fg race 9 at age 13481 ms rc=Ok(()) foreground=true
+ 14675  [launcher] fg race 10 at age 14204 ms rc=Ok(()) foreground=true
+ 15394  [launcher] fg race 11 at age 14922 ms rc=Ok(()) foreground=true
+ 16164  [launcher] fg race 12 at age 15692 ms rc=Ok(()) foreground=true
+ 16877  [launcher] fg race 13 at age 16406 ms rc=Ok(()) foreground=true
+ 17596  [launcher] fg race 14 at age 17125 ms rc=Ok(()) foreground=true
+ 18318  [launcher] fg race 15 at age 17844 ms rc=Ok(()) foreground=true
+ 19036  [launcher] fg race 16 at age 18565 ms rc=Ok(()) foreground=true
+ 19755  [launcher] fg race 17 at age 19281 ms rc=Ok(()) foreground=true
+ 20514  [launcher] fg race done: 17 claims, age 20043 ms, uptime 29341 ms, foreground=true
+ 60558  [launcher] boot vouched, safe-mode counter cleared rc=Ok(())

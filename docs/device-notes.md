@@ -115,20 +115,35 @@ later queues behind it and does not.
 The answer was in the first two lines of the first report, in the column nobody was
 reading.
 
-### What is known about the destination, and what is not
+### What is known about the destination, which is now most of it
 
 With the pump fixed, a photo decodes using the shipped examples' recipe — frame rect,
 `EColor16M`, no options, `FileNewL`, `EPriorityStandard`, exactly what
 `sdk/s60cppexamples/OcrExample/` and `sdk/s60cppexamples/OpenGLEx/` do.
 
-**Whether `EColor64K`, a reduced destination, or `DataNewL` also work is unknown.** They
-were each blamed in turn while the pump was the cause, so every conclusion drawn about them
-was drawn from a rigged experiment. The frame reports `iFlags = 0x15` (`EColor` +
-`EFullyScaleable` + `ECanDither`) and `iFrameDisplayMode = EColor16M`; the ICL guide says
-`ECanDither` means the mode may be chosen and `EFullyScaleable` means any size may be
-asked for. That is what the documentation permits, and it is still not a measurement.
-Rows C, D and F of the probe would answer it, and would let the 24bpp→RGB565 conversion in
-`CopyOut` go away.
+This paragraph used to say that `EColor64K`, a reduced destination and `DataNewL` were all
+unknown — each having been blamed in turn while the pump was the real cause, so every
+conclusion about them came from a rigged experiment. **`apps/tileprobe` measured all three
+at once, on the handset, 25 August 2026**, and they work:
+
+| | |
+|---|---|
+| source | `DataNewL` — a PNG in RAM, straight off the socket, never a file |
+| destination | asked for 256×256, a *reduced* box rather than the frame rect |
+| what came back | `native=256x256 factor=0`, so no reduction was needed — but the request was honoured, not refused |
+| display mode | **`mode=8` = `EColor64K`, which is RGB565** |
+| `iFlags` | `0x11` (`EColor` + `ECanDither`), *without* `EFullyScaleable` |
+| cost | 153–202 ms per 256×256 tile, `continues=0` on all four |
+
+Four different tiles, four different first pixels (`0xf77d`, `0xc5b5`, `0xbd53`, `0xde99`),
+so the codec wrote real pixels rather than reporting success over a zeroed buffer.
+
+Two consequences. The first is that **the 24bpp→RGB565 conversion in `CopyOut` can go
+away** for this path: the codec already hands back the format `symbian-gfx` draws in. The
+second is a caution — this frame does *not* claim `EFullyScaleable`, so "a reduced
+destination works" is measured here only for a box the image already fits. A tile is always
+natively 256, so a map never finds out; anything that genuinely needs the codec to scale
+still has no measurement.
 
 **`KErrUnderflow` is separately real.** It means call `ContinueConvert` until `KErrNone`,
 and it can arrive for a whole image: `CImageDecoderPlugin::HandleProcessFrameResult` turns
@@ -145,6 +160,44 @@ guide and both worked examples — was in `vendor/research/s60/s60doc/` and
 a web search.
 
 `examples/imgprobe` should have been the first thing built, not the seventh.
+
+### A decode needs a font and bitmap server session, and a GUI application hides that
+
+`CFbsBitmap` lives in the font and bitmap server's heap, so creating one needs a session
+with that server. **No application ever asks for it**: `CCoeEnv` connects FBS during its own
+construction, and every decode this SDK had ever done ran underneath one. The dependency was
+real, satisfied by something nobody here wrote, and documented nowhere.
+
+A headless daemon has no `CCoeEnv`. Measured on the E72, 25 August 2026, by the first
+headless caller — `apps/tileprobe`:
+
+```
+1305  [tileprobe] GET https://tile.openstreetmap.org/15/13209/17118.png
+4064  [tileprobe] fetch done: status=200 err=0 bytes=30633 ms=2759
+      (nothing further, ever)
+```
+
+No decode line. No abandoned line, though the probe's own five-second ceiling should have
+written one. No report. **And no `panic.txt`** — an FBS client panic is a kernel panic, so
+the Rust panic handler never runs and the process is simply not there any more. The last
+line in the log is the line before the bitmap.
+
+The fix is `FbsSession()` in `shim/src/shim_image.cpp`: connect lazily on the first decode,
+disconnect in `ShimImageCleanup` *after* the decodes that own bitmaps. `RFbsSession::Connect`
+is reference-counted per thread, so in a GUI build it takes a second reference on the session
+CONE already holds and changes nothing; `KErrAlreadyExists` is treated as success for exactly
+that reason. With it, the same probe decoded all four tiles.
+
+**It generalises, and it is the same shape as `daemon-cannot-use-apps-running`.** A headless
+daemon does not inherit what a GUI application gets from CONE for free, and the failure is
+never an error return — it is a process that stops existing between two log lines. Anything
+that reaches a server CONE normally opens on our behalf should open it itself.
+
+**The teardown had the matching hole.** `shim_daemon.cpp` never called `ShimImageCleanup` at
+all — the GUI build has had that ordering since the decoder existed, and a daemon that
+decodes is newer than the list. A decode holds an `RFile` subsession on the shim's file
+server session, so closing the session first orphans a handle whose close then panics naming
+the file server.
 
 **Its own first version was the same mistake in miniature.** All seven rows ran in one
 process, so when a row starved the GUI thread it took down the six-second timeout meant to
@@ -719,6 +772,17 @@ function, and calling it writes our sentinel through the pointer we passed and e
 argument we sent. Its own `User::TickCount` import resolved from inside the DLL, so both the
 export table and the import table are real. Everything MTMs, ECom and FEPs are built on is
 therefore reachable from this toolchain.
+
+## The platform says where it is in its own boot
+
+`0x101F8766` key `0x41`, and the whole enum, is in [boot states](boot-states.md) — including the two
+findings a home screen cannot work without: **107 is the charging state** (a phone woken by its
+charger, which `SysAp` then powers back off on a 500 ms timer), and the native idle screen grabs the
+foreground **once per boot, on the edge** into 104/109/110/111, which is why insisting on
+`BringToForeground` during a boot loses 27 times out of 27 and re-asserting on the edge wins.
+
+Measured on this handset: this SDK's launcher is constructed at ~8.7 s of uptime, and the system
+reaches a usable state anywhere from 13.7 s to past 142 s. There is no timeout that is right.
 
 ## The keypad lock is readable; the key everyone names is not
 
@@ -1637,3 +1701,46 @@ All four starting routes plus `SendMessage` use `RApaLsSession`, `CApaCommandLin
 import, so the failure mode that rule about isolating risky calls exists for (an image that will not
 load, with no panic and no log) does not apply. What remains is a leave at run time, and the shim
 traps each at the `extern "C"` boundary. Launching needs no capability.
+
+## api.github.com answers this phone, and both sizes matter
+
+The package manager is designed around GitHub Releases, so `apps/ghprobe` asked the one question that
+could invalidate the design before anything was built on it. Three runs, and each one moved a fact:
+
+```
+run 1  bearer up → FAILED: fetch refused rc=-18
+run 2  session open → headers: status=404
+run 3  status=200  wire=3433  decoded=10012  gzip=true
+       body: {"url":"https://api.github.com/repos/rust-lang/rust/releases/373931400", …
+```
+
+| Question | Answer |
+|---|---|
+| TLS 1.2 handshake with `api.github.com` | **Yes**, ~2.3 s to headers |
+| Is the shim's `User-Agent` accepted? | **Yes** — a refused UA answers 403, and this was 200 |
+| Size of `/releases/latest` | **3433 bytes** on the wire, **10012 decoded** |
+
+So the JSON parser can hold a document rather than stream it. Note what that number implies for the
+full list: `/releases` returns 30 by default, so ~300 KB decoded — a provider that wants more than the
+latest release must send `per_page`.
+
+### Three findings from three failures, in order
+
+**`-18` is `KErrNotReady`, and it means the session, not the transport.** `Bearer` up is not enough:
+`Fetch::start` only issues the GET, and `Http::open(bearer.handle())` is a separate call. Missing it
+reports as a network failure right after `bearer up`, which reads exactly like a TLS problem. See
+`apps/httpprobe`'s `fn begin`, which is where the two steps are done together.
+
+**404 is a content answer, not a transport one.** `pizzaria-foundation/home` is not public yet. Worth
+naming because a 404 arrives *after* a successful handshake and can be misread as "GitHub does not
+work here" — the handshake closing is the thing that was in doubt, and it closed.
+
+**A body read with `Http::read` is still compressed.** The first successful run printed 512 dots.
+Whether bytes need inflating is a property of the *response*, settled only when the transaction ends,
+so `Body` holds them and `Body::decode_to(flags, max, sink)` decides afterwards. Reading raw and
+parsing would have sent a gzip stream to a JSON parser and the hunt would have started in the parser.
+
+The probe reads its target from `C:\Data\ghprobe.txt` (one line, `owner/repo`, and a pasted
+`https://github.com/owner/repo` is trimmed), and saves the decoded body to `C:\Data\ghprobe.json` —
+so the parser's fixture is a real payload with real `author` blocks and `node_id`s rather than one
+written by the same person who writes the parser.

@@ -1,0 +1,12 @@
+    90  [startprobe] first sweep at uptime 69828 ms: state=109 k01=! k02=! k11=! k31=! k42=100 k43=101 k45=106 lock=1
+ 16674  [startprobe] 86501 ms state=109 k01=! k02=! k11=! k31=! k42=100 k43=101 k45=106 lock=1
+ 33111  [startprobe] 102939 ms state=109 k01=! k02=! k11=! k31=! k42=100 k43=101 k45=106 lock=1
+ 49363  [startprobe] 119191 ms state=109 k01=! k02=! k11=! k31=! k42=100 k43=101 k45=106 lock=1
+ 65689  [startprobe] 135517 ms state=109 k01=! k02=! k11=! k31=! k42=100 k43=101 k45=106 lock=1
+ 81939  [startprobe] 151767 ms state=109 k01=! k02=! k11=! k31=! k42=100 k43=101 k45=106 lock=1
+ 98204  [startprobe] 168032 ms state=109 k01=! k02=! k11=! k31=! k42=100 k43=101 k45=106 lock=1
+114454  [startprobe] 184282 ms state=109 k01=! k02=! k11=! k31=! k42=100 k43=101 k45=106 lock=1
+130720  [startprobe] 200548 ms state=109 k01=! k02=! k11=! k31=! k42=100 k43=101 k45=106 lock=1
+146970  [startprobe] 216798 ms state=109 k01=! k02=! k11=! k31=! k42=100 k43=101 k45=106 lock=1
+163220  [startprobe] 233048 ms state=109 k01=! k02=! k11=! k31=! k42=100 k43=101 k45=106 lock=1
+170532  [startprobe] done at 240360 ms after 418 sweeps: state=109 k01=! k02=! k11=! k31=! k42=100 k43=101 k45=106 lock=1

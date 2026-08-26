@@ -182,3 +182,8 @@ guessing:
 Those last two exist because guessing was wrong every time it was tried. There is a list
 of what the hardware actually turned out to do in [device notes](device-notes.md), and it
 is worth reading before debugging anything.
+
+If what you are building runs during a boot — a home screen, a daemon, anything started early —
+read [boot states](boot-states.md) first. The platform publishes exactly where it is in its own
+start-up, the enum is not in this SDK, and every timeout anyone reached for instead of reading it
+turned out to be wrong on some real boot.

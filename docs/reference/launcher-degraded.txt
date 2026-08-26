@@ -1,0 +1,86 @@
+    53  [launcher] new: settings read
+    88  [launcher] new: resident=true
+    95  [launcher] new: roster=0
+   118  [launcher] new: recents+props done
+   150  [launcher] daemon e0aa0002 spawn rc=Ok(())
+   165  [launcher] daemon e0aa0003 spawn rc=Ok(())
+   189  [launcher] daemon e0aa0005 spawn rc=Ok(())
+   223  [launcher] daemon e0aa0011 spawn rc=Ok(())
+   242  [launcher] idle uid before=Err(AccessDenied)
+   399  [launcher] idle uid claim rc=Ok(()) after=Err(AccessDenied)
+   462  [launcher] new: daemons done
+   604  [launcher] unread -1 -> 0
+   647  [launcher] roster read returned nothing; keeping the old one
+   733  [launcher] new: constructed at uptime 9555 ms, system state Ok(104), resident=true
+  1195  [launcher] fg race 1 at age 724 ms rc=Ok(()) foreground=true
+  2367  [launcher] start_icon_build ready=true on=true candidates=5
+  2404  [launcher] outstanding=0
+  8667  [launcher] fg race 2 at age 8191 ms rc=Ok(()) foreground=true
+  8671  [launcher] splash done at 8200 ms (roster ready=true) fg=Ok(())
+  9378  [launcher] fg race 3 at age 8906 ms rc=Ok(()) foreground=true
+ 10113  [launcher] fg race 4 at age 9642 ms rc=Ok(()) foreground=true
+ 10830  [launcher] fg race 5 at age 10359 ms rc=Ok(()) foreground=true
+ 11568  [launcher] fg race 6 at age 11097 ms rc=Ok(()) foreground=true
+ 12427  [launcher] fg race 7 at age 11955 ms rc=Ok(()) foreground=true
+ 13158  [launcher] fg race 8 at age 12687 ms rc=Ok(()) foreground=true
+ 13952  [launcher] fg race 9 at age 13481 ms rc=Ok(()) foreground=true
+ 14675  [launcher] fg race 10 at age 14204 ms rc=Ok(()) foreground=true
+ 15394  [launcher] fg race 11 at age 14922 ms rc=Ok(()) foreground=true
+ 16164  [launcher] fg race 12 at age 15692 ms rc=Ok(()) foreground=true
+ 16877  [launcher] fg race 13 at age 16406 ms rc=Ok(()) foreground=true
+ 17596  [launcher] fg race 14 at age 17125 ms rc=Ok(()) foreground=true
+ 18318  [launcher] fg race 15 at age 17844 ms rc=Ok(()) foreground=true
+ 19036  [launcher] fg race 16 at age 18565 ms rc=Ok(()) foreground=true
+ 19755  [launcher] fg race 17 at age 19281 ms rc=Ok(()) foreground=true
+ 20514  [launcher] fg race done: 17 claims, age 20043 ms, uptime 29341 ms, foreground=true
+ 60558  [launcher] boot vouched, safe-mode counter cleared rc=Ok(())
+     2  [launcher] new: settings read
+    42  [launcher] new: resident=true
+    49  [launcher] new: roster=0
+    63  [launcher] new: recents+props done
+    77  [launcher] daemon e0aa0002 spawn rc=Ok(())
+    90  [launcher] daemon e0aa0003 spawn rc=Ok(())
+   111  [launcher] daemon e0aa0005 spawn rc=Ok(())
+   127  [launcher] daemon e0aa0011 spawn rc=Ok(())
+   143  [launcher] idle uid before=Err(NotFound)
+   317  [launcher] idle uid claim rc=Err(NotFound) after=Err(NotFound)
+   338  [launcher] new: daemons done
+   403  [launcher] unread -1 -> 0
+   436  [launcher] roster read returned nothing; keeping the old one
+   448  [launcher] new: constructed at uptime 8493 ms, system state Some(107) sub=Ok(()), resident=true
+  1062  [launcher] fg race 1 at age 716 ms rc=Ok(()) foreground=true
+  1783  [launcher] fg race 2 at age 1438 ms rc=Ok(()) foreground=true
+  1846  [launcher] start_icon_build ready=true on=true candidates=5
+  1855  [launcher] outstanding=0
+  2502  [launcher] fg race 3 at age 2157 ms rc=Ok(()) foreground=true
+  3228  [launcher] fg race 4 at age 2882 ms rc=Ok(()) foreground=true
+  3940  [launcher] fg race 5 at age 3594 ms rc=Ok(()) foreground=true
+  4658  [launcher] fg race 6 at age 4313 ms rc=Ok(()) foreground=true
+  5377  [launcher] fg race 7 at age 5032 ms rc=Ok(()) foreground=true
+  5644  [launcher] splash done at 5298 ms (roster ready=true) fg=Ok(())
+  6097  [launcher] fg race 8 at age 5751 ms rc=Ok(()) foreground=true
+  6814  [launcher] fg race 9 at age 6469 ms rc=Ok(()) foreground=true
+  7533  [launcher] fg race 10 at age 7188 ms rc=Ok(()) foreground=true
+  8252  [launcher] fg race 11 at age 7907 ms rc=Ok(()) foreground=true
+  8972  [launcher] fg race 12 at age 8626 ms rc=Ok(()) foreground=true
+ 10032  [launcher] fg race 13 at age 9681 ms rc=Ok(()) foreground=true
+ 10736  [launcher] fg race 14 at age 10391 ms rc=Ok(()) foreground=true
+ 11457  [launcher] fg race 15 at age 11112 ms rc=Ok(()) foreground=true
+ 12225  [launcher] fg race 16 at age 11876 ms rc=Ok(()) foreground=true
+ 12940  [launcher] fg race 17 at age 12594 ms rc=Ok(()) foreground=true
+ 13663  [launcher] fg race 18 at age 13313 ms rc=Ok(()) foreground=true
+ 14384  [launcher] fg race 19 at age 14039 ms rc=Ok(()) foreground=true
+ 15148  [launcher] fg race 20 at age 14798 ms rc=Ok(()) foreground=true
+ 15861  [launcher] fg race 21 at age 15516 ms rc=Ok(()) foreground=true
+ 16632  [launcher] fg race 22 at age 16282 ms rc=Ok(()) foreground=true
+ 17347  [launcher] fg race 23 at age 17001 ms rc=Ok(()) foreground=true
+ 18065  [launcher] fg race 24 at age 17719 ms rc=Ok(()) foreground=true
+ 18784  [launcher] fg race 25 at age 18438 ms rc=Ok(()) foreground=true
+ 19502  [launcher] fg race 26 at age 19157 ms rc=Ok(()) foreground=true
+ 20226  [launcher] fg race 27 at age 19876 ms rc=Ok(()) foreground=true
+ 20965  [launcher] fg race done: 27 claims, age 20620 ms, uptime 29011 ms, foreground=true
+ 39146  [launcher] system state Some(107) -> 114 at uptime 47192 ms, claims=0 action=Ignore (early_rule=false clock_rule=false)
+ 48952  [launcher] system state Some(114) -> 104 at uptime 56998 ms, claims=0 action=Ignore (early_rule=false clock_rule=false)
+ 52072  [launcher] system state Some(104) -> 109 at uptime 60095 ms, claims=0 action=TakeForeground (early_rule=true clock_rule=true)
+ 52080  [launcher] state claim 1 rc=Ok(())
+ 68978  [launcher] boot vouched, safe-mode counter cleared rc=Ok(())

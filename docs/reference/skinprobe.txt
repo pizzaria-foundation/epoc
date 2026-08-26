@@ -1,0 +1,123 @@
+skinprobe on the Nokia E72-2, default theme, 2026-08-25
+=======================================================
+
+What was asked
+--------------
+Can an application read the colours of the theme the *user* chose, and is there enough there to
+build a palette from?
+
+Answer: yes to the first, and yes to the second — but only after measuring the whole set. The first
+reading of this data said "no" and was wrong; see "The mistake" at the bottom.
+
+Does it link and run
+--------------------
+Yes. `aknskins` is not in the base library set, and on Symbian an import that does not resolve makes
+the image silently never load — so this was the question the probe existed for.
+
+    AKNSKINS{000a0000}[10005a26].DLL   present in the .exe import table (14 DLLs, 297 imports)
+    app opens, draws, and answers keys
+    AknsUtils::SkinInstance()          non-null (every read succeeded)
+    capability                         none
+    binary                             skinprobe.exe 142300 bytes
+
+`shim_app.cpp` already constructs the app UI with `CAknAppUi::EAknEnableSkin`, which is what creates
+the per-application skin instance. Nothing extra was needed for that.
+
+The colour tables
+-----------------
+major = 0x10005a26 (EAknsMajorSkin). Probed 0..63 per table; "first gap" is the first index that
+answered KErrNotFound.
+
+    table                   minor    filled   first gap
+    QsnComponentColors      0x3000    25/64    25
+    QsnIconColors           0x3200    29/64    29
+    QsnTextColors           0x3300    64/64    none
+    QsnLineColors           0x3400    14/64    14
+    QsnOtherColors          0x3500    15/64    15
+    QsnHighlightColors      0x3600     3/64     3
+
+    total                             150 colours, identical across three runs
+
+Two things about that table are findings in their own right:
+
+**The text table has no detectable end.** It answered every index 0..63, and `AknsConstants.h`
+documents only up to `EAknsCIQsnTextColorsCG63 = 62`. So the platform answers past its own
+documented range, and "where does this table stop" cannot be learned by asking. An earlier run of
+this probe capped at 40 and reported "40 of 40 filled, first gap -1", which reads as a full table and
+was really a short ruler.
+
+**QsnHighlightColors has three entries**, and they are 0x000000, 0x000000, 0xfffdff. Those are the
+*text* colours for a selected row, not the band's fill. The band itself is furniture, not a colour.
+
+Where the hue is
+----------------
+21 distinct colours across all six tables. 13 are neutral (black, white, greys); **8 carry hue**, and
+they are exactly the seeds a palette needs:
+
+    colour      r    g    b   spread  where                             reads as
+    0x0099cc    0  153  204     204   QsnOtherColors[8]                 accent (saturated cyan-blue)
+    0x6699ff  102  153  255     153   QsnLineColors[13]                 a lighter blue — links, focus
+    0x751001  117   16    1     116   QsnComponentColors[24]            warn / error (dark red)
+    0x4b5879   75   88  121      46   QsnTextColors[62]                 chrome (blue-grey)
+    0x87acb2  135  172  178      43   QsnTextColors[63]                 pale blue-grey
+    0x281905   40   25    5      35   QsnTextColors[27], [30]           dark brown/amber
+    0x030510    3    5   16      13   QsnComponentColors[18,20],        page (near-black, blue cast)
+                                      QsnTextColors[19,24,26,50]
+    0x141620   20   22   32      12   QsnIconColors[10,18],             a step up from the page
+                                      QsnTextColors[28], QsnLineColors[12]
+
+    neutral: 0x000000 0x000003 0x666666 0x797979 0x979797 0xafafaf 0xc0c0c0 0xc9c9c9 0xcccccc
+             0xf6f7f7 0xfffdff 0xfffffe 0xffffff
+
+Note that the *most useful* hues sit at QsnTextColors 62 and 63 — past the last index the header
+documents. A palette derived from the documented range only would have found nothing but greys.
+
+What is NOT reachable
+---------------------
+The theme's background images. Three routes, all closed:
+
+    AknsUtils::GetCachedBitmap(skin, id)      returns NULL for QsnBgScreen (0x1000),
+                                              QsnBgAreaStatus (0x1010), QsnBgAreaControl (0x1020)
+                                              and QsnBgAreaMain (0x1100) — all four refused -1.
+                                              The name is honest: it reads a cache, and nothing in
+                                              this process had cached them.
+
+    AknsDrawUtils::Background(...)            takes a CWindowGc, so it can only draw into a window.
+                                              There is no off-screen sampling path through it.
+
+    AknsUtils::CreateMaskedBitmapL(...)       exported, and returns a CApaMaskedBitmap*. NOT tried:
+                                              this handset has an unresolved panic in
+                                              CApaMaskedBitmap creation, recorded from the app-icon
+                                              work. Not worth walking into for a colour we can get
+                                              another way.
+
+So the shim's `shim_skin_samples` exists and works, and on this handset every background it is
+pointed at is absent. Kept rather than deleted: the finding is "these four IDs are not cached", not
+"sampling is impossible", and a theme that ships bitmaps would answer.
+
+Reproducing
+-----------
+    epoc build apps/skinprobe
+    epoc sideload apps/skinprobe/build/skinprobe.sis      # first time only, for the registration
+    epoc sh --push apps/skinprobe/build/skinprobe.exe 'C:\sys\bin'   # afterwards
+    epoc sh 'exec C:\sys\bin\skinprobe.exe'
+    epoc logs skinprobe
+
+On screen: Left/Right change table, Up/Down scroll, each row shows a swatch beside its hex so a
+disagreement between the two would be visible. The log holds all six tables and all four
+backgrounds, refusals included.
+
+Still owed: whether these values change when the user changes the theme. That needs a human to
+change it in Settings and re-run.
+
+The mistake
+-----------
+The first reading of this data concluded "every table is greys — an S60 theme keeps its hue in its
+bitmaps, not its colour table", and a paragraph to that effect was written into `shim_skin.cpp`
+before it was checked. It came from looking at the first eight entries of each table, where the
+answer genuinely is white, black and grey.
+
+Measuring the whole set said the opposite. The hue is there; it is just not at the front, and two of
+the four seeds live past the last index the SDK header documents. The lesson is the same one this
+session kept relearning: an instrument that samples the head of a range reports the head of the
+range, and it does not fail while doing it.
