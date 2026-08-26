@@ -146,6 +146,7 @@ static UI_EMOJI: &[u8] = include_bytes!("../../symbian-ui/assets/uiemoji11.sbf")
 /// caller that picks a file by name instead would drift from the toolkit the first time either
 /// changed.
 /// Which palette this phone's applications use. See the module docs.
+pub mod lang_pref;
 pub mod theme_pref;
 
 pub mod atlas {
@@ -176,12 +177,13 @@ pub mod atlas {
 /// recognise — including the error the host stub returns — onto English, so this cannot leave an
 /// application with no language at all.
 ///
-/// # It does not read a preference yet
+/// # An application that wants its own
 ///
-/// Only the system setting. A `lang.pref` beside `theme.pref`, letting the launcher pin a language
-/// for every application, is the next step and belongs here rather than at any call site.
+/// This passes [`lang_pref::Choice::Follow`], which is what almost every application wants: the
+/// launcher's choice, or the phone's if there is none. An application with a language setting of its
+/// own calls [`lang_pref::load_system`] again with its own choice, after this has run.
 pub fn adopt_language() {
-    symbian_ui::lang::set(symbian::locale::language());
+    lang_pref::load_system(lang_pref::Choice::Follow);
 }
 
 pub fn with_theme<R>(palette: Palette, f: impl FnOnce(&Theme<'_>) -> R) -> R {
