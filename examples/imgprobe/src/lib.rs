@@ -604,7 +604,7 @@ mod tests {
                 continue;
             }
             let m = SAMPLE_JPEG[i + 1];
-            if matches!(m, 0xC0 | 0xC1 | 0xC2) {
+            if matches!(m, 0xC0..=0xC2) {
                 sof = Some(m);
                 break;
             }

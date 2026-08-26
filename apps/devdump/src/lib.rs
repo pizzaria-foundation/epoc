@@ -38,7 +38,6 @@ use alloc::string::String;
 
 use symbian::fs::ShimFs;
 use symbian::process::ShimProcs;
-use symbian_sys;
 use symbian_ui::{chrome, App, Canvas, Handled, Key, KeyEvent, Point, Rect, Softkey, Theme};
 
 pub mod dlls;
@@ -334,16 +333,20 @@ mod tests {
         // handed us one.
         app.ticker = Some(7);
 
-        let mut ev = symbian_ui::RawEvent::default();
-        ev.kind = symbian_sys::SHIM_EV_TIMER;
-        ev.handle = 7;
+        let ev = symbian_ui::RawEvent {
+            kind: symbian_sys::SHIM_EV_TIMER,
+            handle: 7,
+            ..Default::default()
+        };
         assert_eq!(app.handle_raw(&ev), Handled::Consumed, "the tick must repaint");
 
         // A timer belonging to something else must not drive the machine: another timer in
         // the process would otherwise advance the run at its own rate.
-        let mut other = symbian_ui::RawEvent::default();
-        other.kind = symbian_sys::SHIM_EV_TIMER;
-        other.handle = 99;
+        let other = symbian_ui::RawEvent {
+            kind: symbian_sys::SHIM_EV_TIMER,
+            handle: 99,
+            ..Default::default()
+        };
         assert_eq!(app.handle_raw(&other), Handled::Ignored);
     }
 

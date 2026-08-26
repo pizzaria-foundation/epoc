@@ -1,0 +1,24 @@
+[package]
+name = "httpprobe"
+description = "A Symbian application"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+symbian-ui = { path = "../../crates/symbian-ui" }
+symbian-gfx = { path = "../../crates/symbian-gfx" }
+symbian-sys = { path = "../../crates/symbian-sys" }
+symbian = { path = "../../crates/symbian" }
+symbian-report = { path = "../../crates/symbian-report" }
+symbian-crypto = { path = "../../crates/symbian-crypto" }
+symbian-app = { path = "../../crates/symbian-app" }
+
+
+# Host-only. The simulator pulls in a windowing library, which has no business anywhere
+# near the device build — keeping it here means it never gets there.
+[dev-dependencies]
+symbian-sim = { path = "../../crates/symbian-sim" }
+# `testing` gives you a Theme and a Canvas in one call, so a test of handle_key or draw is
+# three lines rather than twenty of byte-packing a font atlas.
+symbian-ui = { path = "../../crates/symbian-ui", features = ["testing"] }

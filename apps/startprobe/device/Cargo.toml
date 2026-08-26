@@ -1,0 +1,25 @@
+# Its own workspace root, like every other device crate here: a crate that defines
+# #[panic_handler] cannot be built for the host at all.
+[workspace]
+
+[package]
+name = "startprobe-device"
+description = "Device entry point for startprobe"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["staticlib"]
+
+[dependencies]
+startprobe = { path = ".." }
+symbian-app = { path = "../../../crates/symbian-app" }
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true
+debug = false
+overflow-checks = false

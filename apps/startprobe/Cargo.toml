@@ -1,0 +1,13 @@
+[package]
+name = "startprobe"
+description = "Samples the platform's startup/system-state properties across a boot"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+symbian = { path = "../../crates/symbian" }
+# For SHIM_EV_TIMER, to tell our own timer's completion from any other event.
+symbian-sys = { path = "../../crates/symbian-sys" }
+# For the DaemonApp trait the headless entry point drives.
+symbian-app = { path = "../../crates/symbian-app" }

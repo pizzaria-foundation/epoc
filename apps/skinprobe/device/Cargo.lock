@@ -3,21 +3,19 @@
 version = 4
 
 [[package]]
-name = "netprobe"
+name = "skinprobe"
 version = "0.1.0"
 dependencies = [
  "symbian",
- "symbian-crypto",
  "symbian-gfx",
- "symbian-sys",
  "symbian-ui",
 ]
 
 [[package]]
-name = "netprobe-device"
+name = "skinprobe-device"
 version = "0.1.0"
 dependencies = [
- "netprobe",
+ "skinprobe",
  "symbian-app",
 ]
 

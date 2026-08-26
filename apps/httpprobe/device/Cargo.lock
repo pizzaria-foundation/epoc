@@ -3,21 +3,23 @@
 version = 4
 
 [[package]]
-name = "netprobe"
+name = "httpprobe"
 version = "0.1.0"
 dependencies = [
  "symbian",
+ "symbian-app",
  "symbian-crypto",
  "symbian-gfx",
+ "symbian-report",
  "symbian-sys",
  "symbian-ui",
 ]
 
 [[package]]
-name = "netprobe-device"
+name = "httpprobe-device"
 version = "0.1.0"
 dependencies = [
- "netprobe",
+ "httpprobe",
  "symbian-app",
 ]
 
@@ -51,6 +53,13 @@ version = "0.1.0"
 [[package]]
 name = "symbian-keys"
 version = "0.1.0"
+
+[[package]]
+name = "symbian-report"
+version = "0.1.0"
+dependencies = [
+ "symbian",
+]
 
 [[package]]
 name = "symbian-sys"

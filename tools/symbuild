@@ -65,6 +65,19 @@ source "$APP/app.conf"
 # cargo feature precisely so no app has to declare anything for this to work.
 : "${DEBUG:=0}"
 : "${CXX_SOURCES:=}"
+# C_SOURCES, separate from CXX_SOURCES, because the two need different compilers and
+# different header sets — not as a convenience.
+#
+# It exists for the NetSurf libraries and it is not optional there: their public headers
+# are C99 and are not C++-safe. libdom names a parameter `namespace` in six of its event
+# headers, and libcss declares `const css_computed_style *restrict parent`. Both are hard
+# syntax errors under g++, and neither is fixable from the outside — patching them would
+# be a permanent divergence from upstream in a header, which is the worst place to keep one.
+#
+# So the rule this key enforces is: C++ never includes a NetSurf header. A file that wants
+# both worlds is two files with a hand-written C ABI between them, which is the same
+# boundary the eventual Rust binding will use. apps/netsurfprobe is the worked example.
+: "${C_SOURCES:=}"
 # Off by default: the dev handset has a patched installserver.
 : "${SIGN:=0}"
 # Publish & Subscribe is on by default: the entry! runtime publishes present/step
@@ -161,6 +174,14 @@ if [ "${USE_RECOG:-0}" = 1 ]; then
   echo "--> recog base: $(( ${#RECOG_SRCS[@]} )) sources from shim/recog/src"
 fi
 
+# USE_HTTP needs shim_net.cpp: the HTTP session is bound to the bearer that file owns, through
+# ShimNetBearer. Implied rather than required of the caller, because an app.conf that asked for HTTP
+# and forgot the networking flag would fail at link with an undefined symbol — a diagnosable failure,
+# but one nobody should have to diagnose twice.
+if [ "${USE_HTTP:-0}" = 1 ]; then
+  USE_NET=1
+fi
+
 if [ "${USE_SHIM:-0}" = 1 ]; then
   NET_LIBS=""
   if [ "${USE_NET:-0}" = 1 ]; then
@@ -183,6 +204,14 @@ if [ "${USE_SHIM:-0}" = 1 ]; then
     # taken by an isolated probe first and never by a resident launcher that has not proven it.
     SYMBIAN_LIBS="$SYMBIAN_LIBS aknicon"
   fi
+  if [ "${USE_SKIN:-0}" = 1 ]; then
+    # aknskins is AknsUtils -- the phone's own theme colour table. Same standing as aknicon above and
+    # for the same reason: NOT in the base set, no other feature needs it, and an import that does not
+    # resolve makes the image vanish silently rather than fail. aknskins.dll is present on the E72
+    # (measured, docs/device-dump.txt) and the mangled GetCachedColor export was read out of
+    # aknskins.dso, but the gate stays so the risk is taken by apps/skinprobe first.
+    SYMBIAN_LIBS="$SYMBIAN_LIBS aknskins"
+  fi
   if [ "${USE_CLIPBOARD:-0}" = 1 ]; then
     # bafl is CClipboard, etext is CPlainText. The clipboard is a stream store on disk and the
     # document is what Paste knows how to read, so both are needed to put text somewhere another
@@ -196,6 +225,22 @@ if [ "${USE_SHIM:-0}" = 1 ]; then
     # mediaclientaudio is CMdaAudioPlayerUtility. Playback needs no capability: the
     # SDK's own CLFExample links this and ships `capability none`.
     SYMBIAN_LIBS="$SYMBIAN_LIBS mediaclientaudio"
+  fi
+  if [ "${USE_CELL:-0}" = 1 ]; then
+    # etel3rdparty is CTelephony. Its own gate rather than part of USE_LBS: an application that
+    # wants a GPS fix has no use for the serving tower, and an import it does not need is a load
+    # risk it should not carry. Reading network info needs no protected capability.
+    SYMBIAN_LIBS="$SYMBIAN_LIBS etel3rdparty"
+  fi
+  if [ "${USE_LBS:-0}" = 1 ]; then
+    # lbs is RPositionServer and RPositioner -- the Location Acquisition API. Unlike
+    # mediaclientaudio this needs a capability, and a protected one: Location. This handset
+    # grants it (apps/devdump's caps probe measured all twenty), and a stock phone would refuse
+    # to install an unsigned package declaring it.
+    #
+    # lbs.dll loads on this handset -- the devdump sweep says so -- which is a stronger statement
+    # than the DLL merely being present. See apps/gpsprobe for whether it also answers.
+    SYMBIAN_LIBS="$SYMBIAN_LIBS lbs"
   fi
   if [ "${USE_SQL:-0}" = 1 ]; then
     # sqldb is RSqlDatabase and RSqlStatement -- Symbian SQL, which is SQLite behind a
@@ -280,11 +325,58 @@ if [ "${USE_TLS:-0}" = 1 ]; then
   SYMBIAN_LIBS="${SYMBIAN_LIBS:-euser} ssl securesocket esock insock commdb netmeta"
 fi
 
+# HTTP through the platform's own stack (shim_http.cpp) — asynchronous, and the one route that is
+# safe on the GUI thread.
+#
+#   http           RHTTPSession, RHTTPTransaction, the response and header classes
+#   inetprotutil   TUriParser8 — how a URL is handed to the stack
+#   bafl           RStringPool and RStringF. NOT inetprotutil, which is where they look like they
+#                  live: every header field name and method goes through the pool, so leaving this
+#                  out is a wall of undefined RStringPool references and nothing else.
+#
+# Three, and deliberately no more. `ssl` and `securesocket` are NOT here even though an https URL
+# goes through CSecureSocket — the stack loads that itself at runtime, so linking them adds imports
+# this binary never calls. Measured: they were in this list, and the linker dropped both for want of
+# a single reference. An unnecessary import is not free on this platform; it is one more DLL that has
+# to be present or the application vanishes with no panic and no log.
+#
+# The socket libraries are not here either: the bearer belongs to shim_net.cpp, and USE_HTTP implies
+# USE_NET, which brings them.
+if [ "${USE_HTTP:-0}" = 1 ]; then
+  SYMBIAN_LIBS="${SYMBIAN_LIBS:-euser} http inetprotutil bafl"
+fi
+
 # zlib, for reading a gzip file in pieces (shim_gzip.cpp). The platform's own libz.dll — it loads on
 # the device with `inflate` resolving (docs/device-dump.txt) — not a vendored copy. Worth having
 # whenever a feed is fetched compressed: one measured calendar is 17.4 MB of text and 1.65 MB gzipped.
 if [ "${USE_ZLIB:-0}" = 1 ]; then
   SYMBIAN_LIBS="${SYMBIAN_LIBS:-euser} libz"
+fi
+
+# The five vendored NetSurf MIT libraries — libwapcaplet, libparserutils, libhubbub, libdom,
+# libcss. Built by tools/build-netsurf into static archives and linked in below; see
+# vendor/netsurf-symbian/README.md.
+#
+# One import, and it is the whole of R1 in docs/plan-browser.md: `libc`. The five archives
+# leave 29 symbols undefined between them. Five are libgcc's division helpers
+# (__aeabi_idiv, __aeabi_idivmod, __aeabi_uidiv, __aeabi_uidivmod, __aeabi_ldivmod) and the
+# link line already carries -lgcc. The other 24 are Open C, and libc.dso exports every one:
+#
+#   abs bsearch calloc __errno free iconv iconv_close iconv_open malloc memcmp memcpy
+#   memmove memset realloc snprintf strdup strlen strncasecmp strncmp strncpy strtol
+#   strtoul time tolower
+#
+# Measured with `nm -D sdk/epoc32/release/armv5/lib/libc.dso`, and libc.dll loads on the
+# handset (docs/device-notes.md:799). So R1's plan B — a minimal libc over User::Alloc — is
+# not needed: no shim, no gap, nothing to write.
+#
+# iconv is in that list because libparserutils' input filter uses it for any charset its five
+# built-in codecs (UTF-8, UTF-16, ASCII, 8859-*, ext8) do not cover. Upstream's escape hatch is
+# -DWITHOUT_ICONV_FILTER; we do not take it, because the symbol resolves. Whether the handset's
+# iconv actually has the conversion *tables* for, say, Shift_JIS is a runtime question and no
+# link-time flag answers it — the honest place to find out is a page in that charset.
+if [ "${USE_NETSURF:-0}" = 1 ]; then
+  SYMBIAN_LIBS="${SYMBIAN_LIBS:-euser} libc"
 fi
 
 # Bluetooth. Six libraries, and the heaviest import set any flag in this file adds:
@@ -364,7 +456,14 @@ if [ -f "$APP/api.conf" ]; then
   # Telegram error message on an app that has nothing to do with Telegram.
   : "${TG_API_ID:=}"
   : "${TG_API_HASH:=}"
-  export TG_API_ID TG_API_HASH
+  # A geolocation service token, for an app that looks a cell tower up online. Same treatment and
+  # same reason as the Telegram pair: sourced rather than baked in, so a tree with no api.conf
+  # still builds and the app says it is not configured instead of failing to compile.
+  : "${GEO_TOKEN:=}"
+  export TG_API_ID TG_API_HASH GEO_TOKEN
+  if [ -n "$GEO_TOKEN" ]; then
+    echo "--> geolocation token: configured"
+  fi
   if [ -n "$TG_API_ID" ]; then
     echo "--> api credentials: id $TG_API_ID"
   fi
@@ -413,7 +512,13 @@ if [ -n "$RUST_CRATE" ]; then
   fi
   CARGO_FEATURES=()
   [ -n "$FEATS" ] && CARGO_FEATURES=(--features "$FEATS")
+  # The package identity, handed to the crate so `symbian::pkg::stamp` can write which version is
+  # running without anybody restating it in Rust. app.conf is the single source: a stamp that
+  # disagreed with the package that installed it would be worse than no stamp at all, and the only
+  # way to guarantee it cannot is to never type the number twice.
   ( cd "$APP/$RUST_CRATE" && \
+    SYMBIAN_APP_UID3="$UID3" \
+    SYMBIAN_APP_VERSION="$VERSION" \
     cargo +nightly build --release \
       -Zjson-target-spec \
       -Zbuild-std=core,alloc \
@@ -460,6 +565,28 @@ if [ -n "${MTM_UI_RESOURCE:-}" ]; then
   UI_RSG_DIR="$(dirname "$APP/$MTM_UI_RESOURCE")"
 fi
 
+# --------------------------------------------------- 1b. the NetSurf C libraries
+# Not compiled here, and that is the point: 444 translation units built with the
+# app would be 17 s added to every build of every app that parses HTML. They go to
+# static archives under vendor/, keyed on nothing app-specific, and this call is a
+# no-op once they exist. See tools/build-netsurf for the include-order argument,
+# which is the only genuinely delicate part of the recipe.
+NETSURF_ARCHIVES=()
+NETSURF_INC=()
+if [ "${USE_NETSURF:-0}" = 1 ]; then
+  NETSURF_DIR="$SDK/vendor/netsurf-symbian"
+  [ -d "$NETSURF_DIR" ] || {
+    echo "USE_NETSURF=1 but $NETSURF_DIR is missing." >&2
+    echo "vendor/ is not tracked; see vendor/netsurf-symbian/README.md for what to fetch." >&2
+    exit 1
+  }
+  EPOCROOT="$EPOCROOT" "$SDK/tools/build-netsurf"
+  for l in libwapcaplet libparserutils libhubbub libdom libcss; do
+    NETSURF_ARCHIVES+=("$NETSURF_DIR/build/armv5/$l.a")
+    NETSURF_INC+=(-I"$NETSURF_DIR/$l/include")
+  done
+fi
+
 # ------------------------------------------------------------------ 2. C++
 # Sources are gathered from two places: the app's own (relative to app.conf, so
 # app.conf stays portable) and the shared shim (USE_SHIM=1). An app that only
@@ -491,6 +618,15 @@ fi
 # a bare CActiveScheduler, no Avkon, no framebuffer — so shim_app.cpp and shim_gfx.cpp are
 # swapped out. Everything else (timers, net, files, P&S) is the same active-object machinery
 # either way. Exactly one of the two flags is set.
+# Stated as an invariant just above, so it is checked rather than trusted. Setting both does not
+# fail cleanly: shim_app.cpp comes in for USE_SHIM while shim_gfx.cpp is dropped for the daemon, and
+# the result is a wall of undefined CShimSurface references that says nothing about the cause.
+if [ "${USE_SHIM:-0}" = 1 ] && [ "${USE_SHIM_DAEMON:-0}" = 1 ]; then
+  echo "app.conf sets both USE_SHIM and USE_SHIM_DAEMON; they are the two entry points and" >&2
+  echo "exactly one may be set. USE_SHIM is the GUI application, USE_SHIM_DAEMON the headless one." >&2
+  exit 1
+fi
+
 if [ "${USE_SHIM:-0}" = 1 ] || [ "${USE_SHIM_DAEMON:-0}" = 1 ]; then
   for src in "$SDK"/shim/src/*.cpp; do
     case "$(basename "$src")" in
@@ -574,8 +710,23 @@ if [ "${USE_SHIM:-0}" = 1 ] || [ "${USE_SHIM_DAEMON:-0}" = 1 ]; then
       shim_image.cpp)
         [ "${USE_IMAGE:-0}" = 1 ] || continue
         ;;
+      # Same again: ungated, this file would compile into every shim app and every one of them would
+      # need aknskins on the link line to resolve AknsUtils.
+      shim_skin.cpp)
+        [ "${USE_SKIN:-0}" = 1 ] || continue
+        ;;
       shim_audio.cpp)
         [ "${USE_AUDIO:-0}" = 1 ] || continue
+        ;;
+      # The Location Acquisition API. Same gate and same reason as the two above: the source
+      # references RPositionServer, so it can only be compiled where lbs.dso is on the link line.
+      shim_lbs.cpp)
+        [ "${USE_LBS:-0}" = 1 ] || continue
+        ;;
+      # The serving cell tower, through CTelephony. Same gate rule as the rest: the source
+      # references CTelephony, so it can only be compiled where etel3rdparty.dso is linked.
+      shim_cell.cpp)
+        [ "${USE_CELL:-0}" = 1 ] || continue
         ;;
       # Same gate as the audio and image files: the source references RSqlDatabase, so it
       # can only be compiled where sqldb.dso is on the link line.
@@ -627,6 +778,11 @@ if [ "${USE_SHIM:-0}" = 1 ] || [ "${USE_SHIM_DAEMON:-0}" = 1 ]; then
       # HTTPS via the vendored mbedTLS port. Blocking (WaitForRequest) — headless helpers only.
       shim_tls.cpp)
         [ "${USE_TLS:-0}" = 1 ] || continue
+        ;;
+      # HTTP through the platform stack. Asynchronous, so unlike shim_tls beside it this one is
+      # safe from a GUI pump — which is why the browser is built on this and not on that.
+      shim_http.cpp)
+        [ "${USE_HTTP:-0}" = 1 ] || continue
         ;;
       # Inflating a gzip file a chunk at a time. Synchronous CPU work: no worker thread, safe from
       # a daemon's pump, unlike shim_tls beside it.
@@ -680,7 +836,10 @@ if [ ${#SRCS[@]} -gt 0 ]; then
       ${USE_NET:+$([ "$USE_NET" = 1 ] && echo -DSHIM_USE_NET)} \
       ${USE_FEP:+$([ "$USE_FEP" = 1 ] && echo -DSHIM_USE_FEP)} \
       ${USE_IMAGE:+$([ "$USE_IMAGE" = 1 ] && echo -DSHIM_USE_IMAGE)} \
+      ${USE_SKIN:+$([ "$USE_SKIN" = 1 ] && echo -DSHIM_USE_SKIN)} \
       ${USE_AUDIO:+$([ "$USE_AUDIO" = 1 ] && echo -DSHIM_USE_AUDIO)} \
+      ${USE_LBS:+$([ "$USE_LBS" = 1 ] && echo -DSHIM_USE_LBS)} \
+      ${USE_CELL:+$([ "$USE_CELL" = 1 ] && echo -DSHIM_USE_CELL)} \
       ${USE_SQL:+$([ "$USE_SQL" = 1 ] && echo -DSHIM_USE_SQL)} \
       ${USE_PROC:+$([ "$USE_PROC" = 1 ] && echo -DSHIM_USE_PROC)} \
       ${USE_APPARC:+$([ "$USE_APPARC" = 1 ] && echo -DSHIM_USE_APPARC)} \
@@ -703,12 +862,72 @@ if [ ${#SRCS[@]} -gt 0 ]; then
       ${USE_DLL_PROBE:+$([ "$USE_DLL_PROBE" = 1 ] && echo -DSHIM_USE_DLL_PROBE)} \
       ${USE_NCN:+$([ "$USE_NCN" = 1 ] && echo -DSHIM_USE_NCN)} \
       ${USE_TLS:+$([ "$USE_TLS" = 1 ] && echo -DSHIM_USE_TLS)} \
+      ${USE_HTTP:+$([ "$USE_HTTP" = 1 ] && echo -DSHIM_USE_HTTP)} \
       ${USE_KEYLOG:+$([ "$USE_KEYLOG" = 1 ] && echo -DSHIM_KEYLOG)} \
       -fexceptions -fno-rtti \
       -Wall -Wno-narrowing -Wno-ctor-dtor-privacy -Wno-unknown-pragmas \
       -Wno-attributes \
       ${MTM_TRACE:+$([ "$MTM_TRACE" = 1 ] && echo -DMTM_TRACE)} \
+      ${NETSURF_INC[@]+"${NETSURF_INC[@]}"} \
+      ${USE_NETSURF:+$([ "$USE_NETSURF" = 1 ] && echo -DSHIM_USE_NETSURF)} \
       -I"$APP/inc" -I"$APP/data" -I"$SDK/shim/inc" ${MTM_INC:-} ${RECOG_INC:-} ${CXX_FLAGS:-} \
+      "$src" -o "$obj"
+    OBJS+=("$obj")
+  done
+fi
+
+# ------------------------------------------------------------------ 2b. C
+# An app's own C, for files that must not be seen by a C++ compiler. See the C_SOURCES
+# comment at the top of this file for the reason that is a real category and not a
+# preference.
+#
+# The flags are tools/build-netsurf's, deliberately duplicated rather than shared: the
+# NetSurf archives are built once for the whole SDK and these files are built per app, so
+# a single flag list would have to be parameterised by both, and the one thing that must
+# not drift between them is the include order — which is spelled out in build-netsurf and
+# would become invisible if it moved into a variable.
+#
+# -isystem last, after every -I: ld searches -I first, so Symbian's stdint.h wins over
+# GCC's. They disagree about whether int32_t is `int` or `long`, and a file that reaches
+# both dies. The gcce.h prefix supplies IMPORT_C, without which the first stdapis
+# prototype is a syntax error.
+# The SDK's own C, for the DOM bridge. Two files that must never meet a C++ compiler, and that
+# every app wanting a parsed document needs — so they live here rather than being copied into each
+# app's C_SOURCES. Gated on USE_NETSURF because they are the only reason to link the archives.
+#
+# Not folded into C_SOURCES: that key resolves paths relative to the app's own directory, which is
+# the right rule for an app's files and cannot reach these.
+SHIM_C_SOURCES=""
+if [ "${USE_NETSURF:-0}" = 1 ]; then
+  for f in "$SDK"/shim/csrc/*.c; do
+    [ -f "$f" ] && SHIM_C_SOURCES="$SHIM_C_SOURCES $f"
+  done
+fi
+
+if [ -n "$C_SOURCES$SHIM_C_SOURCES" ]; then
+  echo "--> c ($(echo $C_SOURCES $SHIM_C_SOURCES | wc -w) sources)"
+  for src in $C_SOURCES $SHIM_C_SOURCES; do
+    # An absolute path is one of ours; anything else is the app's, relative to its own directory.
+    case "$src" in
+      /*) : ;;
+      *) src="$APP/$src" ;;
+    esac
+    obj="$BUILD/$(basename "${src%.*}").c.o"
+    "$CROSS/$TC-gcc" -c -O2 -march=armv5t -msoft-float -mapcs -nostdinc \
+      -ffunction-sections -fdata-sections -std=c99 \
+      -include "$EPOCROOT/epoc32/include/gcce/gcce.h" \
+      ${USE_NETSURF:+$([ "$USE_NETSURF" = 1 ] && echo -include "$SDK/vendor/netsurf-symbian/symbian/netsurf-symbian.h")} \
+      -I"$APP/inc" -I"$APP/data" -I"$SDK/shim/inc" \
+      ${NETSURF_INC[@]+"${NETSURF_INC[@]}"} \
+      -I"$EPOCROOT/epoc32/include/stdapis" \
+      -I"$EPOCROOT/epoc32/include" \
+      -I"$EPOCROOT/epoc32/include/variant" \
+      -isystem "$GCC_INC" \
+      -D__SYMBIAN32__ -D__GCCE__ -D__EPOC32__ -D__MARM__ -D__EABI__ \
+      -D__MARM_ARMV5__ "-D__${TARGETTYPE}__" -DNDEBUG \
+      -D__PRODUCT_INCLUDE__="<variant/${VARIANT_HRH:-symbian_os_v9.3.hrh}>" \
+      ${USE_NETSURF:+$([ "$USE_NETSURF" = 1 ] && echo -D_ALIGNED=__attribute__\(\(aligned\)\) -DSTMTEXPR=1)} \
+      -Wall -Wno-attributes ${C_FLAGS:-} \
       "$src" -o "$obj"
     OBJS+=("$obj")
   done
@@ -803,6 +1022,10 @@ if [ "$TARGETTYPE" = DLL ]; then
   echo "--> exports: $EXPORTS"
 fi
 
+# The NetSurf archives go in a --start-group of their own because they are mutually
+# recursive at archive granularity: libdom calls libhubbub and libwapcaplet, libcss calls
+# libwapcaplet and libparserutils, and libhubbub calls libparserutils. A single left-to-right
+# pass in any order leaves something undefined.
 "$CROSS/$TC-ld" -shared --target1-abs --no-undefined -nostdlib \
   --entry "$LINK_ENTRY" -u "$LINK_ENTRY" \
   --gc-sections \
@@ -812,6 +1035,7 @@ fi
   -T "$LINK_LDS" \
   "$LINK_STARTUP" \
   ${OBJS[@]+"${OBJS[@]}"} ${RUST_LIB:+"$RUST_LIB"} \
+  ${NETSURF_ARCHIVES[@]+--start-group "${NETSURF_ARCHIVES[@]}" --end-group} \
   --start-group "$STATLINK/usrt2_2.lib" --end-group \
   -L"$LIBDIR" "${LINK_LIBS[@]}" \
   -L"$LIBGCC_DIR" -lsupc++ -lgcc \
@@ -1415,5 +1639,20 @@ if [ "$SIGN" = 1 ]; then
 else
   echo "    unsigned — needs a patched installserver (Open4All / RomPatcher+)"
 fi
+# --------------------------------- the package index line
+#
+# The metadata half of an update. `apps/bootctl` reads an index.txt beside the .sis files to learn
+# what a candidate claims to be — its UID, its version, and a digest to check the bytes against —
+# and without one it can only guess a version out of the file name.
+#
+# Emitted here rather than by hand because this is the only place that knows all five fields at
+# once, and because the same line is what a package server will serve when updates start arriving
+# over the network. One format, produced once, read in both places.
+IDX="$BUILD/$NAME.index"
+printf '%s 0x%08X %s %s %s %s\n' \
+  "$NAME" "$((UID3))" "$(echo "$VERSION" | tr ',' '.')" "$(basename "$OUT")" \
+  "$(stat -c%s "$OUT")" "$(sha256sum "$OUT" | cut -d' ' -f1)" > "$IDX"
+echo "    index: $(cat "$IDX")"
+
 echo
 echo "Install: copy to the phone, then Menu > Ctrl. panel > App. mgr."

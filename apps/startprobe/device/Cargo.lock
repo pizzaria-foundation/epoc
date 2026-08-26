@@ -3,21 +3,19 @@
 version = 4
 
 [[package]]
-name = "netprobe"
+name = "startprobe"
 version = "0.1.0"
 dependencies = [
  "symbian",
- "symbian-crypto",
- "symbian-gfx",
+ "symbian-app",
  "symbian-sys",
- "symbian-ui",
 ]
 
 [[package]]
-name = "netprobe-device"
+name = "startprobe-device"
 version = "0.1.0"
 dependencies = [
- "netprobe",
+ "startprobe",
  "symbian-app",
 ]
 

@@ -3,25 +3,6 @@
 version = 4
 
 [[package]]
-name = "netprobe"
-version = "0.1.0"
-dependencies = [
- "symbian",
- "symbian-crypto",
- "symbian-gfx",
- "symbian-sys",
- "symbian-ui",
-]
-
-[[package]]
-name = "netprobe-device"
-version = "0.1.0"
-dependencies = [
- "netprobe",
- "symbian-app",
-]
-
-[[package]]
 name = "symbian"
 version = "0.1.0"
 dependencies = [
@@ -53,6 +34,13 @@ name = "symbian-keys"
 version = "0.1.0"
 
 [[package]]
+name = "symbian-report"
+version = "0.1.0"
+dependencies = [
+ "symbian",
+]
+
+[[package]]
 name = "symbian-sys"
 version = "0.1.0"
 
@@ -62,4 +50,22 @@ version = "0.1.0"
 dependencies = [
  "symbian-gfx",
  "symbian-sys",
+]
+
+[[package]]
+name = "tileprobe"
+version = "0.1.0"
+dependencies = [
+ "symbian",
+ "symbian-app",
+ "symbian-report",
+ "symbian-sys",
+]
+
+[[package]]
+name = "tileprobe-device"
+version = "0.1.0"
+dependencies = [
+ "symbian-app",
+ "tileprobe",
 ]

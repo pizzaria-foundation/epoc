@@ -3,21 +3,21 @@
 version = 4
 
 [[package]]
-name = "netprobe"
+name = "domprobe"
 version = "0.1.0"
 dependencies = [
  "symbian",
- "symbian-crypto",
- "symbian-gfx",
+ "symbian-app",
+ "symbian-dom",
+ "symbian-report",
  "symbian-sys",
- "symbian-ui",
 ]
 
 [[package]]
-name = "netprobe-device"
+name = "domprobe-device"
 version = "0.1.0"
 dependencies = [
- "netprobe",
+ "domprobe",
  "symbian-app",
 ]
 
@@ -45,12 +45,34 @@ name = "symbian-crypto"
 version = "0.1.0"
 
 [[package]]
+name = "symbian-dom"
+version = "0.1.0"
+dependencies = [
+ "symbian-gfx",
+ "symbian-layout",
+]
+
+[[package]]
 name = "symbian-gfx"
 version = "0.1.0"
 
 [[package]]
 name = "symbian-keys"
 version = "0.1.0"
+
+[[package]]
+name = "symbian-layout"
+version = "0.1.0"
+dependencies = [
+ "symbian-gfx",
+]
+
+[[package]]
+name = "symbian-report"
+version = "0.1.0"
+dependencies = [
+ "symbian",
+]
 
 [[package]]
 name = "symbian-sys"

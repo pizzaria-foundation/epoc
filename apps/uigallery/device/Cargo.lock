@@ -3,25 +3,6 @@
 version = 4
 
 [[package]]
-name = "netprobe"
-version = "0.1.0"
-dependencies = [
- "symbian",
- "symbian-crypto",
- "symbian-gfx",
- "symbian-sys",
- "symbian-ui",
-]
-
-[[package]]
-name = "netprobe-device"
-version = "0.1.0"
-dependencies = [
- "netprobe",
- "symbian-app",
-]
-
-[[package]]
 name = "symbian"
 version = "0.1.0"
 dependencies = [
@@ -45,6 +26,14 @@ name = "symbian-crypto"
 version = "0.1.0"
 
 [[package]]
+name = "symbian-decl-ui"
+version = "0.1.0"
+dependencies = [
+ "symbian-gfx",
+ "symbian-ui",
+]
+
+[[package]]
 name = "symbian-gfx"
 version = "0.1.0"
 
@@ -62,4 +51,23 @@ version = "0.1.0"
 dependencies = [
  "symbian-gfx",
  "symbian-sys",
+]
+
+[[package]]
+name = "uigallery"
+version = "0.1.0"
+dependencies = [
+ "symbian",
+ "symbian-decl-ui",
+ "symbian-gfx",
+ "symbian-sys",
+ "symbian-ui",
+]
+
+[[package]]
+name = "uigallery-device"
+version = "0.1.0"
+dependencies = [
+ "symbian-app",
+ "uigallery",
 ]

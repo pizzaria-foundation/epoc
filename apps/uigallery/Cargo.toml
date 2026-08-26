@@ -1,0 +1,28 @@
+[package]
+name = "uigallery"
+description = "A Symbian application"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+symbian-ui = { path = "../../crates/symbian-ui" }
+symbian-gfx = { path = "../../crates/symbian-gfx" }
+# The whole point of this app: every screen in it is built out of the declarative catalogue.
+symbian-decl-ui = { path = "../../crates/symbian-decl-ui" }
+# For `timer_after`: the marquee's tick, so a still screen still moves.
+symbian = { path = "../../crates/symbian" }
+# For SHIM_EV_TIMER, to tell our own tick from any other timer in the process.
+symbian-sys = { path = "../../crates/symbian-sys" }
+
+
+# Host-only. The simulator pulls in a windowing library, which has no business anywhere
+# near the device build — keeping it here means it never gets there.
+[dev-dependencies]
+symbian-sim = { path = "../../crates/symbian-sim" }
+# The device's real font atlases and a PNG writer, for `--example sheets`. The unit tests prove the
+# arithmetic against a one-glyph atlas; only the real fonts can show what a reviewer would see.
+symbian-preview = { path = "../../crates/symbian-preview" }
+# `testing` gives you a Theme and a Canvas in one call, so a test of handle_key or draw is
+# three lines rather than twenty of byte-packing a font atlas.
+symbian-ui = { path = "../../crates/symbian-ui", features = ["testing"] }

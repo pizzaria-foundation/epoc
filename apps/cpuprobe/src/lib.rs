@@ -148,7 +148,7 @@ impl Cpuprobe {
 
         // Busiest first — that is what a task manager is for. Unknown sorts last rather than as
         // zero, so "we could not measure this" never masquerades as "this is idle".
-        self.watches.sort_by(|a, b| b.load.unwrap_or(-1).cmp(&a.load.unwrap_or(-1)));
+        self.watches.sort_by_key(|w| core::cmp::Reverse(w.load.unwrap_or(-1)));
         self.ticker = symbian::timer_after(TICK_MS).ok();
     }
 }

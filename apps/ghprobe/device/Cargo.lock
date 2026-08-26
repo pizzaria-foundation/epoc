@@ -3,21 +3,19 @@
 version = 4
 
 [[package]]
-name = "netprobe"
+name = "ghprobe"
 version = "0.1.0"
 dependencies = [
  "symbian",
- "symbian-crypto",
- "symbian-gfx",
+ "symbian-app",
  "symbian-sys",
- "symbian-ui",
 ]
 
 [[package]]
-name = "netprobe-device"
+name = "ghprobe-device"
 version = "0.1.0"
 dependencies = [
- "netprobe",
+ "ghprobe",
  "symbian-app",
 ]
 

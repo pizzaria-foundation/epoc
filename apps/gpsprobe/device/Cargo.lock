@@ -3,21 +3,20 @@
 version = 4
 
 [[package]]
-name = "netprobe"
+name = "gpsprobe"
 version = "0.1.0"
 dependencies = [
  "symbian",
- "symbian-crypto",
- "symbian-gfx",
+ "symbian-app",
+ "symbian-report",
  "symbian-sys",
- "symbian-ui",
 ]
 
 [[package]]
-name = "netprobe-device"
+name = "gpsprobe-device"
 version = "0.1.0"
 dependencies = [
- "netprobe",
+ "gpsprobe",
  "symbian-app",
 ]
 
@@ -51,6 +50,13 @@ version = "0.1.0"
 [[package]]
 name = "symbian-keys"
 version = "0.1.0"
+
+[[package]]
+name = "symbian-report"
+version = "0.1.0"
+dependencies = [
+ "symbian",
+]
 
 [[package]]
 name = "symbian-sys"

@@ -1044,8 +1044,10 @@ impl SelfTest {
         let _ = crypto::sha256::sha256(&data);
         let us = now_us() - t;
         self.report.num("SHA-256 over 64 KB (us)", us as i64);
-        if us > 0 {
-            self.report.num("SHA-256 KB/s", (64 * 1_000_000 / us) as i64);
+        // checked_div rather than a `us > 0` guard: the clock can report zero elapsed on a fast
+        // path, and there is no rate to print when it does.
+        if let Some(rate) = (64u64 * 1_000_000).checked_div(us) {
+            self.report.num("SHA-256 KB/s", rate as i64);
         }
 
         // AES-256 over 64 KB, block at a time, which is how IGE drives it.
@@ -1057,8 +1059,8 @@ impl SelfTest {
             }
             let us = now_us() - t;
             self.report.num("AES-256 over 64 KB (us)", us as i64);
-            if us > 0 {
-                self.report.num("AES-256 KB/s", (64 * 1_000_000 / us) as i64);
+            if let Some(rate) = (64u64 * 1_000_000).checked_div(us) {
+                self.report.num("AES-256 KB/s", rate as i64);
             }
         }
 
@@ -1152,8 +1154,8 @@ impl SelfTest {
         self.report.num("present incl. expansion and BitBlt (us)", present_us as i64);
         let frame = fill_us + present_us;
         self.report.num("fill + present (us)", frame as i64);
-        if frame > 0 {
-            self.report.num("implied max fps", (1_000_000 / frame) as i64);
+        if let Some(fps) = 1_000_000u64.checked_div(frame) {
+            self.report.num("implied max fps", fps as i64);
         }
         self.report
             .check("a full repaint fits in 100 ms", frame < 100_000);

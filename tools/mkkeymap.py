@@ -105,6 +105,17 @@ OVERLAY = {
     0x38: ("b", "8"),
     0x39: ("n", "9"),
     0x30: ("m", "0"),
+    # I and K carry + and - on the Chr layer, printed on the keycaps.
+    #
+    # The dump has the plus (`0x49: chr=002B from numeric binding`) and is silent about the
+    # minus, so Fn+K produced nothing and no key on this keyboard produced `-` at all. The
+    # asymmetry is the dump's, not the hardware's: both symbols are on the keys in the user's
+    # hand, which is the same reason the twelve rows above override it.
+    #
+    # I is repeated here rather than left to the dump so the pair reads as a pair. The value is
+    # identical to what the dump already gives, so this changes nothing about that key.
+    0x49: ("i", "+"),
+    0x4B: ("k", "-"),
 }
 
 # What tools/mkfont.py rasterizes. A composed or mapped character outside this is worse

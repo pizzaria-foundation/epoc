@@ -577,11 +577,9 @@ impl NetProbe {
     fn drain(&mut self, first: bool) {
         let mut buf = [0u8; 64];
         let Some(s) = &mut self.stream else { return };
-        loop {
-            let n = match s.read(&mut self.net, &mut buf) {
-                Ok(n) => n,
-                Err(_) => break,
-            };
+        // An error ends the drain the same way end-of-stream does: there is nothing left to read
+        // either way, and the socket's own events report the failure.
+        while let Ok(n) = s.read(&mut self.net, &mut buf) {
             if n == 0 {
                 break;
             }
