@@ -52,6 +52,15 @@ boundary. `epoc preview` renders the whole design system to PNG without a phone:
 |:---:|:---:|
 | <img src="docs/screenshots/ui-surfaces.png" width="300"> | <img src="docs/screenshots/ui-icons.png" width="300"> |
 
+Above that sits `symbian-decl-ui`: 45 widgets, declared rather than drawn, each with a parity
+harness holding it to the imperative screen it replaced. `apps/uigallery` is the catalogue running
+on a handset — thirteen sheets in each of six palettes, which is where colour bugs a host render
+cannot show get caught:
+
+| | |
+|:---:|:---:|
+| <img src="docs/screenshots/ui-controls.png" width="300"> | <img src="docs/screenshots/ui-rows.png" width="300"> |
+
 [`docs/architecture.md`](docs/architecture.md) has the long version.
 
 
@@ -101,12 +110,16 @@ codec and the screens are here (`symbian-bootcfg`, `symbian-bootctl`, `symbian-p
 
 ### [cal](https://github.com/pizzaria-foundation/cal)
 
+<img src="docs/screenshots/cal.png" width="280">
+
 **A calendar and to-do list**, with Google Calendar sync over real HTTPS.
 
 </td>
 <td valign="top">
 
 ### [map](https://github.com/pizzaria-foundation/map)
+
+<img src="docs/screenshots/map.png" width="280">
 
 **OpenStreetMap tiles**, positioned from the cell tower — none of the handset's four LBS
 modules returns a fix indoors.
@@ -115,6 +128,8 @@ modules returns a fix indoors.
 <td valign="top">
 
 ### [mini-browser](https://github.com/pizzaria-foundation/mini-browser)
+
+<img src="docs/screenshots/browser.png" width="280">
 
 **A web browser**: HTML and CSS laid out and rendered on the device.
 
