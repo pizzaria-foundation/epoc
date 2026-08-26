@@ -253,6 +253,10 @@ done
 # whole sentences about why a change was made, so the draft is usually readable as it stands —
 # but "usually" is not "always", and a release note is read by somebody who was not here.
 
+# The sentinel, chosen so it cannot collide with markdown or with a commit subject. Defined
+# beside its only two uses.
+SCISSORS="-- >8 -- everything below is discarded -- >8 --"
+
 PREV="$(git describe --tags --abbrev=0 2>/dev/null || true)"
 if [ -n "$PREV" ]; then
   RANGE="$PREV..HEAD"
@@ -267,20 +271,25 @@ fi
   echo
   git log --no-merges --format='- %s' "$RANGE"
   echo
-  echo "# ---------------------------------------------------------------------------"
-  echo "# $SINCE."
-  echo "#"
-  echo "# Lines starting with # are stripped. This becomes both the CHANGELOG.md entry"
-  echo "# and the body of the GitHub release."
-  echo "#"
-  echo "# Save an empty file to cancel the release; nothing has been committed, tagged"
-  echo "# or published yet, and the version numbers will be put back."
+  # Scissors, not a `#` prefix — the way `git commit --cleanup=scissors` does it, and for the
+  # same reason it had to. Stripping lines that begin with `#` would have eaten the `## v0.2.0`
+  # heading three lines above, and every release would have landed in CHANGELOG.md untitled,
+  # merging into one unbroken block. A comment marker cannot be a character the content uses,
+  # and this content is markdown.
+  echo "$SCISSORS"
+  echo "Everything below this line is discarded. $SINCE."
+  echo
+  echo "What is above becomes both the CHANGELOG.md entry and the body of the GitHub"
+  echo "release, markdown and all."
+  echo
+  echo "Save with nothing above the line to cancel: nothing has been committed, tagged"
+  echo "or published yet, the version numbers go back, and the built packages are removed."
 } > "$NOTES"
 
 "${EDITOR:-vi}" "$NOTES"
 
-# Strip the instructions and anything else the editor was told to ignore.
-grep -v '^#' "$NOTES" | sed -e :a -e '/^\n*$/{$d;N;};/\n$/ba' > "$NOTES.body"
+# Everything above the scissors, with trailing blank lines trimmed.
+sed "/^$SCISSORS\$/,\$d" "$NOTES" | sed -e :a -e '/^\n*$/{$d;N;};/\n$/ba' > "$NOTES.body"
 mv "$NOTES.body" "$NOTES"
 
 if [ ! -s "$NOTES" ]; then
