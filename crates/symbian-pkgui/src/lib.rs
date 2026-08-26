@@ -82,6 +82,13 @@ const TAB_DOWNLOADS: usize = 2;
 pub enum PkgRequest {
     /// Install a package already on disk, by its candidate index.
     Install(usize),
+    /// Read the tail of this package's log and hand it back through [`PkgScreen::show_log`].
+    ///
+    /// A request rather than a read, for the same reason every other one here is: this crate is
+    /// handed its data and does no I/O, which is what lets the whole screen be tested on a host with
+    /// no phone. The *tail* rather than the file, because a log on this handset reached 61 KB and
+    /// the answer somebody wants after an install is at the end of it.
+    ShowLog(u32),
     /// Fetch this, then install it.
     Download(CatEntry),
     /// Register `owner/repo`, or whatever the person pasted — the app parses it.
@@ -237,6 +244,14 @@ pub struct PkgScreen {
     sheet: Option<Sheet>,
     /// Which package the open sheet is about, so its actions can be attributed.
     sheet_uid: u32,
+    /// The log tail, once the application has fetched it. `None` means nobody asked; an empty string
+    /// means asked and there was nothing — and the screen says which, because "no log" and "a log
+    /// that is empty" are different answers about whether the application ever ran.
+    log: Option<String>,
+    /// Which of [`Self::versions_of`] the open sheet is showing, newest at 0. Left and Right step
+    /// it, and Install acts on it — so the arrows are not a way to browse, they are how you choose
+    /// what gets installed.
+    sheet_pick: usize,
     menu: Option<Menu<Item>>,
     prompt: Option<TextPrompt>,
 
@@ -266,6 +281,8 @@ impl PkgScreen {
             queue,
             sheet: None,
             sheet_uid: 0,
+            log: None,
+            sheet_pick: 0,
             menu: None,
             prompt: None,
             phase: 0,
@@ -611,6 +628,63 @@ impl PkgScreen {
         }
     }
 
+    /// Every version of one package this handset could install right now, newest first.
+    ///
+    /// Three places hold one: the update directories, the known-good copy `bootd` keeps for
+    /// rolling back, and a repository's catalogue. The first two are files already here; the third
+    /// has to be fetched.
+    ///
+    /// # Why the sheet has this and the list does not
+    ///
+    /// The list answers *what should I do*, and for that there is one answer per package — the
+    /// newest thing on offer, which is what `best_for` picks. The sheet answers *what are my
+    /// options*, and that is a different question with a longer answer: a package can have three
+    /// files on disk and the one you want may be the old one, because the new one is what broke.
+    ///
+    /// Without this the older files were invisible. They were scanned, ranked, and then all but the
+    /// winner were dropped — so a rollback meant deleting a file from the card to make a different
+    /// one win.
+    fn versions_of(&self, uid3: u32, name: &str) -> Vec<(Version, Source)> {
+        let mut out: Vec<(Version, Source)> = self
+            .cands
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| c.uid3 == uid3)
+            .map(|(i, c)| (c.version, Source::Local(i)))
+            .collect();
+        for (i, e) in self.cat.entries.iter().enumerate() {
+            if e.name.eq_ignore_ascii_case(name) {
+                out.push((e.version, Source::Remote(i)));
+            }
+        }
+        // Newest first, and a local copy before a remote one at the same version: bytes here beat
+        // bytes to fetch, which is the rule the row already follows.
+        out.sort_by(|a, b| {
+            b.0.cmp(&a.0).then_with(|| match (a.1, b.1) {
+                (Source::Local(_), Source::Remote(_)) => core::cmp::Ordering::Less,
+                (Source::Remote(_), Source::Local(_)) => core::cmp::Ordering::Greater,
+                _ => core::cmp::Ordering::Equal,
+            })
+        });
+        out
+    }
+
+    /// The versions the open sheet can step through.
+    fn sheet_versions(&self) -> Vec<(Version, Source)> {
+        match self.pkgs.get(self.sheet_uid) {
+            Some(p) => self.versions_of(p.uid3, &p.name),
+            None => Vec::new(),
+        }
+    }
+
+    /// Rebuild the sheet at the current pick, keeping it open.
+    fn reopen_sheet(&mut self) {
+        let uid = self.sheet_uid;
+        let pick = self.sheet_pick;
+        self.build_sheet(uid);
+        self.sheet_pick = pick;
+    }
+
     // ------------------------------------------------------------------ the sheet
 
     /// The detail view of the focused package.
@@ -626,9 +700,22 @@ impl PkgScreen {
         let Some(uid) = self.rows().get(i).map(|r| r.uid3) else {
             return;
         };
+        // Opening always starts at the newest, which is what somebody who pressed Select wants to
+        // see. Stepping is a deliberate act after that.
+        self.sheet_pick = 0;
+        self.build_sheet(uid);
+    }
+
+    /// The sheet itself, at whatever version [`Self::sheet_pick`] names.
+    fn build_sheet(&mut self, uid: u32) {
+        let versions = match self.pkgs.get(uid) {
+            Some(p) => self.versions_of(p.uid3, &p.name),
+            None => Vec::new(),
+        };
         let Some(p) = self.pkgs.get(uid) else {
             return;
         };
+        let picked = versions.get(self.sheet_pick.min(versions.len().saturating_sub(1))).copied();
         let offer = self.pkgs.offer_for(p.uid3, &self.cands);
         let mut s = Sheet::new(
             p.name.clone(),
@@ -645,14 +732,46 @@ impl PkgScreen {
                 .unwrap_or_else(|| String::from("unknown")),
         ));
 
-        if let Some((o, c)) = offer {
+        // The version on show, and how many there are to step through. `< 0.2.0 >` rather than a
+        // bare number, because an arrow that does nothing is worse than no arrow — this says the
+        // key works before anybody presses it.
+        if let Some((v, src)) = picked {
+            let n = versions.len();
+            let label = if n > 1 {
+                format!("\u{003c} {v} \u{003e}   {} of {n}", self.sheet_pick + 1)
+            } else {
+                format!("{v}")
+            };
+            let (where_, size) = match src {
+                Source::Local(i) => match self.cands.get(i) {
+                    Some(c) => (c.file.clone(), c.size),
+                    None => (String::new(), 0),
+                },
+                Source::Remote(i) => match self.cat.entries.get(i) {
+                    Some(e) => (
+                        self.repos
+                            .get(e.repo_id)
+                            .map(|r| r.label())
+                            .unwrap_or_else(|| String::from("a repository")),
+                        e.size,
+                    ),
+                    None => (String::new(), 0),
+                },
+            };
             s = s
-                .row(SheetRow::pair("Available", format!("{}", c.version)))
+                .row(SheetRow::pair("Available", label))
+                .row(SheetRow::pair("Size", format!("{} KB", size.div_ceil(1024))))
                 .row(SheetRow::pair(
-                    "Size",
-                    format!("{} KB", c.size.div_ceil(1024)),
-                ))
-                .row(SheetRow::pair("File", c.file.clone()))
+                    match src {
+                        Source::Local(_) => "File",
+                        Source::Remote(_) => "From",
+                    },
+                    where_,
+                ));
+        }
+
+        if let Some((o, _)) = offer {
+            s = s
                 .row(SheetRow::chip(
                     "Offer",
                     String::from(match o {
@@ -699,8 +818,15 @@ impl PkgScreen {
             )
         }));
 
-        if offer.is_some() && !p.is_self() {
-            s = s.action("Install");
+        // On whenever there is a version to act on, and not only when `offer_for` says one is
+        // *newer*. Those are different questions: the offer answers "is there something you should
+        // do", and this answers "can you do it" — and rolling back to an older file is precisely the
+        // case where the second is yes and the first is no.
+        if picked.is_some() && !p.is_self() {
+            s = s.action(match picked.map(|(_, src)| src) {
+                Some(Source::Remote(_)) => "Get",
+                _ => "Install",
+            });
         }
         s = s.action(if p.pinned {
             "Release"
@@ -708,36 +834,87 @@ impl PkgScreen {
             "Hold at this version"
         });
         s = s.action("Reopen after install");
+        // Last, because it is the one that answers "what happened" rather than "what should
+        // happen" — and it is the one somebody reaches for when the three above did not work.
+        s = s.action("Log");
 
         self.sheet_uid = p.uid3;
         self.sheet = Some(s);
     }
 
+    /// Hand back what [`PkgRequest::ShowLog`] asked for. An empty string is an answer, not a
+    /// failure: it means the file was read and had nothing in it.
+    pub fn show_log(&mut self, tail: String) {
+        self.log = Some(tail);
+    }
+
     fn on_sheet_action(&mut self, index: usize) {
         let uid = self.sheet_uid;
+        let picked = self.sheet_versions().get(self.sheet_pick).copied();
         let has_install = self
             .pkgs
             .get(uid)
-            .map(|p| self.pkgs.offer_for(uid, &self.cands).is_some() && !p.is_self())
+            .map(|p| picked.is_some() && !p.is_self())
             .unwrap_or(false);
         // The actions were added conditionally, so the index means different things depending on
         // whether Install is there. Resolved here rather than by remembering, because the sheet is
         // rebuilt every time it opens.
         let logical = if has_install { index } else { index + 1 };
         self.request = match logical {
-            0 => self
-                .cands
-                .iter()
-                .position(|c| {
-                    self.pkgs
-                        .offer_for(uid, &self.cands)
-                        .is_some_and(|(_, p)| p.file == c.file)
-                })
-                .map(PkgRequest::Install),
+            // The version on show, not the one `offer_for` would have chosen. That is the whole
+            // point of the arrows: what the sheet says it will install is what it installs.
+            0 => match picked.map(|(_, src)| src) {
+                Some(Source::Local(i)) => Some(PkgRequest::Install(i)),
+                Some(Source::Remote(i)) => {
+                    self.cat.entries.get(i).cloned().map(PkgRequest::Download)
+                }
+                None => None,
+            },
             1 => Some(PkgRequest::TogglePin(uid)),
-            _ => Some(PkgRequest::StepReopen(uid)),
+            2 => Some(PkgRequest::StepReopen(uid)),
+            // The sheet stays open behind the log, so closing the log comes back to the package
+            // rather than to the list — which is where somebody reading a log after an install
+            // wants to end up.
+            _ => Some(PkgRequest::ShowLog(uid)),
         };
-        self.sheet = None;
+        if !matches!(self.request, Some(PkgRequest::ShowLog(_))) {
+            self.sheet = None;
+        }
+    }
+
+    /// The tail of a package's log, as a page you read and leave.
+    ///
+    /// Plain lines and no list widget: there is nothing to select here, and a cursor on a log is a
+    /// cursor that suggests pressing it does something. It draws from the **end** — the last lines
+    /// that fit — because the question after an install is what happened last, and a page that
+    /// opened at the top of a 61 KB file would answer it by making somebody scroll for a minute.
+    fn draw_log(&self, c: &mut Canvas<'_>, screen: Rect, theme: &Theme<'_>, tail: &str) {
+        chrome::clear(c, theme);
+        let name = self.pkgs.get(self.sheet_uid).map(|p| p.name.clone()).unwrap_or_default();
+        let f = chrome::Frame::split(screen, theme, true, true);
+        chrome::title_bar(c, f.title, theme, &name, Some("log"));
+        chrome::softkey_bar(c, f.softkeys, theme, [None, None, Some("Back")]);
+
+        if tail.trim().is_empty() {
+            chrome::placeholder(c, f.content, theme, "Nothing logged. It may never have run.");
+            return;
+        }
+        let small = theme.fonts.small;
+        let step = small.line_height();
+        let rows = (f.content.height() / step).max(1) as usize;
+        let mut y = f.content.y0 + small.ascent();
+        // The last `rows` lines, in order. Taking from the end and then drawing forwards, rather
+        // than drawing backwards, so a line that wraps does not push the newest one off the screen.
+        let lines: Vec<&str> = tail.lines().collect();
+        for l in lines.iter().skip(lines.len().saturating_sub(rows)) {
+            c.draw_text(
+                symbian_gfx::Point::new(f.content.x0 + theme.metrics.pad, y),
+                l,
+                small,
+                theme.palette.dim,
+            );
+            y += step;
+        }
     }
 
     // ------------------------------------------------------------------ the menu
@@ -861,6 +1038,40 @@ impl PkgScreen {
                 None => {}
             }
             return Handled::Consumed;
+        }
+        // The log is over the sheet, which is over the list, so it answers first. Anything closes
+        // it — there is nothing on it to operate, and a reader who has finished reading presses
+        // whatever is under their thumb.
+        if self.log.is_some() {
+            if matches!(ev.key, Key::Softkey(Softkey::Right) | Key::Select) {
+                self.log = None;
+            }
+            return Handled::Consumed;
+        }
+        if self.sheet.is_some() {
+            // Before the sheet, because the sheet has no idea there is more than one version and
+            // would spend Left and Right on nothing. Stepping rebuilds it, which is cheap and is
+            // also what keeps every line — the size, the file, the offer — describing the version
+            // now on show rather than the one it opened on.
+            let n = self.sheet_versions().len();
+            if n > 1 {
+                match ev.key {
+                    Key::Right if self.sheet_pick + 1 < n => {
+                        self.sheet_pick += 1;
+                        self.reopen_sheet();
+                        return Handled::Consumed;
+                    }
+                    Key::Left if self.sheet_pick > 0 => {
+                        self.sheet_pick -= 1;
+                        self.reopen_sheet();
+                        return Handled::Consumed;
+                    }
+                    // At either end the key is still swallowed: a sheet is modal, and letting Left
+                    // fall through would change the tab behind it.
+                    Key::Left | Key::Right => return Handled::Consumed,
+                    _ => {}
+                }
+            }
         }
         if let Some(s) = self.sheet.as_mut() {
             let (h, action) = s.handle_key(ev);
@@ -1173,6 +1384,10 @@ impl PkgScreen {
         // A sheet is a screen of its own: it takes the whole frame rather than sitting inside this
         // one, because it is a different question and a panel over a list would keep asking the old
         // one behind it.
+        if let Some(tail) = self.log.as_deref() {
+            self.draw_log(c, screen, theme, tail);
+            return;
+        }
         if let Some(s) = self.sheet.as_mut() {
             s.draw(c, screen, theme);
             return;
@@ -1533,8 +1748,70 @@ mod tests {
         assert!(s.sheet.is_some());
         assert_eq!(s.sheet_uid, LAUNCHER);
         draw(&mut s);
-        // Its first action is the likely one.
-        assert_eq!(s.sheet.as_ref().unwrap().action_label(), Some("Install"));
+        // The sheet opens on the *newest* version, which in this fixture is the catalogue's 0.3.0
+        // against 0.2.0 on disk — so the action is Get, because the bytes are not here yet. That is
+        // the label doing its job: the same key means fetch or install depending on where the
+        // version on show lives.
+        assert_eq!(s.sheet.as_ref().unwrap().action_label(), Some("Get"));
+    }
+
+    #[test]
+    fn the_log_action_asks_and_the_answer_opens_over_the_sheet() {
+        let mut s = screen();
+        press(&mut s, Key::Select);
+        // Install, Hold, Reopen, Log — the fourth, and it is last because it answers "what
+        // happened" rather than "what should happen".
+        s.on_sheet_action(3);
+        assert_eq!(s.take_request(), Some(PkgRequest::ShowLog(LAUNCHER)));
+        assert!(s.sheet.is_some(), "the sheet stays behind it, so Back returns to the package");
+
+        s.show_log("61020  update committed at 0.2.0".to_string());
+        draw(&mut s);
+        press(&mut s, Key::Select);
+        assert!(s.log.is_none(), "anything closes it");
+        assert!(s.sheet.is_some(), "and leaves the sheet where it was");
+    }
+
+    #[test]
+    fn an_empty_log_is_an_answer_rather_than_a_blank_page() {
+        // "No log" and "a log with nothing in it" are different facts about whether the application
+        // ever ran, and a blank screen states neither. The placeholder is the difference.
+        let mut s = screen();
+        press(&mut s, Key::Select);
+        s.show_log(String::new());
+        let before = draw(&mut s);
+        s.log = None;
+        let sheet = draw(&mut s);
+        assert_ne!(before, sheet, "an empty log draws something, and not the sheet");
+    }
+
+    #[test]
+    fn the_arrows_choose_which_version_gets_installed() {
+        // The arrows are not browsing. What the sheet says it will install is what `Install` sends,
+        // and that is the whole reason they exist: an older file on disk was scanned, ranked, and
+        // then dropped, so rolling back meant deleting the newer one off the card.
+        let mut s = screen();
+        press(&mut s, Key::Select);
+        assert_eq!(s.sheet_versions().len(), 2, "0.3.0 in the catalogue, 0.2.0 on disk");
+        assert_eq!(s.sheet_pick, 0, "opens on the newest");
+        assert_eq!(s.sheet.as_ref().unwrap().action_label(), Some("Get"));
+
+        press(&mut s, Key::Right);
+        assert_eq!(s.sheet_pick, 1, "stepped to the older one");
+        assert_eq!(
+            s.sheet.as_ref().unwrap().action_label(),
+            Some("Install"),
+            "and that one is already here"
+        );
+
+        // Past the end the key is swallowed rather than falling through — a sheet is modal, and a
+        // Right that reached the tabs would change the section behind it.
+        press(&mut s, Key::Right);
+        assert_eq!(s.sheet_pick, 1);
+        assert!(s.sheet.is_some(), "and the sheet is still open");
+
+        press(&mut s, Key::Left);
+        assert_eq!(s.sheet_pick, 0, "and back");
     }
 
     #[test]
