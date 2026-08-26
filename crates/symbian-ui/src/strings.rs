@@ -39,6 +39,14 @@ crate::strings! {
     close = { en: "Close", pt: "Fechar" },
     /// Destroy something, and the word a confirmation asks about.
     remove = { en: "Remove", pt: "Remover" },
+    /// Change the thing under the cursor. Distinct from `open`: one looks, the other alters.
+    edit = { en: "Edit", pt: "Editar" },
+    /// Create one more of whatever the list holds.
+    add = { en: "Add", pt: "Adicionar" },
+    /// Throw the thing away. Portuguese has two words here and they are not interchangeable:
+    /// `Remover` takes something out of a list, `Apagar` destroys it. English uses `Delete` for the
+    /// second, which is why this is not a synonym of `remove` above.
+    delete = { en: "Delete", pt: "Apagar" },
     /// The two answers to a question. Short enough that a dialog can put them on both softkeys.
     yes = { en: "Yes", pt: "Sim" },
     no = { en: "No", pt: "Não" },
@@ -59,7 +67,8 @@ mod tests {
         // between the two languages, so a copy stands out — and this asserts it rather than hoping
         // a reviewer notices.
         let entries: &[fn() -> &'static str] = &[
-            select, back, cancel, save, options, exit, open, close, remove, yes, no, nothing_here,
+            select, back, cancel, save, options, exit, open, close, remove, edit, add, delete,
+            yes, no, nothing_here,
         ];
         crate::lang::set(Lang::En);
         let en: alloc::vec::Vec<&str> = entries.iter().map(|f| f()).collect();

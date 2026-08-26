@@ -71,6 +71,12 @@ pub use symbian_sys::lang::{current, set};
 /// editor, and needs nobody to learn it. The macro that earns its place is the one that *declares*
 /// the table.
 ///
+/// # A trailing comma is allowed in both places
+///
+/// Inside the braces as well as between entries, because a long entry wraps onto its own lines and
+/// then wants one — and rustfmt adds it. Found by the first table long enough to wrap, which failed
+/// with `no rules expected \`,\`` and pointed at the string rather than at the macro.
+///
 /// # What it does not do
 ///
 /// Interpolation. `"3 events"` needs an argument, and a macro that takes arguments *and* lets word
@@ -79,7 +85,7 @@ pub use symbian_sys::lang::{current, set};
 /// Portuguese and will not match everywhere.
 #[macro_export]
 macro_rules! strings {
-    ($( $(#[$meta:meta])* $name:ident = { en: $en:expr, pt: $pt:expr } ),* $(,)?) => {
+    ($( $(#[$meta:meta])* $name:ident = { en: $en:expr, pt: $pt:expr $(,)? } ),* $(,)?) => {
         $(
             $(#[$meta])*
             pub fn $name() -> &'static str {
