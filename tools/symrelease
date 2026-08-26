@@ -1,0 +1,311 @@
+#!/bin/bash
+# symrelease — cut a version of one repository, locally, and publish it where the phone looks.
+#
+# The pipeline, and why each stage exists:
+#
+#   git      --gates------->  a clean tree at an unused tag    a .sisx built from a modified
+#                                                              working tree does not correspond
+#                                                              to the tag that will point at it
+#   cargo    --test-------->  a version worth publishing       a release that fails its tests is
+#                                                              an error with a serial number
+#   VERSION  --write------->  every app.conf in BUILD          the number is typed once; see
+#                                                              "The number that must not be typed
+#                                                              twice" below
+#   symbuild --in order---->  the .sis files in SHIP           EXTRA_EXES reads ../x/build/x.exe,
+#                                                              so what goes inside builds first
+#   git log  --$EDITOR----->  CHANGELOG.md + the release body  reviewed, because a commit subject
+#                                                              is not always a release note
+#   gh       --release----->  a tag and its assets on GitHub   not a draft and not a prerelease;
+#                                                              /releases/latest excludes both
+#
+# Usage:
+#   symrelease <x.y.z>            from the root of the repository being released
+#   symrelease <x.y.z> --dry-run  every gate and the build, stopping before commit/tag/publish
+#
+# The repository root must contain a manifest named `release.conf`; see the block comment above
+# `need` for the keys it must set.
+#
+# ---------------------------------------------------------------------------------------------
+# The number that must not be typed twice
+#
+# `tools/symbuild` says this about VERSION, and it is the reason this script exists at all:
+#
+#   > app.conf is the single source: a stamp that disagreed with the package that installed it
+#   > would be worse than no stamp at all, and the only way to guarantee it cannot is to never
+#   > type the number twice.
+#
+# One value feeds two things — the .pkg that becomes the .sis, and SYMBIAN_APP_VERSION, which is
+# what `symbian::pkg::stamp` writes at run time. A git tag is a *second* place the number would
+# come to exist, and disagreement is not cosmetic: `symbian_bootcfg::update` has
+# `Reason::WrongVersion`, and the Proving stage rolls back to the version that was working when
+# the application reports something other than what was installed.
+#
+# A release whose tag disagrees with its app.conf installs itself and then uninstalls itself.
+# So this script writes both from one argument and refuses every path where they could drift.
+#
+# ---------------------------------------------------------------------------------------------
+# What the phone expects, and where that is written down
+#
+# Nothing here is a new protocol. `SDK/crates/symbian-bootcfg/src/github.rs` already reads GitHub
+# releases, and its own documentation is the specification this obeys:
+#
+#   * `GET /repos/{owner}/{repo}/releases/latest` — which by GitHub's definition excludes drafts
+#     and prereleases, so publishing either means the phone never sees it.
+#   * the version comes from `tag_name` through `symbian::pkg::Version::parse`, which accepts a
+#     leading `v` and wants exactly three numeric fields. Four fields parse to None.
+#   * an asset is chosen by `pkg::looks_like_package` — the extension `.sis` or `.sisx` — plus an
+#     optional plain substring per repository, which is how a release carrying two packages is
+#     told apart on the phone.
+#   * bytes come from `browser_download_url`, so a package has to be an *attached asset* and not
+#     a link in the body.
+#
+# Identity is the one thing not taken from the service: the UID3 is read out of the downloaded
+# file by `sis::parse`. GitHub is trusted about where bytes are, never about what they are.
+
+set -euo pipefail
+
+SDK="$(cd "$(dirname "$0")/.." && pwd)"
+
+# --------------------------------------------------------------------------------- the argument
+
+VER="${1:-}"
+DRY=0
+[ "${2:-}" = "--dry-run" ] && DRY=1
+
+if [ -z "$VER" ]; then
+  echo "usage: symrelease <x.y.z> [--dry-run]" >&2
+  exit 64
+fi
+
+# Exactly what `Version::parse` accepts, checked here so the failure is a message rather than a
+# phone that downloads a release it cannot name. Three fields, each within u16 — the type the
+# version is stored in on the device side.
+if ! [[ "$VER" =~ ^([0-9]{1,5})\.([0-9]{1,5})\.([0-9]{1,5})$ ]]; then
+  echo "symrelease: '$VER' is not x.y.z — Version::parse wants exactly three numeric fields" >&2
+  exit 64
+fi
+for part in "${BASH_REMATCH[@]:1:3}"; do
+  if [ "$part" -gt 65535 ]; then
+    echo "symrelease: '$part' does not fit in a u16, which is what the device stores" >&2
+    exit 64
+  fi
+done
+
+TAG="v$VER"
+# app.conf spells it with commas; makesis and elf2e32 both want it that way.
+VER_COMMAS="${VER//./,}"
+
+# ---------------------------------------------------------------------------------- the manifest
+
+ROOT="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+if [ -z "$ROOT" ]; then
+  echo "symrelease: not inside a git repository" >&2
+  exit 64
+fi
+cd "$ROOT"
+
+if [ ! -f release.conf ]; then
+  echo "symrelease: no release.conf at $ROOT" >&2
+  exit 64
+fi
+
+# release.conf must set:
+#
+#   OWNER  the GitHub owner, and REPO the repository — kept apart because they are two fields in
+#          every URL, the same reason `symbian_bootcfg::repo::Repo` keeps them apart.
+#   BUILD  app directories, **in build order**. What goes inside a package builds before the
+#          package: EXTRA_EXES names `../notifd/build/notifd.exe`, a path that has to already
+#          exist when makesis reads the .pkg.
+#   SHIP   the files to attach to the release. Not the same list as BUILD and deliberately so:
+#          `home` builds five applications and ships one, because four of them are .exe files
+#          inside the fifth. `ADBian` is the other shape — two packages, neither inside the
+#          other, both attached to one release, because /releases/latest returns exactly one
+#          release and a second release would hide the first package from the catalogue.
+# shellcheck source=/dev/null
+source ./release.conf
+
+: "${OWNER:?release.conf must set OWNER}"
+: "${REPO:?release.conf must set REPO}"
+: "${BUILD:?release.conf must set BUILD}"
+: "${SHIP:?release.conf must set SHIP}"
+
+echo "==> $REPO $TAG"
+
+# ------------------------------------------------------------------------------------- the gates
+#
+# All four run before anything is written. A gate that fires after the first edit leaves a repo
+# half-released, which is the state hardest to reason about and the one a person meets while
+# already annoyed.
+
+# 1. A clean tree. This is the gate with no override, because it is the only one whose failure is
+#    silent: a package built from modified sources installs perfectly and is not the tag.
+if [ -n "$(git status --porcelain)" ]; then
+  echo "symrelease: the working tree is not clean." >&2
+  echo "  A package built from a modified tree is not the commit the tag will point at." >&2
+  git status --short >&2
+  exit 65
+fi
+
+# 2. An unused tag, locally and on the remote. Re-tagging is how a release quietly becomes a
+#    different set of bytes under a name somebody already downloaded.
+if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+  echo "symrelease: tag $TAG already exists locally" >&2
+  exit 65
+fi
+if git ls-remote --exit-code --tags origin "$TAG" >/dev/null 2>&1; then
+  echo "symrelease: tag $TAG already exists on origin" >&2
+  exit 65
+fi
+
+# 3. `gh`, authenticated. Checked now rather than at step 8, so a failure to log in does not cost
+#    a full cross-compile first.
+if ! command -v gh >/dev/null; then
+  echo "symrelease: gh is not installed" >&2
+  exit 69
+fi
+if ! gh auth status >/dev/null 2>&1; then
+  echo "symrelease: gh is not authenticated — run 'gh auth login'" >&2
+  exit 69
+fi
+
+# 4. The tests.
+echo "--> cargo test --workspace"
+if ! cargo test --workspace >/dev/null 2>&1; then
+  echo "symrelease: tests fail; not releasing." >&2
+  cargo test --workspace 2>&1 | grep -E "^(test result|error|failures:)" | head -20 >&2
+  exit 65
+fi
+
+# ------------------------------------------------------------------- writing, and undoing writing
+#
+# Past this line the tree is dirty on purpose. Everything that can still fail — the build, the
+# editor, the push — restores it, so a failed release leaves the repository exactly as it was
+# rather than with a version number half-applied. The tree was verified clean above, which is what
+# makes `git checkout --` a safe undo rather than a destructive one.
+
+restore() {
+  git checkout -- VERSION CHANGELOG.md 2>/dev/null || true
+  for app in $BUILD; do
+    git checkout -- "$app/app.conf" 2>/dev/null || true
+  done
+  rm -f "$NOTES" 2>/dev/null || true
+}
+NOTES="$(mktemp)"
+trap 'restore' ERR INT TERM
+
+echo "$VER" > VERSION
+
+for app in $BUILD; do
+  if [ ! -f "$app/app.conf" ]; then
+    echo "symrelease: $app/app.conf does not exist (BUILD in release.conf)" >&2
+    restore; exit 64
+  fi
+  if grep -qE '^VERSION=' "$app/app.conf"; then
+    # `sed -i` on the existing line rather than appending: app.conf is sourced, so a second
+    # VERSION= would silently win over the first and the file would document a lie.
+    sed -i -E "s/^VERSION=.*/VERSION=$VER_COMMAS/" "$app/app.conf"
+  else
+    printf '\n# Written by tools/symrelease. The tag and this line are one number.\nVERSION=%s\n' \
+      "$VER_COMMAS" >> "$app/app.conf"
+  fi
+  echo "    $app/app.conf  VERSION=$VER_COMMAS"
+done
+
+# ------------------------------------------------------------------------------------- the build
+
+for app in $BUILD; do
+  echo "--> building $app"
+  if ! "$SDK/tools/symbuild" "$app" >/dev/null 2>&1; then
+    echo "symrelease: $app failed to build" >&2
+    "$SDK/tools/symbuild" "$app" 2>&1 | tail -20 >&2
+    restore; exit 70
+  fi
+done
+
+for f in $SHIP; do
+  if [ ! -f "$f" ]; then
+    echo "symrelease: $f was not produced (SHIP in release.conf)" >&2
+    restore; exit 70
+  fi
+  echo "    ship $f ($(stat -c%s "$f") bytes)"
+done
+
+# --------------------------------------------------------------------------------- the changelog
+#
+# The subjects since the last tag, then a human. The commit messages in these repositories are
+# whole sentences about why a change was made, so the draft is usually readable as it stands —
+# but "usually" is not "always", and a release note is read by somebody who was not here.
+
+PREV="$(git describe --tags --abbrev=0 2>/dev/null || true)"
+if [ -n "$PREV" ]; then
+  RANGE="$PREV..HEAD"
+  SINCE="since $PREV"
+else
+  RANGE="HEAD"
+  SINCE="the first release; every commit so far"
+fi
+
+{
+  echo "## $TAG — $(date +%Y-%m-%d)"
+  echo
+  git log --no-merges --format='- %s' "$RANGE"
+  echo
+  echo "# ---------------------------------------------------------------------------"
+  echo "# $SINCE."
+  echo "#"
+  echo "# Lines starting with # are stripped. This becomes both the CHANGELOG.md entry"
+  echo "# and the body of the GitHub release."
+  echo "#"
+  echo "# Save an empty file to cancel the release; nothing has been committed, tagged"
+  echo "# or published yet, and the version numbers will be put back."
+} > "$NOTES"
+
+"${EDITOR:-vi}" "$NOTES"
+
+# Strip the instructions and anything else the editor was told to ignore.
+grep -v '^#' "$NOTES" | sed -e :a -e '/^\n*$/{$d;N;};/\n$/ba' > "$NOTES.body"
+mv "$NOTES.body" "$NOTES"
+
+if [ ! -s "$NOTES" ]; then
+  echo "symrelease: empty notes — cancelled, nothing published."
+  restore
+  exit 0
+fi
+
+# Newest first, so the top of the file is the current version.
+if [ -f CHANGELOG.md ]; then
+  { cat "$NOTES"; echo; cat CHANGELOG.md; } > CHANGELOG.md.new
+else
+  { echo "# Changelog"; echo; cat "$NOTES"; } > CHANGELOG.md.new
+fi
+mv CHANGELOG.md.new CHANGELOG.md
+
+if [ "$DRY" = 1 ]; then
+  echo "==> --dry-run: every gate passed and everything built. Putting the tree back."
+  restore
+  exit 0
+fi
+
+# ----------------------------------------------------------------------- commit, tag, and publish
+
+git add VERSION CHANGELOG.md
+for app in $BUILD; do git add "$app/app.conf"; done
+git commit -q -m "$TAG"
+git tag -a "$TAG" -F "$NOTES"
+
+# The tag before the release: `gh release create` on a tag the remote does not have creates the
+# tag itself, from whatever the default branch happens to point at — which is not necessarily
+# what was just built.
+git push -q origin HEAD
+git push -q origin "$TAG"
+
+# shellcheck disable=SC2086
+gh release create "$TAG" $SHIP \
+  --repo "$OWNER/$REPO" \
+  --title "$REPO $TAG" \
+  --notes-file "$NOTES"
+
+rm -f "$NOTES"
+trap - ERR INT TERM
+
+echo "==> https://github.com/$OWNER/$REPO/releases/tag/$TAG"
