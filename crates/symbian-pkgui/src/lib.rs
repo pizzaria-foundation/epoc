@@ -61,13 +61,18 @@ use symbian_ui::{
     SheetAction, SheetRow, Softkey, Tabs, TextAnswer, TextPrompt, Theme, Tone, Uniform,
 };
 
-const TABS: [&str; 4] = ["Installed", "Available", "Repos", "Downloads"];
-const TAB_INSTALLED: usize = 0;
-const TAB_AVAILABLE: usize = 1;
-const TAB_REPOS: usize = 2;
+/// Three, and it was four.
+///
+/// `Installed` and `Available` were the same subject split by a property of the package rather than
+/// by a question the user has — and the split made "is this an update or a new install?" something
+/// you answered by noticing which tab you were on. One list, one row per package, with the answer on
+/// the row. See [`PkgRow`].
+const TABS: [&str; 3] = ["Packages", "Repos", "Downloads"];
+const TAB_PACKAGES: usize = 0;
+const TAB_REPOS: usize = 1;
 /// Named for the tests and for the `_` arm's reader; the routing reaches it by fallthrough.
 #[allow(dead_code)]
-const TAB_DOWNLOADS: usize = 3;
+const TAB_DOWNLOADS: usize = 2;
 
 /// What the screen is asking the application to do.
 ///
@@ -129,6 +134,83 @@ enum Item {
 }
 
 /// One line, whichever section it is in.
+/// One package, whatever we know about it, from wherever we know it.
+///
+/// # Why this type exists
+///
+/// The screen used to have an Installed tab reading `pkgs.pkgs` and an Available tab reading
+/// `cat.entries` and then `cands` — three collections, and a row was an index into whichever one the
+/// active tab implied. That made "is this an update or a new install?" a question you answered by
+/// noticing which tab you were on, and it put the same package on two screens without either saying
+/// so.
+///
+/// A row is now a *join by UID3* over all three, built once. What was two tabs is one list where
+/// every package appears exactly once, carrying both halves of its own story: what is installed, and
+/// what is on offer.
+struct PkgRow {
+    uid3: u32,
+    name: String,
+    /// The version on the handset, or `None` for a package that is only on offer — and also for one
+    /// that is installed but whose version nobody witnessed. Those two are different states and the
+    /// row tells them apart by whether `installed_row` is set.
+    installed: Option<Version>,
+    /// Whether this package has a row in the database at all.
+    managed: bool,
+    pinned: bool,
+    is_self: bool,
+    /// What can be done and where the bytes are, or `None` when there is nothing on offer.
+    offer: Option<(Offer, Source)>,
+}
+
+/// Where an offer's bytes are, as an index into the collection that holds them.
+///
+/// An index rather than a clone, because `PkgRequest` is already expressed in those terms — the
+/// application takes `Install(i)` and `Download(entry)` — and translating twice is how the two
+/// drift apart.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+enum Source {
+    /// A file already on the handset: `_app_install`, or one this app downloaded. Index into `cands`.
+    Local(usize),
+    /// A repository's catalogue. Index into `cat.entries`. Needs downloading before installing.
+    Remote(usize),
+}
+
+impl PkgRow {
+    /// How urgently this row wants attention, lowest first. The sort key's first half.
+    ///
+    /// The order is the question a person opens this screen to ask: *what do I need to do?* An
+    /// update is the only thing that is both actionable and about something already relied on, so it
+    /// goes first. A rebuild is the same version with different bytes — actionable, but only during
+    /// development. `Unknown` is the honest "cannot tell", and it is above `ok` because it is a
+    /// question rather than an answer.
+    fn urgency(&self) -> u8 {
+        match self.offer.map(|(o, _)| o) {
+            Some(Offer::Upgrade) => 0,
+            Some(Offer::New) => 1,
+            Some(Offer::Rebuild) => 2,
+            Some(Offer::Unknown) => 3,
+            _ => 4,
+        }
+    }
+
+    /// The word on the chip, and how loud it is.
+    fn marker(&self) -> (&'static str, Tone) {
+        if self.is_self {
+            return ("self", Tone::Calm);
+        }
+        if self.pinned {
+            return ("pinned", Tone::Calm);
+        }
+        match self.offer.map(|(o, _)| o) {
+            Some(Offer::Upgrade) => ("update", Tone::Fresh),
+            Some(Offer::New) => ("new", Tone::Fresh),
+            Some(Offer::Rebuild) => ("rebuild", Tone::Warn),
+            Some(Offer::Unknown) => ("?", Tone::Warn),
+            _ => ("ok", Tone::Calm),
+        }
+    }
+}
+
 struct Line {
     text: String,
     /// The chip on the right, when the row has a state worth seeing rather than reading.
@@ -231,75 +313,195 @@ impl PkgScreen {
 
     // ------------------------------------------------------------------ rows
 
-    /// The installed packages we manage.
-    fn installed_lines(&self) -> Vec<Line> {
-        self.pkgs
+    /// Every package this handset knows about, once each, sorted by what it wants from you.
+    ///
+    /// The join is by UID3 and the order of the three passes is the precedence: what is *installed*
+    /// establishes the row, what is *local* claims the offer, and the catalogue fills in only what
+    /// neither of those had. Preferring a local file over a catalogue entry is not a new rule — it
+    /// is what `install_request` already did, moved to where the row is built so the row and the
+    /// request cannot disagree about which copy they mean.
+    fn rows(&self) -> Vec<PkgRow> {
+        let mut out: Vec<PkgRow> = self
+            .pkgs
             .pkgs
             .iter()
-            .map(|p| {
-                let have = match p.installed {
-                    Some(v) => format!("{v}"),
-                    None => String::from("\u{2014}"),
-                };
-                let (word, tone) = if p.is_self() {
-                    ("self", Tone::Calm)
-                } else if p.pinned {
-                    ("pinned", Tone::Calm)
-                } else {
-                    match self.pkgs.offer_for(p.uid3, &self.cands).map(|(o, _)| o) {
-                        Some(Offer::Upgrade) => ("update", Tone::Fresh),
-                        Some(Offer::Rebuild) => ("rebuild", Tone::Warn),
-                        Some(Offer::Unknown) => ("?", Tone::Warn),
-                        Some(_) | None => ("ok", Tone::Calm),
-                    }
-                };
-                Line {
-                    text: format!("{}  {}", p.name, have),
-                    chip: Some((String::from(word), tone)),
-                    meter: None,
-                    detail: String::new(),
+            .map(|p| PkgRow {
+                uid3: p.uid3,
+                name: p.name.clone(),
+                installed: p.installed,
+                managed: true,
+                pinned: p.pinned,
+                is_self: p.is_self(),
+                // `offer_for` already refuses a pinned package and this one, so the marker and the
+                // menu agree without either restating the rule.
+                offer: self
+                    .pkgs
+                    .offer_for(p.uid3, &self.cands)
+                    .and_then(|(o, c)| {
+                        self.cands.iter().position(|x| x.file == c.file).map(|i| (o, Source::Local(i)))
+                    }),
+            })
+            .collect();
+
+        // A local file for something not in the database at all: a new install, and the row it needs
+        // does not exist yet.
+        for (i, c) in self.cands.iter().enumerate() {
+            if out.iter().any(|r| r.uid3 == c.uid3) {
+                continue;
+            }
+            out.push(PkgRow {
+                uid3: c.uid3,
+                name: c.name.clone(),
+                installed: None,
+                managed: false,
+                pinned: false,
+                is_self: false,
+                offer: Some((Offer::New, Source::Local(i))),
+            });
+        }
+
+        // And the catalogue, last, for a package with no copy on the handset. A row that already has
+        // a local offer keeps it: bytes here beat bytes to fetch.
+        //
+        // # Why this one join is by name, and where it stops working
+        //
+        // Because a catalogue entry has no UID3 to join on. `symbian_bootcfg::github` says why in
+        // its own words — *"identity comes from inside the .sis rather than from anything the
+        // service says"* — so a release asset is a name, a size and a URL until its bytes arrive.
+        //
+        // Names usually agree: a package adopted through `start_install` is named from the `.sis`
+        // itself, and that is the same string the release asset carries. They disagree when a row
+        // was adopted from a *stamp* instead, because `load_pkgs` names those from the AppArc
+        // caption — so `Calendário` in the database against `cal` in the catalogue, for one package.
+        //
+        // When that happens the screen shows two rows, and that is the honest outcome rather than a
+        // defect to paper over: we do not know they are the same thing, and guessing from a prefix
+        // would eventually merge two packages that are not. The second row says where it came from,
+        // and installing it resolves the question the only way it can be resolved — by reading the
+        // UID3 out of the bytes.
+        for (i, e) in self.cat.entries.iter().enumerate() {
+            // Case-insensitively, and that is not fussiness. A catalogue entry's name comes from a
+            // release asset (`launcher.sisx`) and an installed row's comes from inside the package,
+            // and the two agreeing on capitalisation is a coincidence rather than a rule. Matching
+            // exactly put the same package on two rows, one saying `update` and one saying `new` —
+            // the exact failure a join by key has, found by looking at the render.
+            match out.iter_mut().find(|r| r.name.eq_ignore_ascii_case(&e.name)) {
+                Some(r) if r.offer.is_none() && !r.pinned && !r.is_self => {
+                    // The catalogue's version against what is installed, which is the only
+                    // comparison available here — a catalogue entry carries no digest.
+                    let o = match r.installed {
+                        Some(v) if e.version > v => Offer::Upgrade,
+                        Some(_) => continue,
+                        None => Offer::New,
+                    };
+                    r.offer = Some((o, Source::Remote(i)));
                 }
+                Some(_) => {}
+                None => out.push(PkgRow {
+                    uid3: 0,
+                    name: e.name.clone(),
+                    installed: None,
+                    managed: false,
+                    pinned: false,
+                    is_self: false,
+                    offer: Some((Offer::New, Source::Remote(i))),
+                }),
+            }
+        }
+
+        // Urgency, then name. Stable within a group, so nothing dances between two openings that
+        // found the same thing.
+        out.sort_by(|a, b| a.urgency().cmp(&b.urgency()).then_with(|| a.name.cmp(&b.name)));
+        out
+    }
+
+    /// One row per package, the join in [`Self::rows`] turned into what the list draws.
+    ///
+    /// The second line is only there when there is something to say about where an offer comes from,
+    /// which is what keeps the list dense. The handset made that point once already:
+    ///
+    /// > *"the listing is spaced out"*. Installed rows carry no second line, so a third of the
+    /// > screen was blank and four items fitted where eight do.
+    fn package_lines(&self) -> Vec<Line> {
+        self.rows()
+            .into_iter()
+            .map(|r| {
+                let (word, tone) = r.marker();
+                let have = match r.installed {
+                    Some(v) => format!("{v}"),
+                    // Two different silences, told apart. A package only on offer has no installed
+                    // version because it is not installed; a managed one has none because nobody
+                    // witnessed it, and saying "unknown" is the honest half of that.
+                    None if r.managed => String::from("unknown"),
+                    None => String::new(),
+                };
+                let want = match r.offer {
+                    Some((_, Source::Local(i))) => self.cands.get(i).map(|c| c.version),
+                    Some((_, Source::Remote(i))) => self.cat.entries.get(i).map(|e| e.version),
+                    None => None,
+                };
+                let text = match (have.is_empty(), want) {
+                    // Installed and on offer: both numbers, because the gap is the reason to act.
+                    (false, Some(v)) if Some(v) != r.installed => {
+                        // `>` and not `\u{2192}`: the arrow glyph is **absent from this
+                        // handset's atlases**, and a missing glyph draws nothing at all — which is
+                        // how the boot manager's move-mode arrows turned out to be invisible. The
+                        // render is the only thing that says so, and it said so here too.
+                        format!("{}  {} > {}", r.name, have, v)
+                    }
+                    (false, _) => format!("{}  {}", r.name, have),
+                    (true, Some(v)) => format!("{}  {}", r.name, v),
+                    (true, None) => r.name.clone(),
+                };
+                // A download already in flight outranks whatever the offer was: "queued" is
+                // something happening now, and the chip is where states go. Saying `new` beside a
+                // row that is already being fetched invites pressing it again.
+                let chip = if self.is_queued(&r) {
+                    (String::from("queued"), Tone::Busy)
+                } else {
+                    (String::from(word), tone)
+                };
+                Line { text, chip: Some(chip), meter: None, detail: self.source_note(&r) }
             })
             .collect()
     }
 
-    /// Everything on offer: the repositories' catalogue, then what is already on disk.
-    ///
-    /// Both in one list because "where did this come from" is a property of a row and not a reason to
-    /// make somebody look in two places. The chip says which.
-    fn available_lines(&self) -> Vec<Line> {
-        let mut out = Vec::new();
-        for e in &self.cat.entries {
-            let from = self
-                .repos
-                .get(e.repo_id)
-                .map(|r| r.label())
-                .unwrap_or_else(|| String::from("a repository"));
-            let queued = self
-                .queue
-                .jobs
-                .iter()
-                .any(|j| j.state.pending() && j.url == e.url);
-            out.push(Line {
-                text: format!("{}  {}", e.name, e.version),
-                chip: Some(if queued {
-                    (String::from("queued"), Tone::Busy)
-                } else {
-                    (String::from("get"), Tone::Fresh)
-                }),
-                meter: None,
-                detail: format!("{}  \u{00b7} {} KB", from, e.size.div_ceil(1024)),
-            });
+    /// Whether this row's offer is already being fetched.
+    fn is_queued(&self, r: &PkgRow) -> bool {
+        match r.offer {
+            Some((_, Source::Remote(i))) => match self.cat.entries.get(i) {
+                Some(e) => self.queue.jobs.iter().any(|j| j.state.pending() && j.url == e.url),
+                None => false,
+            },
+            // A local file is not queued: it is already here, which is the whole difference.
+            _ => false,
         }
-        for c in &self.cands {
-            out.push(Line {
-                text: format!("{}  {}", c.name, c.version),
-                chip: Some((String::from("on disk"), Tone::Calm)),
-                meter: None,
-                detail: format!("{}  \u{00b7} {} KB", c.file, c.size.div_ceil(1024)),
-            });
+    }
+
+    /// Where an offer's bytes are, in a person's terms. Empty when there is no offer, which is what
+    /// collapses the row to one line.
+    fn source_note(&self, r: &PkgRow) -> String {
+        match r.offer {
+            Some((_, Source::Local(i))) => match self.cands.get(i) {
+                Some(c) => format!("local \u{00b7} {} KB", c.size.div_ceil(1024)),
+                None => String::new(),
+            },
+            Some((_, Source::Remote(i))) => match self.cat.entries.get(i) {
+                Some(e) => {
+                    let from = self
+                        .repos
+                        .get(e.repo_id)
+                        .map(|x| x.label())
+                        .unwrap_or_else(|| String::from("a repository"));
+                    let queued =
+                        self.queue.jobs.iter().any(|j| j.state.pending() && j.url == e.url);
+                    let what = if queued { "queued" } else { &from };
+                    format!("{}  \u{00b7} {} KB", what, e.size.div_ceil(1024))
+                }
+                None => String::new(),
+            },
+            None => String::new(),
         }
-        out
     }
 
     fn repo_lines(&self) -> Vec<Line> {
@@ -367,8 +569,7 @@ impl PkgScreen {
 
     fn lines(&self) -> Vec<Line> {
         match self.section() {
-            TAB_INSTALLED => self.installed_lines(),
-            TAB_AVAILABLE => self.available_lines(),
+            TAB_PACKAGES => self.package_lines(),
             TAB_REPOS => self.repo_lines(),
             _ => self.download_lines(),
         }
@@ -402,9 +603,8 @@ impl PkgScreen {
 
     fn empty_text(&self) -> &'static str {
         match self.section() {
-            TAB_INSTALLED => "Nothing managed yet. A package appears here once it has run.",
-            TAB_AVAILABLE => {
-                "Nothing on offer. Add a repository, or copy a .sis into _app_install."
+            TAB_PACKAGES => {
+                "Nothing here yet. Add a repository, or copy a .sis into _app_install."
             }
             TAB_REPOS => "No repositories. Options \u{2192} Add repository.",
             _ => "Nothing downloading.",
@@ -419,7 +619,14 @@ impl PkgScreen {
     /// with a name.
     fn open_sheet(&mut self) {
         let i = self.list.selected;
-        let Some(p) = self.pkgs.pkgs.get(i) else {
+        // Through the row, not into the database by list index. The list is a *sorted join* now, so
+        // row 3 is whatever sorted third — and indexing `pkgs.pkgs[3]` would open the sheet on a
+        // different package than the one under the cursor. That is the failure this shape has, and
+        // it is silent: both are packages, and both draw.
+        let Some(uid) = self.rows().get(i).map(|r| r.uid3) else {
+            return;
+        };
+        let Some(p) = self.pkgs.get(uid) else {
             return;
         };
         let offer = self.pkgs.offer_for(p.uid3, &self.cands);
@@ -538,20 +745,32 @@ impl PkgScreen {
     fn open_menu(&mut self) {
         let mut m = Menu::new();
         match self.section() {
-            TAB_INSTALLED => {
-                m = m.item("Details\u{2026}", Item::Details);
-                if let Some(p) = self.pkgs.pkgs.get(self.list.selected) {
-                    if !p.is_self() {
-                        if self.pkgs.offer_for(p.uid3, &self.cands).is_some() {
-                            m = m.item("Install\u{2026}", Item::Install);
+            TAB_PACKAGES => {
+                // One list, so the menu is built from what the *row* is rather than from which tab
+                // it was on. A row with an offer can be acted on; a row with a database entry can be
+                // held and configured; a row with both offers everything.
+                if let Some(r) = self.rows().get(self.list.selected) {
+                    if r.managed {
+                        m = m.item("Details\u{2026}", Item::Details);
+                    }
+                    if !r.is_self {
+                        if let Some((_, src)) = r.offer {
+                            // "Get" fetches and "Install" uses bytes already here — the same
+                            // distinction the two tabs used to make by being two tabs.
+                            m = m.item(
+                                match src {
+                                    Source::Remote(_) => "Get",
+                                    Source::Local(_) => "Install\u{2026}",
+                                },
+                                Item::Install,
+                            );
                         }
-                        m = m.item(if p.pinned { "Release" } else { "Hold" }, Item::Pin);
-                        m = m.item("Reopen after install", Item::Reopen);
+                        if r.managed {
+                            m = m.item(if r.pinned { "Release" } else { "Hold" }, Item::Pin);
+                            m = m.item("Reopen after install", Item::Reopen);
+                        }
                     }
                 }
-            }
-            TAB_AVAILABLE => {
-                m = m.item("Get", Item::Install);
             }
             TAB_REPOS => {
                 m = m.item("Add repository\u{2026}", Item::AddRepo);
@@ -584,12 +803,10 @@ impl PkgScreen {
                 None
             }
             Item::Install => self.install_request(i),
-            Item::Pin => self.pkgs.pkgs.get(i).map(|p| PkgRequest::TogglePin(p.uid3)),
-            Item::Reopen => self
-                .pkgs
-                .pkgs
-                .get(i)
-                .map(|p| PkgRequest::StepReopen(p.uid3)),
+            // Same reason as `open_sheet`: the index is into the sorted list, so the identity has
+            // to come from the row rather than from the database's own order.
+            Item::Pin => self.rows().get(i).map(|r| PkgRequest::TogglePin(r.uid3)),
+            Item::Reopen => self.rows().get(i).map(|r| PkgRequest::StepReopen(r.uid3)),
             Item::AddRepo => {
                 self.prompt = Some(
                     TextPrompt::new("Add repository", "owner/repo")
@@ -614,34 +831,18 @@ impl PkgScreen {
     ///
     /// A catalogue row has to be fetched first; a row already on disk is handed straight to the
     /// installer. Same word to the user, because from their side it is the same intention.
+    ///
+    /// This used to branch on the tab and re-derive which copy to use, which meant the rule
+    /// "prefer what is on disk" lived here *and* in the row's own construction. It lives in
+    /// [`Self::rows`] now: the row already decided, and this reads what it decided — so a row that
+    /// says `update` from a local file cannot hand the installer the catalogue's copy.
     fn install_request(&self, i: usize) -> Option<PkgRequest> {
-        match self.section() {
-            TAB_AVAILABLE => {
-                let n = self.cat.entries.len();
-                if i < n {
-                    Some(PkgRequest::Download(self.cat.entries[i].clone()))
-                } else {
-                    Some(PkgRequest::Install(i - n))
-                }
-            }
-            TAB_INSTALLED => {
-                let uid = self.pkgs.pkgs.get(i)?.uid3;
-                let (_, cand) = self.pkgs.offer_for(uid, &self.cands)?;
-                // Prefer what is already on disk; otherwise ask for the catalogue's copy.
-                self.cands
-                    .iter()
-                    .position(|c| c.file == cand.file)
-                    .map(PkgRequest::Install)
-                    .or_else(|| {
-                        self.cat
-                            .entries
-                            .iter()
-                            .find(|e| e.name == cand.name)
-                            .cloned()
-                            .map(PkgRequest::Download)
-                    })
-            }
-            _ => None,
+        if self.section() != TAB_PACKAGES {
+            return None;
+        }
+        match self.rows().get(i)?.offer? {
+            (_, Source::Local(n)) => Some(PkgRequest::Install(n)),
+            (_, Source::Remote(n)) => self.cat.entries.get(n).cloned().map(PkgRequest::Download),
         }
     }
 
@@ -709,8 +910,15 @@ impl PkgScreen {
             }
             Key::Select => {
                 match self.section() {
-                    TAB_INSTALLED => self.open_sheet(),
-                    TAB_AVAILABLE => self.request = self.install_request(self.list.selected),
+                    // Select opens the detail sheet for a package we know about, and acts for one
+                    // we only have on offer. That is not a compromise between the two old tabs: the
+                    // sheet is where a managed package's whole state is, and a row with nothing
+                    // installed has no state to show — only an intention.
+                    TAB_PACKAGES => match self.rows().get(self.list.selected) {
+                        Some(r) if r.managed => self.open_sheet(),
+                        Some(_) => self.request = self.install_request(self.list.selected),
+                        None => {}
+                    },
                     TAB_REPOS => {
                         self.request = self
                             .repos
@@ -1120,6 +1328,12 @@ mod tests {
         l.installed = Some(Version::new(0, 1, 0));
         l.stamps = true;
         d.ensure(l);
+        // A second package, installed and with nothing on offer. It is here because the join is the
+        // thing under test: with one row every merge succeeds trivially, and a list of one cannot
+        // show that the two halves ended up on the *same* row rather than simply on the only one.
+        let mut q = ManagedPkg::new(0xE0AA_0099, "Quiet".to_string());
+        q.installed = Some(Version::new(1, 0, 0));
+        d.ensure(q);
         d
     }
 
@@ -1232,49 +1446,63 @@ mod tests {
     fn each_section_keeps_its_own_cursor() {
         // One shared cursor would put somebody on row 7 of a list with two rows.
         let mut s = screen();
-        to_tab(&mut s, TAB_AVAILABLE);
         press(&mut s, Key::Down);
         assert_eq!(s.list.selected, 1);
-        press(&mut s, Key::Left);
-        assert_eq!(s.list.selected, 0, "Installed has its own place");
         press(&mut s, Key::Right);
-        assert_eq!(s.list.selected, 1, "and Available kept its own");
+        assert_eq!(s.list.selected, 0, "Repos has its own place");
+        press(&mut s, Key::Left);
+        assert_eq!(s.list.selected, 1, "and Packages kept its own");
     }
 
     #[test]
-    fn an_installed_row_says_what_is_on_offer_as_a_chip() {
+    fn a_package_appears_once_carrying_both_halves_of_its_story() {
+        // The whole point of the join. The fixture has Launcher installed *and* on offer from two
+        // places; it used to be one row on Installed and another on Available, saying nothing about
+        // being the same thing.
         let s = screen();
-        let lines = s.installed_lines();
-        assert_eq!(lines.len(), 1);
-        assert!(lines[0].text.starts_with("Launcher"));
-        assert_eq!(lines[0].chip.as_ref().unwrap().0, "update");
-        assert_eq!(lines[0].chip.as_ref().unwrap().1, Tone::Fresh);
+        let rows = s.rows();
+        assert_eq!(
+            rows.iter().filter(|r| r.name.starts_with("Launcher")).count(),
+            1,
+            "one row per package, not one per source"
+        );
+        let r = &rows[0];
+        assert!(r.managed, "it is installed");
+        assert!(r.offer.is_some(), "and there is something to do about it");
+        assert_eq!(r.marker().0, "update");
     }
 
     #[test]
-    fn available_lists_the_catalogue_and_the_disk_together_and_says_which() {
-        // "Where did this come from" is a property of a row, not a reason to look in two places.
-        let mut s = screen();
-        to_tab(&mut s, TAB_AVAILABLE);
-        let lines = s.available_lines();
-        assert_eq!(lines.len(), 2);
-        assert_eq!(lines[0].chip.as_ref().unwrap().0, "get");
-        assert!(lines[0].detail.contains("pizzaria-foundation/home"));
-        assert_eq!(lines[1].chip.as_ref().unwrap().0, "on disk");
-        assert!(lines[1].detail.contains("launcher-0.2.0.sisx"));
+    fn a_row_shows_where_the_bytes_are_and_prefers_the_disk() {
+        // Two offers for one package, and the rule is the one `install_request` always had: bytes
+        // here beat bytes to fetch. It lives on the row now, so the label and the action cannot
+        // disagree about which copy they mean.
+        let s = screen();
+        let lines = s.package_lines();
+        assert!(lines[0].detail.starts_with("local"), "detail said {:?}", lines[0].detail);
+        assert!(matches!(s.rows()[0].offer, Some((_, Source::Local(_)))));
     }
 
     #[test]
-    fn a_catalogue_row_asks_for_a_download_and_a_disk_row_asks_for_an_install() {
-        // Same word to the user, because from their side it is the same intention.
+    fn an_install_asks_for_the_copy_the_row_named() {
+        // Through the menu, because Select on a *managed* row opens the sheet — a package we know
+        // about has state worth showing before acting on it, and that was true before this change
+        // and stays true. Select acting directly is for a row that is only an offer.
         let mut s = screen();
-        to_tab(&mut s, TAB_AVAILABLE);
-        press(&mut s, Key::Select);
-        assert!(matches!(s.take_request(), Some(PkgRequest::Download(_))));
-
-        press(&mut s, Key::Down);
-        press(&mut s, Key::Select);
+        s.on_menu(Item::Install);
         assert_eq!(s.take_request(), Some(PkgRequest::Install(0)));
+    }
+
+    #[test]
+    fn the_list_answers_what_needs_doing_before_what_does_not() {
+        // Urgency then name. A screen you open to ask "what should I do" should not need scrolling
+        // to answer, and alphabetical alone buries an update under four packages that are fine.
+        let s = screen();
+        let rows = s.rows();
+        let urgencies: alloc::vec::Vec<u8> = rows.iter().map(|r| r.urgency()).collect();
+        let mut sorted = urgencies.clone();
+        sorted.sort_unstable();
+        assert_eq!(urgencies, sorted, "rows are not in urgency order");
     }
 
     #[test]
@@ -1287,9 +1515,10 @@ mod tests {
             "launcher.sisx".to_string(),
             330_000,
         ));
-        let mut s = PkgScreen::new(pkgs(), vec![], cat(), repos(), q);
-        to_tab(&mut s, TAB_AVAILABLE);
-        assert_eq!(s.available_lines()[0].chip.as_ref().unwrap().0, "queued");
+        // No local candidate, so the only offer is the catalogue's — and it is already being
+        // fetched. The chip says what is happening rather than what could be.
+        let s = PkgScreen::new(pkgs(), vec![], cat(), repos(), q);
+        assert_eq!(s.package_lines()[0].chip.as_ref().unwrap().0, "queued");
     }
 
     #[test]
@@ -1502,12 +1731,11 @@ mod tests {
                 out
             };
             let mut s = screen();
-            for k in [
-                Key::Right,
-                Key::Right,
-                Key::Softkey(Softkey::Left),
-                Key::Select,
-            ] {
+            // To Repos by name rather than by counting Rights: it was two tabs away and is one now,
+            // and a test that walks a distance is a test that breaks when a tab is added or removed
+            // for reasons that have nothing to do with it.
+            to_tab(&mut s, TAB_REPOS);
+            for k in [Key::Softkey(Softkey::Left), Key::Select] {
                 s.handle_key(KeyEvent::new(k), theme, SCREEN);
             }
             assert!(

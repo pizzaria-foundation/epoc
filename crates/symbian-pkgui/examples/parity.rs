@@ -146,11 +146,9 @@ fn scenes() -> Vec<Scene> {
     };
     vec![
         // The four sections. Each builds its rows from a different model, so each is its own check.
-        dark("pkg-installed", Data::Full, &[]),
-        dark("pkg-installed-selected", Data::Full, &[Down, Down]),
-        dark("pkg-available", Data::Full, &[Right]),
-        dark("pkg-available-selected", Data::Full, &[Right, Down]),
-        dark("pkg-repos", Data::Full, &[Right, Right]),
+        dark("pkg-packages", Data::Full, &[]),
+        dark("pkg-packages-selected", Data::Full, &[Down, Down]),
+        dark("pkg-repos", Data::Full, &[Right]),
         dark(
             "pkg-repos-selected",
             Data::Full,
@@ -159,12 +157,12 @@ fn scenes() -> Vec<Scene> {
         // The meters. The running row is row 0, so `downloads` has the bar unselected and
         // `downloads-selected` has it on the band — where the imperative painter draws the bar and
         // its numbers in the *page's* colours, and the declared one has to do the same to match.
-        dark("pkg-downloads", Data::Full, &[Right, Right, Right, Down]),
-        dark("pkg-downloads-selected", Data::Full, &[Right, Right, Right]),
+        dark("pkg-downloads", Data::Full, &[Right, Right, Down]),
+        dark("pkg-downloads-selected", Data::Full, &[Right, Right]),
         dark(
             "pkg-downloads-unknown",
             Data::Unknown,
-            &[Right, Right, Right],
+            &[Right, Right],
         ),
         // A list longer than the viewport, with the cursor driven to the bottom of it: the scroll
         // offset is derived, and a partially visible row is clipped by the list rather than by the
@@ -177,24 +175,26 @@ fn scenes() -> Vec<Scene> {
             ],
         ),
         // The branch that draws no rows at all, in all four sections — four different sentences.
-        dark("pkg-empty-installed", Data::Nothing, &[]),
-        dark("pkg-empty-available", Data::Nothing, &[Right]),
-        dark("pkg-empty-repos", Data::Nothing, &[Right, Right]),
-        dark("pkg-empty-downloads", Data::Nothing, &[Right, Right, Right]),
+        // One list where there were two, so one empty scene where there were two — and the empty
+        // text changed with it, because "nothing managed yet" and "nothing on offer" were two
+        // halves of one sentence a person now reads once.
+        dark("pkg-empty-packages", Data::Nothing, &[]),
+        dark("pkg-empty-repos", Data::Nothing, &[Right]),
+        dark("pkg-empty-downloads", Data::Nothing, &[Right, Right]),
         // The overlays, over the rows they were opened from.
         dark("pkg-sheet", Data::Full, &[Select]),
-        dark("pkg-menu-installed", Data::Full, &[OPTIONS]),
+        dark("pkg-menu-packages", Data::Full, &[OPTIONS]),
         dark(
             "pkg-menu-downloads",
             Data::Full,
-            &[Right, Right, Right, OPTIONS],
+            &[Right, Right, OPTIONS],
         ),
-        dark("pkg-addrepo", Data::Full, &[Right, Right, OPTIONS, Select]),
+        dark("pkg-addrepo", Data::Full, &[Right, OPTIONS, Select]),
         // The light palette, where `dim` and the selection band are different colours from the dark
         // one's — which is where an ink chosen against the wrong ground shows.
-        light("pkg-installed-light", Data::Full, &[]),
-        light("pkg-installed-light-selected", Data::Full, &[Down]),
-        light("pkg-downloads-light", Data::Full, &[Right, Right, Right]),
+        light("pkg-packages-light", Data::Full, &[]),
+        light("pkg-packages-light-selected", Data::Full, &[Down]),
+        light("pkg-downloads-light", Data::Full, &[Right, Right]),
     ]
 }
 
@@ -241,9 +241,12 @@ fn the_declared_rows_are_the_rows_that_shipped() {
         scenes().len(),
         "a scene stopped being compared"
     );
+    // Eighteen, and it was twenty-one. Three went when Installed and Available became one list:
+    // there is no second tab to navigate to, no second empty state, and no second menu. The number
+    // is here so a scene cannot go quietly — which is exactly what it just caught.
     assert_eq!(
         p.checked(),
-        21,
+        18,
         "a scene was added or removed without the reader being told"
     );
     p.finish();

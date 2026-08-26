@@ -46,22 +46,18 @@ fn render(dark: &Theme<'_>, light: &Theme<'_>) {
 
 /// The states worth a picture. `Right` steps one tab along, so a scene says which section it wants by
 /// how many times it presses it.
-const SCENES: [(&str, &[Key]); 6] = [
-    ("pkg-installed", &[]),
-    ("pkg-available", &[Key::Right]),
-    ("pkg-repos", &[Key::Right, Key::Right]),
-    ("pkg-downloads", &[Key::Right, Key::Right, Key::Right]),
+const SCENES: [(&str, &[Key]); 5] = [
+    // One list where there were two: every package appears once, carrying what is installed and what
+    // is on offer on the same row.
+    ("pkg-packages", &[]),
+    ("pkg-repos", &[Key::Right]),
+    ("pkg-downloads", &[Key::Right, Key::Right]),
     // The sheet: the screen the row label used to try to be.
     ("pkg-sheet", &[Key::Select]),
     // The prompt that asks for a repository, over the list it was opened from.
     (
         "pkg-addrepo",
-        &[
-            Key::Right,
-            Key::Right,
-            Key::Softkey(symbian_ui::Softkey::Left),
-            Key::Select,
-        ],
+        &[Key::Right, Key::Softkey(symbian_ui::Softkey::Left), Key::Select],
     ),
 ];
 

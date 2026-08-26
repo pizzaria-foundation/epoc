@@ -182,6 +182,31 @@ pub mod atlas {
 /// This passes [`lang_pref::Choice::Follow`], which is what almost every application wants: the
 /// launcher's choice, or the phone's if there is none. An application with a language setting of its
 /// own calls [`lang_pref::load_system`] again with its own choice, after this has run.
+/// Record which version of this application is running, where the package manager can read it.
+///
+/// # Why every application, rather than the ones that opt in
+///
+/// It *was* opt-in — `symbian::pkg::stamp()`, called by whoever remembered — and exactly one
+/// application in seven remembered. The consequence was not a missing feature but a wrong one: the
+/// package database's `stamps` flag drove which *proof* an update is held to, so six applications
+/// were being proved by `Proof::Launch`, the weaker test that asks only whether the platform
+/// accepted a launch.
+///
+/// The thing being opted into is being *manageable*, and that is a property of every application
+/// installed from a package rather than a preference each author holds. So it happens here, once,
+/// for all of them.
+///
+/// # It fails quietly
+///
+/// A stamp that cannot be written costs automatic updates, not the application. `apps/launcher`
+/// said it first and it is right: nothing here is worth a word to the user, and a start-up that
+/// refused to continue over a bookkeeping file would be worse than the bookkeeping being absent.
+pub fn stamp_version() {
+    if let Err(e) = symbian::pkg::stamp() {
+        symbian::log!("version stamp err={e:?}");
+    }
+}
+
 pub fn adopt_language() {
     lang_pref::load_system(lang_pref::Choice::Follow);
 }
@@ -940,6 +965,9 @@ macro_rules! entry {
             // Before the constructor, not after: a constructor that builds a label would build it
             // in the wrong language and keep it. See `adopt_language`.
             $crate::adopt_language();
+            // And say which version this is, so the package manager has a witness that does not
+            // depend on a daemon having been awake. See `stamp_version`.
+            $crate::stamp_version();
             // SAFETY: called exactly once, from CShimAppUi::ConstructL, on the GUI thread.
             unsafe {
                 let mut app = $crate::__Box::new($ctor);
